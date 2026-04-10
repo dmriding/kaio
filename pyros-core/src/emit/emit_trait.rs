@@ -7,7 +7,7 @@
 use std::fmt;
 
 use super::writer::PtxWriter;
-use crate::instr::{ArithOp, ControlOp, MemoryOp};
+use crate::instr::{ControlOp, MemoryOp};
 use crate::ir::{PtxInstruction, PtxKernel, PtxModule};
 
 /// Trait for emitting PTX text from an IR node.
@@ -37,21 +37,20 @@ impl Emit for PtxKernel {
 }
 
 impl Emit for PtxInstruction {
-    fn emit(&self, _w: &mut PtxWriter) -> fmt::Result {
-        // Sprint 1.5: dispatch to variant-specific emission
-        Ok(())
+    fn emit(&self, w: &mut PtxWriter) -> fmt::Result {
+        match self {
+            PtxInstruction::Arith(op) => op.emit(w),
+            // uninhabited — Sprint 1.3/1.4 will add variants
+            PtxInstruction::Memory(op) => match *op {},
+            PtxInstruction::Control(op) => match *op {},
+            // Mov, Cvt, Label, Comment — Sprint 1.5
+            _ => Ok(()),
+        }
     }
 }
 
-// Uninhabited enums — exhaustive empty match, unreachable but compiles.
-// When Sprint 1.2/1.3/1.4 adds variants, these matches will break
-// (intentionally) and force the implementer to write real emission logic.
-
-impl Emit for ArithOp {
-    fn emit(&self, _w: &mut PtxWriter) -> fmt::Result {
-        match *self {}
-    }
-}
+// ArithOp Emit impl lives in instr/arith.rs (co-located with the type).
+// MemoryOp and ControlOp are still uninhabited — Sprint 1.3/1.4.
 
 impl Emit for MemoryOp {
     fn emit(&self, _w: &mut PtxWriter) -> fmt::Result {

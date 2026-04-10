@@ -110,7 +110,7 @@ pyros-core/src/
 **Files created:** 16
 **Files modified:** 1 (pyros-core/src/lib.rs)
 
-**Commit:** pending
+**Commit:** `b2dac92`
 
 ---
 
@@ -118,7 +118,52 @@ pyros-core/src/
 
 ### Plan
 
-_To be written at sprint start._
+Populate the `ArithOp` enum with the three arithmetic operations needed for
+`vector_add`: `Add`, `Mad`, and `MulWide`. Write real `Emit` impls and
+golden-string tests validated against nvcc 12.8 output.
+
+**Scope:**
+- `ArithOp::Add` — typed addition (`add.f32`, `add.s64`)
+- `ArithOp::Mad` — multiply-add with `MadMode::Lo` (`mad.lo.s32`)
+- `ArithOp::MulWide` — widening multiply (`mul.wide.u32`, 32→64 bit)
+- `MadMode` enum (only `Lo` for now; `Hi`/`Wide` deferred)
+- Real `Emit` impl for ArithOp (replaces uninhabited `match *self {}`)
+- `PtxInstruction::Arith` dispatch wired to `op.emit(w)`
+- `PtxInstruction::Memory`/`Control` switched to `match *op {}` (uninhabited)
+- 7 inline tests, 4 validated byte-for-byte against nvcc golden PTX
+
+**Key decisions:**
+- Source operands use `Operand` (not `Register`) to support immediates — nvcc emits `mul.wide.u32 %rd5, %r1, 4` where `4` is a literal
+- `MadMode` has only `Lo` — `Hi`/`Wide` are valid PTX but not needed for vector_add
+- ArithOp's Emit impl co-located in `instr/arith.rs` (next to the type), not in `emit_trait.rs`
+- `&dyn Display` coercion works without explicit casts for heterogeneous `&Register`/`&Operand` slices
+
+**Deferred:** Sub, Mul, Div, Rem, Fma, Neg, Abs, Min, Max, rounding modes, saturate modifiers
+
+### Results
+
+**Completed as planned.** One minor fix during execution:
+
+- `ArithOp` import removed from `emit_trait.rs` — the Emit impl moved to `arith.rs` (co-located with the type), leaving a stale import that clippy would catch as `-D warnings`
+
+**Quality gates:**
+| Gate | Result |
+|---|---|
+| `cargo build -p pyros-core` | clean |
+| `cargo test -p pyros-core` | **27 passed** (20 existing + 7 new), 0 failed |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+
+**Test breakdown (new):**
+- instr/arith: 7 tests (emit_add_f32, emit_add_s64, emit_mad_lo_s32, emit_mul_wide_u32, emit_add_with_immediate, arith_via_ptx_instruction, mad_mode_ptx_str)
+
+**nvcc golden match (byte-for-byte):**
+- `add.f32 %f3, %f2, %f1;` ✓
+- `add.s64 %rd6, %rd4, %rd5;` ✓
+- `mad.lo.s32 %r1, %r3, %r4, %r5;` ✓
+- `mul.wide.u32 %rd5, %r1, 4;` ✓
+
+**Files modified:** 3 (instr/arith.rs, instr/mod.rs, emit/emit_trait.rs)
 
 ---
 
