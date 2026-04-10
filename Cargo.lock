@@ -39,6 +39,10 @@ dependencies = [
 [[package]]
 name = "pyros"
 version = "0.0.2"
+dependencies = [
+ "pyros-core",
+ "pyros-runtime",
+]
 
 [[package]]
 name = "pyros-core"

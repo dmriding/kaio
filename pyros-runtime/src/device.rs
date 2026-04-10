@@ -68,7 +68,7 @@ impl PyrosDevice {
         &self.stream
     }
 
-    /// Load a PTX module from source text and return a [`PyrosModule`].
+    /// Load a PTX module from source text and return a [`crate::module::PyrosModule`].
     ///
     /// The PTX text is passed to the CUDA driver's `cuModuleLoadData` —
     /// no NVRTC compilation occurs. The driver JIT-compiles the PTX for

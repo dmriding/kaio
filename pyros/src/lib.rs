@@ -7,10 +7,21 @@
 //! to OpenAI's Triton, targeting Windows and Linux from day one, with
 //! compile-time PTX emission and Rust's type-safety guarantees.
 //!
-//! # Status
+//! ## Crates
 //!
-//! This release is a **name reservation**. No functional APIs are exposed yet.
-//! Active development is underway; track progress and design documents at
-//! <https://github.com/dmriding/pyros>.
+//! - [`pyros_core`] — PTX IR types, instruction emitters, PtxWriter
+//! - [`pyros_runtime`] — CUDA device management, buffers, PTX loading, kernel launch
+//!
+//! ## Status
+//!
+//! **Phase 1 complete.** The IR and runtime layers can construct, emit, load,
+//! and execute a `vector_add` kernel on a real GPU. The user-facing proc macro
+//! API (`#[gpu_kernel]`) is Phase 2.
 
 #![warn(missing_docs)]
+
+/// PTX code generation — IR types, instruction emitters, and PTX text emission.
+pub use pyros_core as core;
+
+/// CUDA runtime — device management, buffers, PTX loading, kernel launch.
+pub use pyros_runtime as runtime;

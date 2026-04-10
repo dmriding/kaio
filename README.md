@@ -29,18 +29,58 @@ Layer 1: PTX Codegen                   (instruction emission, IR)
 
 | Crate | Description |
 |-------|-------------|
-| `pyros` | Umbrella crate — re-exports everything |
+| `pyros` | Umbrella crate — re-exports `pyros-core` and `pyros-runtime` |
 | `pyros-core` | PTX IR types, instruction emitters, PtxWriter |
 | `pyros-runtime` | CUDA driver API wrapper, kernel launch, device memory |
 
 ## Current Status
 
-**Phase 1 — PTX Foundation** is in progress. Building the IR and runtime
-layers with one working end-to-end kernel (`vector_add`) as the milestone.
+**Phase 1 — PTX Foundation — complete.** The IR and runtime layers can
+construct, emit, load, and execute GPU kernels. The `vector_add` kernel
+runs on real hardware (RTX 4090, verified on both single-block and
+multi-block launches).
 
-See [docs/development/PHASE_1_LOG.md](docs/development/PHASE_1_LOG.md) for
-sprint-by-sprint progress, and [CHANGELOG.md](CHANGELOG.md) for release
-history.
+**Phase 2 — Proc Macro DSL** is next: `#[gpu_kernel]` attribute macro
+that transforms Rust function syntax into PTX. See
+[docs/phases.md](docs/phases.md) for the full roadmap.
+
+### Phase 1 Example (IR API)
+
+```rust
+use pyros_core::emit::{Emit, PtxWriter};
+use pyros_core::instr::{ArithOp, MadMode, special};
+use pyros_core::instr::control::{CmpOp, ControlOp};
+use pyros_core::instr::memory::MemoryOp;
+use pyros_core::ir::*;
+use pyros_core::types::PtxType;
+
+// Build a vector_add kernel via the IR API
+let mut alloc = RegisterAllocator::new();
+let mut kernel = PtxKernel::new("vector_add");
+kernel.add_param(PtxParam::pointer("a_ptr", PtxType::F32));
+kernel.add_param(PtxParam::pointer("b_ptr", PtxType::F32));
+kernel.add_param(PtxParam::pointer("c_ptr", PtxType::F32));
+kernel.add_param(PtxParam::scalar("n", PtxType::U32));
+
+// ... (build instructions using alloc + kernel.push()) ...
+
+// Emit to PTX text
+let mut module = PtxModule::new("sm_89");
+module.add_kernel(kernel);
+let mut w = PtxWriter::new();
+module.emit(&mut w).unwrap();
+let ptx_text = w.finish();
+
+// Load and run on GPU
+use pyros_runtime::{PyrosDevice, LaunchConfig};
+let device = PyrosDevice::new(0)?;
+let module = device.load_ptx(&ptx_text)?;
+let func = module.function("vector_add")?;
+// ... allocate buffers, launch kernel, read results ...
+```
+
+See [pyros-runtime/tests/vector_add_e2e.rs](pyros-runtime/tests/vector_add_e2e.rs)
+for the complete working example.
 
 ## Target Hardware
 
@@ -53,14 +93,16 @@ history.
 ```sh
 # Requires Rust 1.94+ (pinned via rust-toolchain.toml)
 cargo build --workspace
-cargo test --workspace
+cargo test --workspace           # host-only tests (no GPU required)
+cargo test -p pyros-runtime -- --ignored   # GPU tests (requires NVIDIA GPU)
 ```
 
-GPU-dependent tests are gated behind `#[ignore]` and require an NVIDIA GPU:
+## Development
 
-```sh
-cargo test --workspace -- --ignored
-```
+Sprint-by-sprint progress with full architectural decision records:
+- [Phase 1 Sprint Log](docs/development/PHASE_1_LOG.md)
+- [Sprint docs with reasoning traces](docs/development/sprints/)
+- [CHANGELOG](CHANGELOG.md)
 
 ## License
 
