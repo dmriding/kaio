@@ -7,7 +7,6 @@
 use std::fmt;
 
 use super::writer::PtxWriter;
-use crate::instr::ControlOp;
 use crate::ir::{PtxInstruction, PtxKernel, PtxModule};
 
 /// Trait for emitting PTX text from an IR node.
@@ -41,19 +40,14 @@ impl Emit for PtxInstruction {
         match self {
             PtxInstruction::Arith(op) => op.emit(w),
             PtxInstruction::Memory(op) => op.emit(w),
-            PtxInstruction::Control(op) => match *op {},
+            PtxInstruction::Control(op) => op.emit(w),
             // Mov, Cvt, Label, Comment — Sprint 1.5
             _ => Ok(()),
         }
     }
 }
 
-// ArithOp Emit impl lives in instr/arith.rs (co-located with the type).
-// MemoryOp Emit impl lives in instr/memory.rs (co-located with the type).
-// ControlOp is still uninhabited — Sprint 1.4.
-
-impl Emit for ControlOp {
-    fn emit(&self, _w: &mut PtxWriter) -> fmt::Result {
-        match *self {}
-    }
-}
+// All instruction-category Emit impls are co-located with their types:
+// - ArithOp  → instr/arith.rs
+// - MemoryOp → instr/memory.rs
+// - ControlOp → instr/control.rs

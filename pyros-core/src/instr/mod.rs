@@ -12,7 +12,8 @@
 pub mod arith;
 pub mod control;
 pub mod memory;
+pub mod special;
 
 pub use arith::{ArithOp, MadMode};
-pub use control::ControlOp;
+pub use control::{CmpOp, ControlOp};
 pub use memory::MemoryOp;
