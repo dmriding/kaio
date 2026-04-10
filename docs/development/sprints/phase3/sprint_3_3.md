@@ -1,6 +1,7 @@
 # Sprint 3.3 — Shared Memory in Macro DSL
 
 **Status:** Complete
+**Commit:** `218162d`
 **Date:** 2026-04-11
 **Depends on:** Sprint 3.1 (loops), Sprint 3.2 (kaio-core instructions)
 
