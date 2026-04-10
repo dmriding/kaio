@@ -149,8 +149,8 @@ KAIO_DUMP_PTX=1 cargo test             # dump generated PTX to disk
 
 Sprint-by-sprint progress with full architectural decision records:
 
-- [Phase 2 Sprint Log](docs/development/PHASE_2_LOG.md)
-- [Phase 1 Sprint Log](docs/development/PHASE_1_LOG.md)
+- [Phase 2 Sprint Log](docs/development/phase2/PHASE_2_LOG.md)
+- [Phase 1 Sprint Log](docs/development/phase1/PHASE_1_LOG.md)
 - [Sprint docs with reasoning traces](docs/development/sprints/)
 - [CHANGELOG](CHANGELOG.md)
 
