@@ -3,4 +3,5 @@
 //! Converts `syn` AST into kernel IR types.
 
 pub mod attrs;
+pub mod body;
 pub mod signature;

@@ -10,6 +10,7 @@
 #![warn(missing_docs)]
 
 mod kernel_ir;
+mod lower;
 mod parse;
 
 use proc_macro::TokenStream;

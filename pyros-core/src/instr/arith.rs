@@ -1,9 +1,10 @@
 //! Arithmetic PTX operations.
 //!
-//! Contains the minimum instruction set needed for `vector_add`:
-//! [`Add`](ArithOp::Add), [`Mad`](ArithOp::Mad), and
-//! [`MulWide`](ArithOp::MulWide). Additional arithmetic operations
-//! (Sub, Mul, Div, Fma, etc.) will be added when kernels need them.
+//! Phase 1 instructions: [`Add`](ArithOp::Add), [`Mad`](ArithOp::Mad),
+//! [`MulWide`](ArithOp::MulWide).
+//!
+//! Phase 2 (Sprint 2.2): [`Sub`](ArithOp::Sub), [`Mul`](ArithOp::Mul),
+//! [`Div`](ArithOp::Div), [`Rem`](ArithOp::Rem), [`Neg`](ArithOp::Neg).
 
 use std::fmt;
 
@@ -93,6 +94,79 @@ pub enum ArithOp {
         /// Input type (determines the `.wide` suffix).
         src_ty: PtxType,
     },
+    /// Typed subtraction: `sub{ty} dst, lhs, rhs;`
+    ///
+    /// Example: `sub.s32 %r0, %r1, %r2;`
+    Sub {
+        /// Destination register.
+        dst: Register,
+        /// Left-hand source operand.
+        lhs: Operand,
+        /// Right-hand source operand.
+        rhs: Operand,
+        /// PTX type suffix.
+        ty: PtxType,
+    },
+    /// Same-width multiply: `mul.lo{ty}` (integer) or `mul{ty}` (float).
+    ///
+    /// For integers, PTX requires `.lo` to select the low N bits of the
+    /// 2N-bit product. For floats, no mode is needed.
+    ///
+    /// Distinct from [`MulWide`](ArithOp::MulWide) which produces a
+    /// 2N-bit result from N-bit inputs (used for address calculation).
+    ///
+    /// Examples:
+    /// - `mul.lo.s32 %r0, %r1, %r2;` — integer multiply
+    /// - `mul.f32 %f0, %f1, %f2;` — float multiply
+    Mul {
+        /// Destination register (same width as inputs).
+        dst: Register,
+        /// Left-hand source operand.
+        lhs: Operand,
+        /// Right-hand source operand.
+        rhs: Operand,
+        /// PTX type suffix.
+        ty: PtxType,
+    },
+    /// Typed division: `div{ty} dst, lhs, rhs;`
+    ///
+    /// Example: `div.f32 %f0, %f1, %f2;`
+    Div {
+        /// Destination register.
+        dst: Register,
+        /// Left-hand source operand (dividend).
+        lhs: Operand,
+        /// Right-hand source operand (divisor).
+        rhs: Operand,
+        /// PTX type suffix.
+        ty: PtxType,
+    },
+    /// Integer remainder: `rem{ty} dst, lhs, rhs;`
+    ///
+    /// Only valid for integer types in PTX ISA (`.s32`, `.u32`, `.s64`, `.u64`).
+    ///
+    /// Example: `rem.u32 %r0, %r1, %r2;`
+    Rem {
+        /// Destination register.
+        dst: Register,
+        /// Left-hand source operand (dividend).
+        lhs: Operand,
+        /// Right-hand source operand (divisor).
+        rhs: Operand,
+        /// PTX type suffix (must be integer).
+        ty: PtxType,
+    },
+    /// Unary negation: `neg{ty} dst, src;`
+    ///
+    /// Example: `neg.f32 %f0, %f1;`
+    Neg {
+        /// Destination register.
+        dst: Register,
+        /// Source operand.
+        src: Operand,
+        /// PTX type suffix.
+        ty: PtxType,
+    },
 }
 
 impl Emit for ArithOp {
@@ -121,6 +195,31 @@ impl Emit for ArithOp {
             } => {
                 let mnemonic = format!("mul.wide{}", src_ty.ptx_suffix());
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Sub { dst, lhs, rhs, ty } => {
+                let mnemonic = format!("sub{}", ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Mul { dst, lhs, rhs, ty } => {
+                // Integer multiply needs .lo (low N bits of 2N product).
+                // Float multiply has no mode suffix.
+                let mnemonic = match ty {
+                    PtxType::F32 | PtxType::F64 => format!("mul{}", ty.ptx_suffix()),
+                    _ => format!("mul.lo{}", ty.ptx_suffix()),
+                };
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Div { dst, lhs, rhs, ty } => {
+                let mnemonic = format!("div{}", ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Rem { dst, lhs, rhs, ty } => {
+                let mnemonic = format!("rem{}", ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Neg { dst, src, ty } => {
+                let mnemonic = format!("neg{}", ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, src])
             }
         }
     }
@@ -239,5 +338,162 @@ mod tests {
     #[test]
     fn mad_mode_ptx_str() {
         assert_eq!(MadMode::Lo.ptx_str(), "lo");
+    }
+
+    // --- Sprint 2.2: Sub, Mul, Div, Rem, Neg ---
+
+    #[test]
+    fn emit_sub_s32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Sub {
+            dst: reg(RegKind::R, 0, PtxType::S32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::S32)),
+            rhs: Operand::Reg(reg(RegKind::R, 2, PtxType::S32)),
+            ty: PtxType::S32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    sub.s32 %r0, %r1, %r2;\n");
+    }
+
+    #[test]
+    fn emit_sub_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Sub {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            lhs: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+            rhs: Operand::Reg(reg(RegKind::F, 2, PtxType::F32)),
+            ty: PtxType::F32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    sub.f32 %f0, %f1, %f2;\n");
+    }
+
+    #[test]
+    fn emit_mul_lo_s32() {
+        // Integer multiply uses mul.lo (low 32 bits of 64-bit product)
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Mul {
+            dst: reg(RegKind::R, 0, PtxType::S32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::S32)),
+            rhs: Operand::Reg(reg(RegKind::R, 2, PtxType::S32)),
+            ty: PtxType::S32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    mul.lo.s32 %r0, %r1, %r2;\n");
+    }
+
+    #[test]
+    fn emit_mul_f32() {
+        // Float multiply has no .lo mode
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Mul {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            lhs: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+            rhs: Operand::Reg(reg(RegKind::F, 2, PtxType::F32)),
+            ty: PtxType::F32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    mul.f32 %f0, %f1, %f2;\n");
+    }
+
+    #[test]
+    fn emit_mul_lo_u32_with_immediate() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Mul {
+            dst: reg(RegKind::R, 0, PtxType::U32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::U32)),
+            rhs: Operand::ImmU32(3),
+            ty: PtxType::U32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    mul.lo.u32 %r0, %r1, 3;\n");
+    }
+
+    #[test]
+    fn emit_div_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Div {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            lhs: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+            rhs: Operand::Reg(reg(RegKind::F, 2, PtxType::F32)),
+            ty: PtxType::F32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    div.f32 %f0, %f1, %f2;\n");
+    }
+
+    #[test]
+    fn emit_div_s32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Div {
+            dst: reg(RegKind::R, 0, PtxType::S32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::S32)),
+            rhs: Operand::Reg(reg(RegKind::R, 2, PtxType::S32)),
+            ty: PtxType::S32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    div.s32 %r0, %r1, %r2;\n");
+    }
+
+    #[test]
+    fn emit_rem_u32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Rem {
+            dst: reg(RegKind::R, 0, PtxType::U32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::U32)),
+            rhs: Operand::Reg(reg(RegKind::R, 2, PtxType::U32)),
+            ty: PtxType::U32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    rem.u32 %r0, %r1, %r2;\n");
+    }
+
+    #[test]
+    fn emit_neg_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Neg {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            src: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+            ty: PtxType::F32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    neg.f32 %f0, %f1;\n");
+    }
+
+    #[test]
+    fn emit_neg_s32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Neg {
+            dst: reg(RegKind::R, 0, PtxType::S32),
+            src: Operand::Reg(reg(RegKind::R, 1, PtxType::S32)),
+            ty: PtxType::S32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    neg.s32 %r0, %r1;\n");
+    }
+
+    #[test]
+    fn sub_via_ptx_instruction() {
+        use crate::ir::PtxInstruction;
+        let mut w = PtxWriter::new();
+        w.indent();
+        let instr = PtxInstruction::Arith(ArithOp::Sub {
+            dst: reg(RegKind::R, 0, PtxType::S32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::S32)),
+            rhs: Operand::ImmI32(1),
+            ty: PtxType::S32,
+        });
+        instr.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    sub.s32 %r0, %r1, 1;\n");
     }
 }
