@@ -61,18 +61,26 @@ pub enum ControlOp {
         /// PTX type for the comparison.
         ty: PtxType,
     },
-    /// Predicated branch: `@{pred} bra {target};`
+    /// Predicated branch: `@{pred} bra {target};` or `@!{pred} bra {target};`
     ///
-    /// Branches to `target` label if `pred` is true. Uses `PtxWriter::line()`
-    /// instead of `instruction()` because the `@pred mnemonic target;` format
-    /// doesn't fit the comma-separated operand pattern.
+    /// Branches to `target` label if `pred` is true (or false when negated).
+    /// Uses `PtxWriter::line()` instead of `instruction()` because the
+    /// `@pred mnemonic target;` format doesn't fit the comma-separated
+    /// operand pattern.
     ///
-    /// Example: `@%p1 bra $L__BB0_2;`
+    /// Examples:
+    /// - `@%p1 bra $L__BB0_2;` — branch if pred is true
+    /// - `@!%p1 bra IF_END_0;` — branch if pred is false (Phase 2 if/else)
     BraPred {
         /// Predicate register to test.
         pred: Register,
         /// Label name to branch to.
         target: String,
+        /// When `true`, negate the predicate (`@!pred`). Deferred from
+        /// Sprint 1.4, needed for Phase 2 if/else lowering where `setp`
+        /// matches the source comparison and `@!pred bra` skips the
+        /// then-block when the condition is false.
+        negate: bool,
     },
     /// Unconditional branch: `bra {target};`
     ///
@@ -98,9 +106,13 @@ impl Emit for ControlOp {
                 let mnemonic = format!("setp.{}{}", cmp_op.ptx_str(), ty.ptx_suffix());
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
             }
-            ControlOp::BraPred { pred, target } => {
-                // @pred bra target; — doesn't fit instruction()'s comma-separated pattern
-                w.line(&format!("@{pred} bra {target};"))
+            ControlOp::BraPred {
+                pred,
+                target,
+                negate,
+            } => {
+                let neg = if *negate { "!" } else { "" };
+                w.line(&format!("@{neg}{pred} bra {target};"))
             }
             ControlOp::Bra { target } => w.instruction("bra", &[&target as &dyn fmt::Display]),
             ControlOp::Ret => w.instruction("ret", &[]),
@@ -148,9 +160,24 @@ mod tests {
         let op = ControlOp::BraPred {
             pred: reg(RegKind::P, 1, PtxType::Pred),
             target: "$L__BB0_2".to_string(),
+            negate: false,
         };
         op.emit(&mut w).unwrap();
         assert_eq!(w.finish(), "    @%p1 bra $L__BB0_2;\n");
+    }
+
+    #[test]
+    fn emit_bra_pred_negated() {
+        // Phase 2 if/else: @!%p1 bra IF_END_0 — skip then-block when false
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ControlOp::BraPred {
+            pred: reg(RegKind::P, 1, PtxType::Pred),
+            target: "IF_END_0".to_string(),
+            negate: true,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    @!%p1 bra IF_END_0;\n");
     }
 
     #[test]

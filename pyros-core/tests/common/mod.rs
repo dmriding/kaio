@@ -78,6 +78,7 @@ pub fn build_vector_add_ptx() -> String {
     kernel.push(PtxInstruction::Control(ControlOp::BraPred {
         pred: p_oob,
         target: "EXIT".to_string(),
+        negate: false,
     }));
 
     // a[idx]

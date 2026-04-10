@@ -2,6 +2,7 @@
 //! that construct `pyros-core` IR at runtime.
 
 pub mod arith;
+pub mod compare;
 
 use std::collections::HashMap;
 
@@ -10,6 +11,7 @@ use quote::{format_ident, quote};
 
 use crate::kernel_ir::KernelType;
 use crate::kernel_ir::expr::{KernelExpr, UnaryOpKind};
+use crate::kernel_ir::stmt::KernelStmt;
 
 /// Context threaded through all lowering functions.
 #[allow(dead_code)] // Used in Sprint 2.6 codegen; tested via lower/arith.rs and lower/mod.rs tests
@@ -17,8 +19,7 @@ pub struct LoweringContext {
     /// Monotonic counter for generating unique register variable names
     /// (`_pyros_r0`, `_pyros_r1`, ...) in the generated `build_ptx()` code.
     reg_counter: u32,
-    /// Counter for generating unique label names (Sprint 2.3+).
-    #[allow(dead_code)] // Used in Sprint 2.3 for if/else labels
+    /// Counter for generating unique label names (`IF_END_0`, `IF_ELSE_1`, ...).
     label_counter: u32,
     /// Variable-to-register mapping.
     /// Key: variable name, Value: (register Ident in generated code, type).
@@ -48,6 +49,13 @@ impl LoweringContext {
     /// for use in generated code (e.g., `F32`, `S32`, `U64`).
     pub fn ptx_type_tokens(&self, ty: &KernelType) -> Ident {
         Ident::new(ty.ptx_type_token(), Span::call_site())
+    }
+
+    /// Generate a unique label name (e.g., `"IF_END_0"`, `"IF_ELSE_3"`).
+    pub fn fresh_label(&mut self, prefix: &str) -> String {
+        let id = self.label_counter;
+        self.label_counter += 1;
+        format!("{prefix}_{id}")
     }
 }
 
@@ -167,10 +175,12 @@ pub fn lower_expr(
                 let combined = quote! { #lhs_tokens #rhs_tokens #op_tokens };
                 Ok((dst, lhs_ty, combined))
             } else if op.is_comparison() {
-                Err(syn::Error::new(
-                    *span,
-                    "comparison lowering not yet implemented (Sprint 2.3)",
-                ))
+                let (lhs_reg, lhs_ty, lhs_tokens) = lower_expr(ctx, lhs)?;
+                let (rhs_reg, _rhs_ty, rhs_tokens) = lower_expr(ctx, rhs)?;
+                let (pred, cmp_tokens) =
+                    compare::lower_comparison(ctx, op, &lhs_reg, &rhs_reg, &lhs_ty);
+                let combined = quote! { #lhs_tokens #rhs_tokens #cmp_tokens };
+                Ok((pred, KernelType::Bool, combined))
             } else {
                 Err(syn::Error::new(
                     *span,
@@ -208,6 +218,117 @@ pub fn lower_expr(
         KernelExpr::Cast { span, .. } => Err(syn::Error::new(
             *span,
             "type cast lowering not yet implemented (Sprint 2.6)",
+        )),
+    }
+}
+
+/// Lower a sequence of kernel statements to a combined `TokenStream`.
+#[allow(dead_code)] // Used in Sprint 2.6 codegen
+pub fn lower_stmts(ctx: &mut LoweringContext, stmts: &[KernelStmt]) -> syn::Result<TokenStream> {
+    let mut combined = TokenStream::new();
+    for stmt in stmts {
+        let tokens = lower_stmt(ctx, stmt)?;
+        combined.extend(tokens);
+    }
+    Ok(combined)
+}
+
+/// Lower a single kernel statement to a `TokenStream`.
+#[allow(dead_code)] // Used in Sprint 2.6 codegen; tested here
+pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<TokenStream> {
+    match stmt {
+        // let x = expr; — lower value, register in locals
+        KernelStmt::Let {
+            name, value, span, ..
+        } => {
+            let (reg, ty, expr_tokens) = lower_expr(ctx, value)?;
+            if ctx.locals.contains_key(name) {
+                return Err(syn::Error::new(
+                    *span,
+                    format!("variable `{name}` already defined in this kernel"),
+                ));
+            }
+            ctx.locals.insert(name.clone(), (reg, ty));
+            Ok(expr_tokens)
+        }
+
+        // if cond { then } [else { otherwise }]
+        KernelStmt::If {
+            condition,
+            then_body,
+            else_body,
+            ..
+        } => {
+            // 1. Lower condition to predicate register
+            let (pred_reg, _pred_ty, cond_tokens) = lower_expr(ctx, condition)?;
+
+            // 2. Generate labels
+            let has_else = else_body.is_some();
+            let end_label = ctx.fresh_label("IF_END");
+            let else_label = if has_else {
+                Some(ctx.fresh_label("IF_ELSE"))
+            } else {
+                None
+            };
+
+            // 3. Branch: @!pred bra target (skip then-block when condition is false)
+            let skip_target = else_label.as_deref().unwrap_or(&end_label);
+            let skip_target_str = skip_target.to_string();
+            let branch_tokens = quote! {
+                kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+                    pred: #pred_reg,
+                    target: #skip_target_str.to_string(),
+                    negate: true,
+                }));
+            };
+
+            // 4. Lower then-body
+            let then_tokens = lower_stmts(ctx, then_body)?;
+
+            // 5. If else: unconditional branch past else, else label, else body
+            let else_tokens = if let Some(else_stmts) = else_body {
+                let else_lbl = else_label.as_ref().unwrap();
+                let end_lbl_str = end_label.clone();
+                let else_body_tokens = lower_stmts(ctx, else_stmts)?;
+                quote! {
+                    kernel.push(PtxInstruction::Control(ControlOp::Bra {
+                        target: #end_lbl_str.to_string(),
+                    }));
+                    kernel.push(PtxInstruction::Label(#else_lbl.to_string()));
+                    #else_body_tokens
+                }
+            } else {
+                TokenStream::new()
+            };
+
+            // 6. End label
+            let end_label_tokens = quote! {
+                kernel.push(PtxInstruction::Label(#end_label.to_string()));
+            };
+
+            Ok(quote! {
+                #cond_tokens
+                #branch_tokens
+                #then_tokens
+                #else_tokens
+                #end_label_tokens
+            })
+        }
+
+        // Bare expression statement
+        KernelStmt::Expr(expr, _span) => {
+            let (_reg, _ty, tokens) = lower_expr(ctx, expr)?;
+            Ok(tokens)
+        }
+
+        // --- Not yet implemented (Sprint 2.4+) ---
+        KernelStmt::Assign { span, .. } => Err(syn::Error::new(
+            *span,
+            "variable reassignment lowering not yet implemented",
+        )),
+        KernelStmt::IndexAssign { span, .. } => Err(syn::Error::new(
+            *span,
+            "array index assignment lowering not yet implemented (Sprint 2.4)",
         )),
     }
 }
@@ -369,5 +490,150 @@ mod tests {
         assert_eq!(reg.to_string(), "_pyros_r0");
         assert_eq!(ty, KernelType::F32);
         assert!(tokens.is_empty());
+    }
+
+    // --- Sprint 2.3: Comparisons + If/Else ---
+
+    #[test]
+    fn lower_comparison_in_expr() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "x".to_string(),
+            (Ident::new("_pyros_r0", Span::call_site()), KernelType::U32),
+        );
+        ctx.locals.insert(
+            "n".to_string(),
+            (Ident::new("_pyros_r1", Span::call_site()), KernelType::U32),
+        );
+
+        let expr = KernelExpr::BinOp {
+            op: BinOpKind::Lt,
+            lhs: Box::new(KernelExpr::Var("x".to_string(), Span::call_site())),
+            rhs: Box::new(KernelExpr::Var("n".to_string(), Span::call_site())),
+            span: Span::call_site(),
+        };
+        let (pred, ty, tokens) = lower_expr(&mut ctx, &expr).unwrap();
+
+        assert_eq!(ty, KernelType::Bool);
+        assert!(pred.to_string().starts_with("_pyros_r"));
+        let code = tokens.to_string();
+        assert!(code.contains("ControlOp :: SetP"));
+        assert!(code.contains("CmpOp :: Lt"));
+    }
+
+    #[test]
+    fn lower_let_registers_local() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "a".to_string(),
+            (Ident::new("_pyros_r0", Span::call_site()), KernelType::F32),
+        );
+        ctx.locals.insert(
+            "b".to_string(),
+            (Ident::new("_pyros_r1", Span::call_site()), KernelType::F32),
+        );
+
+        let stmt = KernelStmt::Let {
+            name: "x".to_string(),
+            ty: None,
+            value: KernelExpr::BinOp {
+                op: BinOpKind::Add,
+                lhs: Box::new(KernelExpr::Var("a".to_string(), Span::call_site())),
+                rhs: Box::new(KernelExpr::Var("b".to_string(), Span::call_site())),
+                span: Span::call_site(),
+            },
+            span: Span::call_site(),
+        };
+        let tokens = lower_stmt(&mut ctx, &stmt).unwrap();
+
+        // "x" should now be in locals
+        assert!(ctx.locals.contains_key("x"));
+        let (reg, ty) = &ctx.locals["x"];
+        assert_eq!(ty, &KernelType::F32);
+        assert!(reg.to_string().starts_with("_pyros_r"));
+
+        // Should have generated ArithOp::Add
+        let code = tokens.to_string();
+        assert!(code.contains("ArithOp :: Add"));
+    }
+
+    #[test]
+    fn lower_if_simple() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "idx".to_string(),
+            (Ident::new("_pyros_r0", Span::call_site()), KernelType::U32),
+        );
+        ctx.locals.insert(
+            "n".to_string(),
+            (Ident::new("_pyros_r1", Span::call_site()), KernelType::U32),
+        );
+
+        // if idx < n { (bare expression for now) }
+        let stmt = KernelStmt::If {
+            condition: KernelExpr::BinOp {
+                op: BinOpKind::Lt,
+                lhs: Box::new(KernelExpr::Var("idx".to_string(), Span::call_site())),
+                rhs: Box::new(KernelExpr::Var("n".to_string(), Span::call_site())),
+                span: Span::call_site(),
+            },
+            then_body: vec![],
+            else_body: None,
+            span: Span::call_site(),
+        };
+        let tokens = lower_stmt(&mut ctx, &stmt).unwrap();
+        let code = tokens.to_string();
+
+        // Should contain: SetP, BraPred with negate: true, Label
+        assert!(code.contains("SetP"));
+        assert!(code.contains("negate : true"));
+        assert!(code.contains("IF_END_0"));
+        assert!(code.contains("Label"));
+    }
+
+    #[test]
+    fn lower_if_else() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "x".to_string(),
+            (Ident::new("_pyros_r0", Span::call_site()), KernelType::U32),
+        );
+        ctx.locals.insert(
+            "n".to_string(),
+            (Ident::new("_pyros_r1", Span::call_site()), KernelType::U32),
+        );
+
+        let stmt = KernelStmt::If {
+            condition: KernelExpr::BinOp {
+                op: BinOpKind::Lt,
+                lhs: Box::new(KernelExpr::Var("x".to_string(), Span::call_site())),
+                rhs: Box::new(KernelExpr::Var("n".to_string(), Span::call_site())),
+                span: Span::call_site(),
+            },
+            then_body: vec![],
+            else_body: Some(vec![]),
+            span: Span::call_site(),
+        };
+        let tokens = lower_stmt(&mut ctx, &stmt).unwrap();
+        let code = tokens.to_string();
+
+        // If/else should have: BraPred -> IF_ELSE, Bra -> IF_END, IF_ELSE label, IF_END label
+        // Label allocation order: IF_END first (0), IF_ELSE second (1)
+        assert!(code.contains("negate : true"));
+        assert!(code.contains("IF_ELSE_1"));
+        assert!(code.contains("IF_END_0"));
+        // Unconditional branch to skip else
+        assert!(code.contains("ControlOp :: Bra"));
+    }
+
+    #[test]
+    fn fresh_labels_are_unique() {
+        let mut ctx = LoweringContext::new();
+        let l1 = ctx.fresh_label("IF_END");
+        let l2 = ctx.fresh_label("IF_ELSE");
+        let l3 = ctx.fresh_label("IF_END");
+        assert_eq!(l1, "IF_END_0");
+        assert_eq!(l2, "IF_ELSE_1");
+        assert_eq!(l3, "IF_END_2");
     }
 }
