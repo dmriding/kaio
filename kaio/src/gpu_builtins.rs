@@ -102,6 +102,35 @@ pub fn tanh(_x: f32) -> f32 {
     panic!("tanh() can only be called inside a #[gpu_kernel] function")
 }
 
+/// Synchronize all threads in the block at a barrier.
+///
+/// All threads must reach this point before any can proceed.
+/// Equivalent to `__syncthreads()` in CUDA C++.
+pub fn bar_sync() {
+    panic!("bar_sync() can only be called inside a #[gpu_kernel] function")
+}
+
+/// Warp shuffle down — each thread reads from the lane `delta` positions below.
+///
+/// `width` must be 32 (full warp). Returns the value from the source lane.
+pub fn shfl_sync_down(_val: f32, _delta: u32, _width: u32) -> f32 {
+    panic!("shfl_sync_down() can only be called inside a #[gpu_kernel] function")
+}
+
+/// Warp shuffle up — each thread reads from the lane `delta` positions above.
+///
+/// `width` must be 32 (full warp). Returns the value from the source lane.
+pub fn shfl_sync_up(_val: f32, _delta: u32, _width: u32) -> f32 {
+    panic!("shfl_sync_up() can only be called inside a #[gpu_kernel] function")
+}
+
+/// Warp shuffle butterfly (XOR) — each thread reads from the lane at `lane XOR lane_mask`.
+///
+/// `width` must be 32 (full warp). Returns the value from the source lane.
+pub fn shfl_sync_bfly(_val: f32, _lane_mask: u32, _width: u32) -> f32 {
+    panic!("shfl_sync_bfly() can only be called inside a #[gpu_kernel] function")
+}
+
 /// Declare a shared memory buffer inside a `#[gpu_kernel]` function.
 ///
 /// ```ignore

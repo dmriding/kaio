@@ -48,6 +48,12 @@ pub fn lower_builtin(
         "log" => lower_log(ctx, arg_regs, arg_types, span),
         "tanh" => lower_tanh(ctx, arg_regs, arg_types, span),
 
+        // --- Synchronization builtins ---
+        "bar_sync" => lower_bar_sync(ctx, arg_regs, span),
+        "shfl_sync_down" => lower_shfl_sync(ctx, "down", arg_regs, arg_types, span),
+        "shfl_sync_up" => lower_shfl_sync(ctx, "up", arg_regs, arg_types, span),
+        "shfl_sync_bfly" => lower_shfl_sync(ctx, "bfly", arg_regs, arg_types, span),
+
         _ => Err(syn::Error::new(
             span,
             format!(
@@ -56,7 +62,8 @@ pub fn lower_builtin(
                  block_idx_x, block_idx_y, block_idx_z, \
                  block_dim_x, block_dim_y, block_dim_z, \
                  grid_dim_x, grid_dim_y, grid_dim_z, \
-                 sqrt, abs, min, max, exp, log, tanh"
+                 sqrt, abs, min, max, exp, log, tanh, \
+                 bar_sync, shfl_sync_down, shfl_sync_up, shfl_sync_bfly"
             ),
         )),
     }
@@ -399,6 +406,110 @@ fn check_f32(ty: &KernelType, span: Span) -> syn::Result<()> {
     Ok(())
 }
 
+/// Lower `bar_sync()` — block-level barrier synchronization.
+///
+/// Emits `bar.sync 0;`. Returns a dummy register since `lower_builtin`
+/// requires a result — the register is allocated but never used.
+fn lower_bar_sync(
+    ctx: &mut LoweringContext,
+    arg_regs: &[Ident],
+    span: Span,
+) -> syn::Result<(Ident, KernelType, TokenStream)> {
+    if !arg_regs.is_empty() {
+        return Err(syn::Error::new(
+            span,
+            format!("bar_sync() takes no arguments, got {}", arg_regs.len()),
+        ));
+    }
+    let dummy = ctx.fresh_reg();
+    let tokens = quote! {
+        let #dummy = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+            barrier_id: 0,
+        }));
+    };
+    Ok((dummy, KernelType::U32, tokens))
+}
+
+/// Lower `shfl_sync_down/up/bfly(val, delta_or_mask, width)` — warp shuffle.
+///
+/// Accepts 3 arguments: val (f32 or u32), delta/lane_mask (u32), width (u32).
+/// Width is accepted but hardcoded to 32 (full warp). The `c` operand is
+/// pre-packed for full-warp operation:
+/// - down: c = 31 (`((32-32) << 8) | 0x1F`)
+/// - up:   c = 0
+/// - bfly: c = 31 (`width - 1 = 31`)
+///
+/// Sub-warp shuffles (width < 32) are not yet supported.
+fn lower_shfl_sync(
+    ctx: &mut LoweringContext,
+    mode: &str,
+    arg_regs: &[Ident],
+    arg_types: &[KernelType],
+    span: Span,
+) -> syn::Result<(Ident, KernelType, TokenStream)> {
+    let fn_name = format!("shfl_sync_{mode}");
+    if arg_regs.len() != 3 {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "{fn_name}() expects 3 arguments (val, delta, width), got {}",
+                arg_regs.len()
+            ),
+        ));
+    }
+
+    let src = &arg_regs[0];
+    let delta_or_mask = &arg_regs[1];
+    // arg_regs[2] is width — hardcoded to full-warp (32), not used in emission
+
+    let c: u32 = match mode {
+        "down" => 31, // ((32 - 32) << 8) | 0x1F
+        "up" => 0,
+        "bfly" => 31, // width - 1 = 31
+        _ => unreachable!(),
+    };
+
+    let dst = ctx.fresh_reg();
+
+    // Determine the ControlOp variant name and third-operand field name
+    let tokens = match mode {
+        "down" => quote! {
+            let #dst = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+                dst: #dst,
+                src: #src,
+                delta: Operand::Reg(#delta_or_mask),
+                c: #c,
+                mask: 0xFFFFFFFF_u32,
+            }));
+        },
+        "up" => quote! {
+            let #dst = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Control(ControlOp::ShflSyncUp {
+                dst: #dst,
+                src: #src,
+                delta: Operand::Reg(#delta_or_mask),
+                c: #c,
+                mask: 0xFFFFFFFF_u32,
+            }));
+        },
+        "bfly" => quote! {
+            let #dst = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Control(ControlOp::ShflSyncBfly {
+                dst: #dst,
+                src: #src,
+                lane_mask: Operand::Reg(#delta_or_mask),
+                c: #c,
+                mask: 0xFFFFFFFF_u32,
+            }));
+        },
+        _ => unreachable!(),
+    };
+
+    Ok((dst, arg_types[0].clone(), tokens))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +682,103 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("no arguments"));
+    }
+
+    // --- Sprint 3.4: Synchronization builtins ---
+
+    #[test]
+    fn lower_bar_sync_emit() {
+        let mut ctx = LoweringContext::new();
+        let (_, ty, tokens) =
+            lower_builtin(&mut ctx, "bar_sync", &[], &[], Span::call_site()).unwrap();
+
+        assert_eq!(ty, KernelType::U32); // dummy return type
+        let code = tokens.to_string();
+        assert!(code.contains("BarSync"));
+        assert!(code.contains("barrier_id : 0"));
+    }
+
+    #[test]
+    fn lower_bar_sync_wrong_args() {
+        let mut ctx = LoweringContext::new();
+        let reg = Ident::new("_kaio_r0", Span::call_site());
+        let err = lower_builtin(
+            &mut ctx,
+            "bar_sync",
+            &[reg],
+            &[KernelType::U32],
+            Span::call_site(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no arguments"));
+    }
+
+    #[test]
+    fn lower_shfl_sync_down_emit() {
+        let mut ctx = LoweringContext::new();
+        let r0 = Ident::new("_kaio_r0", Span::call_site());
+        let r1 = Ident::new("_kaio_r1", Span::call_site());
+        let r2 = Ident::new("_kaio_r2", Span::call_site());
+        let regs = vec![r0, r1, r2];
+        let types = vec![KernelType::F32, KernelType::U32, KernelType::U32];
+
+        let (_, ty, tokens) =
+            lower_builtin(&mut ctx, "shfl_sync_down", &regs, &types, Span::call_site()).unwrap();
+
+        assert_eq!(ty, KernelType::F32); // matches val type
+        let code = tokens.to_string();
+        assert!(code.contains("ShflSyncDown"));
+        assert!(code.contains("c : 31")); // full-warp down
+    }
+
+    #[test]
+    fn lower_shfl_sync_up_emit() {
+        let mut ctx = LoweringContext::new();
+        let r0 = Ident::new("_kaio_r0", Span::call_site());
+        let r1 = Ident::new("_kaio_r1", Span::call_site());
+        let r2 = Ident::new("_kaio_r2", Span::call_site());
+        let regs = vec![r0, r1, r2];
+        let types = vec![KernelType::U32, KernelType::U32, KernelType::U32];
+
+        let (_, ty, tokens) =
+            lower_builtin(&mut ctx, "shfl_sync_up", &regs, &types, Span::call_site()).unwrap();
+
+        assert_eq!(ty, KernelType::U32);
+        let code = tokens.to_string();
+        assert!(code.contains("ShflSyncUp"));
+        assert!(code.contains("c : 0")); // full-warp up
+    }
+
+    #[test]
+    fn lower_shfl_sync_bfly_emit() {
+        let mut ctx = LoweringContext::new();
+        let r0 = Ident::new("_kaio_r0", Span::call_site());
+        let r1 = Ident::new("_kaio_r1", Span::call_site());
+        let r2 = Ident::new("_kaio_r2", Span::call_site());
+        let regs = vec![r0, r1, r2];
+        let types = vec![KernelType::F32, KernelType::U32, KernelType::U32];
+
+        let (_, ty, tokens) =
+            lower_builtin(&mut ctx, "shfl_sync_bfly", &regs, &types, Span::call_site()).unwrap();
+
+        assert_eq!(ty, KernelType::F32);
+        let code = tokens.to_string();
+        assert!(code.contains("ShflSyncBfly"));
+        assert!(code.contains("c : 31")); // full-warp bfly
+    }
+
+    #[test]
+    fn lower_shfl_sync_wrong_args() {
+        let mut ctx = LoweringContext::new();
+        let r0 = Ident::new("_kaio_r0", Span::call_site());
+        let err = lower_builtin(
+            &mut ctx,
+            "shfl_sync_down",
+            &[r0],
+            &[KernelType::F32],
+            Span::call_site(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("3 arguments"));
     }
 }

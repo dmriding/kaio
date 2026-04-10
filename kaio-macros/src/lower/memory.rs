@@ -137,58 +137,36 @@ pub fn lower_index_write(
 /// uses 64-bit (S64/U64). This is correct — shared memory is per-SM SRAM with
 /// a 32-bit address space, while global memory is VRAM addressed at 64 bits.
 ///
-/// Pattern:
-/// 1. `mov.u32 %r_base, shared_name` — load base address of named allocation
-/// 2. `mul.lo.u32 %r_offset, index, sizeof(T)` — compute byte offset (32-bit)
-/// 3. `add.u32 %r_addr, %r_base, %r_offset` — final shared address (32-bit)
+/// For the current single-allocation case, the shared address is simply the
+/// byte offset: `mul.lo.u32 offset, index, sizeof(T)`. The PTX `.shared`
+/// declaration places the allocation at offset 0 in shared space.
+///
+/// When multiple shared allocations are needed (Sprint 3.5 reductions), this
+/// function will need a base offset parameter to address non-zero-based
+/// allocations.
 fn compute_shared_address(
     ctx: &mut LoweringContext,
-    array_name: &str,
+    _array_name: &str,
     index_reg: &Ident,
     elem_ty: &KernelType,
 ) -> (Ident, TokenStream) {
     let size = elem_ty.size_bytes() as u32;
-    let ptx_name = array_name.to_string();
 
-    // 1. Load base address of named shared allocation
-    let base_reg = ctx.fresh_reg();
-    let base_tokens = quote! {
-        let #base_reg = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Mov {
-            dst: #base_reg,
-            src: Operand::SharedAddr(#ptx_name.to_string()),
-            ty: PtxType::U32,
-        });
-    };
-
-    // 2. Byte offset = index * sizeof(T) — 32-bit multiply
-    let offset_reg = ctx.fresh_reg();
-    let offset_tokens = quote! {
-        let #offset_reg = alloc.alloc(PtxType::U32);
+    // Byte offset = index * sizeof(T) — 32-bit multiply
+    // For a single shared allocation, the byte offset IS the address
+    // (allocation starts at shared offset 0).
+    let addr_reg = ctx.fresh_reg();
+    let tokens = quote! {
+        let #addr_reg = alloc.alloc(PtxType::U32);
         kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-            dst: #offset_reg,
+            dst: #addr_reg,
             lhs: Operand::Reg(#index_reg),
             rhs: Operand::ImmU32(#size),
             ty: PtxType::U32,
         }));
     };
 
-    // 3. Final address = base + offset — 32-bit add
-    let addr_reg = ctx.fresh_reg();
-    let addr_tokens = quote! {
-        let #addr_reg = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Arith(ArithOp::Add {
-            dst: #addr_reg,
-            lhs: Operand::Reg(#base_reg),
-            rhs: Operand::Reg(#offset_reg),
-            ty: PtxType::U32,
-        }));
-    };
-
-    (
-        addr_reg,
-        quote! { #base_tokens #offset_tokens #addr_tokens },
-    )
+    (addr_reg, tokens)
 }
 
 /// Lower a shared memory index read: `sdata[idx]` → address calc + `ld.shared`.
@@ -366,15 +344,11 @@ mod tests {
 
         // Should use 32-bit addressing (U32), NOT 64-bit
         assert!(
-            code.contains("SharedAddr"),
-            "should load base via SharedAddr"
-        );
-        assert!(
             code.contains("ArithOp :: Mul"),
             "should compute byte offset"
         );
         assert!(code.contains("ImmU32 (4u32)"), "f32 sizeof must be 4");
-        assert!(code.contains("ArithOp :: Add"), "should add base + offset");
+        assert!(code.contains("PtxType :: U32"), "should use 32-bit regs");
         // Should NOT contain 64-bit operations
         assert!(
             !code.contains("MulWide"),
