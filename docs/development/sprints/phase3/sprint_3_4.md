@@ -1,6 +1,7 @@
 # Sprint 3.4 — Barrier + Shuffle Built-in Functions
 
 **Status:** Complete
+**Commit:** `6fde908`
 **Date:** 2026-04-11
 **Depends on:** Sprint 3.2 (kaio-core instructions), Sprint 3.3 (shared mem DSL)
 
