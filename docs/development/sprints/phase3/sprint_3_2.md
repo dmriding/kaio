@@ -1,6 +1,7 @@
 # Sprint 3.2 — Shared Memory + Barrier + Shuffle Instructions
 
 **Status:** Complete
+**Commit:** `d82cc1f`
 **Date:** 2026-04-11
 **Depends on:** Phase 2 complete (commit `50a3ab0`). Independent of Sprint 3.1.
 
