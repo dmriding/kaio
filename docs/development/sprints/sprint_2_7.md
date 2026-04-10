@@ -1,7 +1,7 @@
 # Sprint 2.7 — Type Validation + Compile-Fail Tests
 
 **Status:** Complete
-**Commit:** (pending)
+**Commit:** `8dcfa52`
 
 ## Context
 
