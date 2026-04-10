@@ -281,7 +281,13 @@ impl Emit for ArithOp {
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
             }
             ArithOp::Div { dst, lhs, rhs, ty } => {
-                let mnemonic = format!("div{}", ty.ptx_suffix());
+                // Float division requires .approx (fast-math) or .rn (IEEE).
+                // Integer division has no modifier.
+                let mnemonic = match ty {
+                    PtxType::F32 => "div.approx.f32".to_string(),
+                    PtxType::F64 => "div.rn.f64".to_string(),
+                    _ => format!("div{}", ty.ptx_suffix()),
+                };
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
             }
             ArithOp::Rem { dst, lhs, rhs, ty } => {
@@ -520,7 +526,7 @@ mod tests {
             ty: PtxType::F32,
         };
         op.emit(&mut w).unwrap();
-        assert_eq!(w.finish(), "    div.f32 %f0, %f1, %f2;\n");
+        assert_eq!(w.finish(), "    div.approx.f32 %f0, %f1, %f2;\n");
     }
 
     #[test]

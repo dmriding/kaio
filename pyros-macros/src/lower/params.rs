@@ -29,7 +29,13 @@ fn lower_one_param(ctx: &mut LoweringContext, param: &KernelParam) -> syn::Resul
     }
 }
 
-/// Pointer param: `.param .u64 name_ptr` + `ld.param.u64` + register as slice type in locals.
+/// Pointer param: `.param .u64 name_ptr` + `ld.param.u64` + `cvta.to.global` + register.
+///
+/// The `cvta.to.global` is emitted eagerly here (not lazily on first access)
+/// because lazy emission breaks when the first access is inside a conditional
+/// branch — the register would be uninitialized on the other path.
+/// Eager emission matches nvcc behavior: all pointer conversions happen at
+/// kernel entry, before any control flow.
 fn lower_pointer_param(
     ctx: &mut LoweringContext,
     name: &str,
@@ -38,20 +44,30 @@ fn lower_pointer_param(
 ) -> syn::Result<TokenStream> {
     let ptx_elem_ty = ctx.ptx_type_tokens(elem_ty);
     let param_name = format!("{name}_ptr");
-    let reg = ctx.fresh_reg();
+    let param_reg = ctx.fresh_reg();
+    let global_reg = ctx.fresh_reg();
 
     // Register in locals with full slice type (SliceRef/SliceMutRef) so
     // lower_expr Index can extract elem_type and check mutability.
+    // The locals entry points to the PARAM register (pre-cvta), but
+    // global_addrs caches the cvta'd register for memory lowering.
     ctx.locals
-        .insert(name.to_string(), (reg.clone(), full_ty.clone()));
+        .insert(name.to_string(), (param_reg.clone(), full_ty.clone()));
+    ctx.global_addrs
+        .insert(name.to_string(), global_reg.clone());
 
     Ok(quote! {
         kernel.add_param(PtxParam::pointer(#param_name, PtxType::#ptx_elem_ty));
-        let #reg = alloc.alloc(PtxType::U64);
+        let #param_reg = alloc.alloc(PtxType::U64);
         kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
-            dst: #reg,
+            dst: #param_reg,
             param_name: #param_name.to_string(),
             ty: PtxType::U64,
+        }));
+        let #global_reg = alloc.alloc(PtxType::U64);
+        kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+            dst: #global_reg,
+            src: #param_reg,
         }));
     })
 }
