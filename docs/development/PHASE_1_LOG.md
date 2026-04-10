@@ -14,7 +14,7 @@ doc in [sprints/](sprints/) with full reasoning traces for every decision.
 | [1.4](sprints/sprint_1_4.md) | Control flow + special registers (SetP, Bra, BraPred, Ret) | Done | `3d96685` | +8 = 42 |
 | [1.5](sprints/sprint_1_5.md) | PtxWriter + full module emission (vector_add PTX emits!) | Done | `d635721` | +10 = 52 |
 | [1.6](sprints/sprint_1_6.md) | Runtime device + buffers (PyrosDevice, GpuBuffer, PyrosError) | Done | `83bbe31` | +7 GPU |
-| [1.7](sprints/sprint_1_7.md) | **Runtime launch + vector_add E2E — PHASE 1 GATE PASSED** | Done | pending | +2 GPU E2E |
+| [1.7](sprints/sprint_1_7.md) | **Runtime launch + vector_add E2E — PHASE 1 GATE PASSED** | Done | `6b2f49b` | +2 GPU E2E |
 | [1.8](sprints/sprint_1_8.md) | Testing + coverage + docs polish | Pending | — | — |
 
 ## Key Validations

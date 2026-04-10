@@ -1,6 +1,6 @@
 # Sprint 1.7 — Runtime Launch + vector_add E2E
 
-**Commit:** pending
+**Commit:** `6b2f49b`
 **Status:** Complete
 
 ## Context
