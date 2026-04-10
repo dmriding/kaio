@@ -5,7 +5,9 @@ use kaio_core::instr::control::{CmpOp, ControlOp};
 use kaio_core::instr::memory::MemoryOp;
 use kaio_core::instr::special;
 use kaio_core::instr::{ArithOp, MadMode};
-use kaio_core::ir::{Operand, PtxInstruction, PtxKernel, PtxModule, PtxParam, RegisterAllocator};
+use kaio_core::ir::{
+    Operand, PtxInstruction, PtxKernel, PtxModule, PtxParam, RegisterAllocator, SharedDecl,
+};
 use kaio_core::types::PtxType;
 
 /// Build the complete vector_add kernel IR and emit it to a PTX string.
@@ -158,6 +160,86 @@ pub fn build_vector_add_ptx() -> String {
 
     // EXIT + return
     kernel.push(PtxInstruction::Label("EXIT".to_string()));
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new("sm_89");
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
+/// Build a shared memory test kernel that exercises shared memory, bar.sync,
+/// and shfl.sync instructions.
+///
+/// Kernel: each thread writes its tid to shared memory, syncs, reads back,
+/// then does a warp shuffle down by 1.
+#[allow(dead_code)]
+pub fn build_shared_mem_ptx() -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("shared_mem_test");
+
+    // Declare shared memory: 256 floats = 1024 bytes
+    kernel.add_shared_decl(SharedDecl {
+        name: "sdata".to_string(),
+        align: 4,
+        size_bytes: 1024,
+    });
+
+    // tid = %tid.x
+    let (r_tid, tid_instr) = special::tid_x(&mut alloc);
+    kernel.push(tid_instr);
+
+    // Compute shared memory byte offset: tid * 4
+    let r_offset = alloc.alloc(PtxType::S32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_offset,
+        lhs: Operand::Reg(r_tid),
+        rhs: Operand::ImmI32(4),
+        ty: PtxType::S32,
+    }));
+
+    // Store a constant float to shared memory (avoids cvt rounding modifier issue)
+    let f_val = alloc.alloc(PtxType::F32);
+    kernel.push(PtxInstruction::Mov {
+        dst: f_val,
+        src: Operand::ImmF32(1.0),
+        ty: PtxType::F32,
+    });
+
+    // st.shared: write float to shared memory
+    kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+        addr: r_offset,
+        src: f_val,
+        ty: PtxType::F32,
+    }));
+
+    // bar.sync 0: synchronize all threads
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+        barrier_id: 0,
+    }));
+
+    // ld.shared: read back from shared memory
+    let f_loaded = alloc.alloc(PtxType::F32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+        dst: f_loaded,
+        addr: r_offset,
+        ty: PtxType::F32,
+    }));
+
+    // shfl.sync.down: read from neighboring lane
+    let r_shfl_result = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+        dst: r_shfl_result,
+        src: r_tid,
+        delta: Operand::ImmU32(1),
+        c: 31,
+        mask: 0xFFFFFFFF,
+    }));
+
     kernel.push(PtxInstruction::Control(ControlOp::Ret));
 
     kernel.set_registers(alloc.into_allocated());

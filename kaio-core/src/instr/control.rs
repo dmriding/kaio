@@ -1,9 +1,12 @@
-//! Control flow PTX operations.
+//! Control flow and synchronization PTX operations.
 //!
 //! Contains comparison-to-predicate ([`SetP`](ControlOp::SetP)),
 //! branching ([`BraPred`](ControlOp::BraPred), [`Bra`](ControlOp::Bra)),
-//! and [`Ret`](ControlOp::Ret). Phase 3 will add `bar.sync` and
-//! `shfl.sync` when shared memory / warp-level ops are needed.
+//! [`Ret`](ControlOp::Ret), barrier synchronization
+//! ([`BarSync`](ControlOp::BarSync)), and warp shuffle operations
+//! ([`ShflSyncDown`](ControlOp::ShflSyncDown),
+//! [`ShflSyncUp`](ControlOp::ShflSyncUp),
+//! [`ShflSyncBfly`](ControlOp::ShflSyncBfly)).
 
 use std::fmt;
 
@@ -91,6 +94,62 @@ pub enum ControlOp {
     },
     /// Return from kernel: `ret;`
     Ret,
+    /// Block-level barrier synchronization: `bar.sync {barrier_id};`
+    ///
+    /// All threads in the block must reach this instruction before any
+    /// can proceed. Barrier 0 is the conventional default.
+    /// Example: `bar.sync 0;`
+    BarSync {
+        /// Barrier identifier (0 is conventional for single-barrier use).
+        barrier_id: u32,
+    },
+    /// Warp shuffle down: `shfl.sync.down.b32 dst, src, delta, c, membermask;`
+    ///
+    /// Each thread reads from the thread `delta` lanes below it within
+    /// the warp. The `c` operand packs clamp width (see PTX ISA 8.7 S9.7.8).
+    /// Example: `shfl.sync.down.b32 %r2, %r1, 1, 31, 0xFFFFFFFF;`
+    ShflSyncDown {
+        /// Destination register.
+        dst: Register,
+        /// Source register (value to share).
+        src: Register,
+        /// Delta (offset) — how many lanes down.
+        delta: Operand,
+        /// Pre-packed clamp/width value (encoding is caller's responsibility).
+        c: u32,
+        /// Member mask (0xFFFFFFFF = full warp).
+        mask: u32,
+    },
+    /// Warp shuffle up: `shfl.sync.up.b32 dst, src, delta, c, membermask;`
+    ///
+    /// Each thread reads from the thread `delta` lanes above it.
+    ShflSyncUp {
+        /// Destination register.
+        dst: Register,
+        /// Source register.
+        src: Register,
+        /// Delta (offset) — how many lanes up.
+        delta: Operand,
+        /// Pre-packed clamp/width value.
+        c: u32,
+        /// Member mask.
+        mask: u32,
+    },
+    /// Warp shuffle butterfly (XOR): `shfl.sync.bfly.b32 dst, src, lane_mask, c, membermask;`
+    ///
+    /// Each thread reads from the thread at `lane XOR lane_mask`.
+    ShflSyncBfly {
+        /// Destination register.
+        dst: Register,
+        /// Source register.
+        src: Register,
+        /// Lane mask for XOR operation.
+        lane_mask: Operand,
+        /// Pre-packed clamp/width value.
+        c: u32,
+        /// Member mask.
+        mask: u32,
+    },
 }
 
 impl Emit for ControlOp {
@@ -116,6 +175,34 @@ impl Emit for ControlOp {
             }
             ControlOp::Bra { target } => w.instruction("bra", &[&target as &dyn fmt::Display]),
             ControlOp::Ret => w.instruction("ret", &[]),
+            ControlOp::BarSync { barrier_id } => w.line(&format!("bar.sync {barrier_id};")),
+            ControlOp::ShflSyncDown {
+                dst,
+                src,
+                delta,
+                c,
+                mask,
+            } => w.line(&format!(
+                "shfl.sync.down.b32 {dst}, {src}, {delta}, {c}, 0x{mask:08X};"
+            )),
+            ControlOp::ShflSyncUp {
+                dst,
+                src,
+                delta,
+                c,
+                mask,
+            } => w.line(&format!(
+                "shfl.sync.up.b32 {dst}, {src}, {delta}, {c}, 0x{mask:08X};"
+            )),
+            ControlOp::ShflSyncBfly {
+                dst,
+                src,
+                lane_mask,
+                c,
+                mask,
+            } => w.line(&format!(
+                "shfl.sync.bfly.b32 {dst}, {src}, {lane_mask}, {c}, 0x{mask:08X};"
+            )),
         }
     }
 }
@@ -211,6 +298,88 @@ mod tests {
         let instr = PtxInstruction::Control(ControlOp::Ret);
         instr.emit(&mut w).unwrap();
         assert_eq!(w.finish(), "    ret;\n");
+    }
+
+    // --- Phase 3: Barrier + Shuffle ---
+
+    #[test]
+    fn emit_bar_sync() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ControlOp::BarSync { barrier_id: 0 }.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    bar.sync 0;\n");
+    }
+
+    #[test]
+    fn emit_shfl_sync_down() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ControlOp::ShflSyncDown {
+            dst: reg(RegKind::R, 2, PtxType::U32),
+            src: reg(RegKind::R, 1, PtxType::U32),
+            delta: Operand::ImmU32(1),
+            c: 31,
+            mask: 0xFFFFFFFF,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(
+            w.finish(),
+            "    shfl.sync.down.b32 %r2, %r1, 1, 31, 0xFFFFFFFF;\n"
+        );
+    }
+
+    #[test]
+    fn emit_shfl_sync_up() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ControlOp::ShflSyncUp {
+            dst: reg(RegKind::R, 2, PtxType::U32),
+            src: reg(RegKind::R, 1, PtxType::U32),
+            delta: Operand::ImmU32(1),
+            c: 0,
+            mask: 0xFFFFFFFF,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(
+            w.finish(),
+            "    shfl.sync.up.b32 %r2, %r1, 1, 0, 0xFFFFFFFF;\n"
+        );
+    }
+
+    #[test]
+    fn emit_shfl_sync_bfly() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ControlOp::ShflSyncBfly {
+            dst: reg(RegKind::R, 2, PtxType::U32),
+            src: reg(RegKind::R, 1, PtxType::U32),
+            lane_mask: Operand::ImmU32(1),
+            c: 31,
+            mask: 0xFFFFFFFF,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(
+            w.finish(),
+            "    shfl.sync.bfly.b32 %r2, %r1, 1, 31, 0xFFFFFFFF;\n"
+        );
+    }
+
+    #[test]
+    fn shfl_sync_down_with_register_delta() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ControlOp::ShflSyncDown {
+            dst: reg(RegKind::R, 3, PtxType::U32),
+            src: reg(RegKind::R, 0, PtxType::U32),
+            delta: Operand::Reg(reg(RegKind::R, 4, PtxType::U32)),
+            c: 31,
+            mask: 0xFFFFFFFF,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(
+            w.finish(),
+            "    shfl.sync.down.b32 %r3, %r0, %r4, 31, 0xFFFFFFFF;\n"
+        );
     }
 
     #[test]

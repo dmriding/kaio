@@ -1,10 +1,10 @@
 //! Memory PTX operations.
 //!
-//! Contains the memory instruction set needed for `vector_add`:
+//! Contains load/store instructions for global and shared memory:
 //! [`LdParam`](MemoryOp::LdParam), [`LdGlobal`](MemoryOp::LdGlobal),
-//! [`StGlobal`](MemoryOp::StGlobal), and
-//! [`CvtaToGlobal`](MemoryOp::CvtaToGlobal). Shared memory ops
-//! (`ld.shared`, `st.shared`) are deferred to Phase 3.
+//! [`StGlobal`](MemoryOp::StGlobal), [`LdShared`](MemoryOp::LdShared),
+//! [`StShared`](MemoryOp::StShared), and
+//! [`CvtaToGlobal`](MemoryOp::CvtaToGlobal).
 
 use std::fmt;
 
@@ -61,6 +61,32 @@ pub enum MemoryOp {
         /// PTX type of the stored value.
         ty: PtxType,
     },
+    /// Load from shared memory: `ld.shared{ty} dst, [addr];`
+    ///
+    /// Shared memory is block-scoped SRAM. The `addr` register holds the
+    /// offset into the declared shared allocation.
+    /// Example: `ld.shared.f32 %f0, [%r0];`
+    LdShared {
+        /// Destination register.
+        dst: Register,
+        /// Register holding the shared memory offset.
+        addr: Register,
+        /// PTX type of the loaded value.
+        ty: PtxType,
+    },
+    /// Store to shared memory: `st.shared{ty} [addr], src;`
+    ///
+    /// **Operand order is reversed in PTX** — address first, value second
+    /// (same convention as [`StGlobal`](Self::StGlobal)).
+    /// Example: `st.shared.f32 [%r0], %f1;`
+    StShared {
+        /// Register holding the shared memory offset.
+        addr: Register,
+        /// Source register (value to store).
+        src: Register,
+        /// PTX type of the stored value.
+        ty: PtxType,
+    },
     /// Convert generic address to global: `cvta.to.global.u64 dst, src;`
     ///
     /// Always `.u64` (64-bit address space, matching `.address_size 64`).
@@ -95,6 +121,16 @@ impl Emit for MemoryOp {
                 let mnemonic = format!("st.global{}", ty.ptx_suffix());
                 let addr_str = format!("[{addr}]");
                 // PTX store order: [address], source (reversed from load)
+                w.instruction(&mnemonic, &[&addr_str as &dyn fmt::Display, src])
+            }
+            MemoryOp::LdShared { dst, addr, ty } => {
+                let mnemonic = format!("ld.shared{}", ty.ptx_suffix());
+                let addr_str = format!("[{addr}]");
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, &addr_str])
+            }
+            MemoryOp::StShared { addr, src, ty } => {
+                let mnemonic = format!("st.shared{}", ty.ptx_suffix());
+                let addr_str = format!("[{addr}]");
                 w.instruction(&mnemonic, &[&addr_str as &dyn fmt::Display, src])
             }
             MemoryOp::CvtaToGlobal { dst, src } => {
@@ -204,6 +240,34 @@ mod tests {
         });
         instr.emit(&mut w).unwrap();
         assert_eq!(w.finish(), "    ld.global.f32 %f0, [%rd0];\n");
+    }
+
+    // --- Shared memory ops ---
+
+    #[test]
+    fn emit_ld_shared_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::LdShared {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            addr: reg(RegKind::R, 0, PtxType::U32),
+            ty: PtxType::F32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    ld.shared.f32 %f0, [%r0];\n");
+    }
+
+    #[test]
+    fn emit_st_shared_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::StShared {
+            addr: reg(RegKind::R, 0, PtxType::U32),
+            src: reg(RegKind::F, 1, PtxType::F32),
+            ty: PtxType::F32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    st.shared.f32 [%r0], %f1;\n");
     }
 
     #[test]

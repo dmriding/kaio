@@ -53,3 +53,28 @@ fn emit_full_vector_add() {
     // Print for manual inspection
     eprintln!("=== KAIO vector_add PTX ===\n{ptx}");
 }
+
+#[test]
+fn emit_shared_mem_kernel() {
+    let ptx = common::build_shared_mem_ptx();
+
+    // Shared memory declaration in preamble
+    assert!(ptx.contains(".shared .align 4 .b8 sdata[1024];"));
+
+    // Shared memory instructions
+    assert!(ptx.contains("st.shared.f32"));
+    assert!(ptx.contains("ld.shared.f32"));
+
+    // Barrier
+    assert!(ptx.contains("bar.sync 0;"));
+
+    // Warp shuffle
+    assert!(ptx.contains("shfl.sync.down.b32"));
+    assert!(ptx.contains("0xFFFFFFFF"));
+
+    // Structure
+    assert!(ptx.contains(".visible .entry shared_mem_test()"));
+    assert!(ptx.trim_end().ends_with('}'));
+
+    eprintln!("=== KAIO shared_mem_test PTX ===\n{ptx}");
+}

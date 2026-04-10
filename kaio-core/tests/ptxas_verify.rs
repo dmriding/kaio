@@ -47,3 +47,38 @@ fn ptxas_verify_vector_add() {
 
     eprintln!("ptxas verification PASSED for vector_add (sm_89)");
 }
+
+#[test]
+fn ptxas_verify_shared_mem() {
+    let ptxas_check = std::process::Command::new("ptxas")
+        .arg("--version")
+        .output();
+
+    if ptxas_check.is_err() {
+        eprintln!("NOTE: ptxas not found in PATH — skipping PTX verification");
+        return;
+    }
+
+    let ptx = common::build_shared_mem_ptx();
+
+    let tmp = std::env::temp_dir().join("kaio_shared_mem_verify.ptx");
+    std::fs::write(&tmp, &ptx).expect("failed to write temp PTX file");
+
+    let output = std::process::Command::new("ptxas")
+        .args(["--gpu-name", "sm_89"])
+        .arg(tmp.to_str().unwrap())
+        .output()
+        .expect("failed to run ptxas");
+
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        output.status.success(),
+        "ptxas verification FAILED:\nstdout: {}\nstderr: {}\n\n=== PTX ===\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        ptx
+    );
+
+    eprintln!("ptxas verification PASSED for shared_mem_test (sm_89)");
+}

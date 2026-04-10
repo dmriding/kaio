@@ -63,15 +63,23 @@ impl Emit for PtxKernel {
         // 3. Register declarations
         emit_reg_declarations(&self.registers, w)?;
 
-        // 4. Blank line between declarations and body
+        // 4. Shared memory declarations
+        for decl in &self.shared_decls {
+            w.line(&format!(
+                ".shared .align {} .b8 {}[{}];",
+                decl.align, decl.name, decl.size_bytes
+            ))?;
+        }
+
+        // 5. Blank line between declarations and body
         w.blank()?;
 
-        // 5. Instruction body
+        // 6. Instruction body
         for instr in &self.body {
             instr.emit(w)?;
         }
 
-        // 6. Closing brace
+        // 7. Closing brace
         w.dedent();
         w.raw_line("}")?;
         Ok(())
