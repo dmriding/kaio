@@ -7,7 +7,7 @@
 #![allow(dead_code)] // All functions used in Sprint 2.6 codegen; tested in this module
 
 use syn::spanned::Spanned;
-use syn::{BinOp, Block, Expr, ExprLit, Lit, Local, Stmt, UnOp};
+use syn::{BinOp, Block, Expr, ExprLit, Lit, Local, RangeLimits, Stmt, UnOp};
 
 use crate::kernel_ir::KernelType;
 use crate::kernel_ir::expr::{BinOpKind, KernelExpr, UnaryOpKind};
@@ -110,6 +110,73 @@ fn parse_expr_stmt(expr: &Expr) -> syn::Result<KernelStmt> {
                 span,
             })
         }
+        // for i in start..end { body }
+        Expr::ForLoop(expr_for) => {
+            // Extract loop variable name (must be a simple ident)
+            let var = match &*expr_for.pat {
+                syn::Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        &expr_for.pat,
+                        "only simple identifiers are supported as `for` loop variables \
+                         in GPU kernels (e.g., `for i in 0..n`)",
+                    ));
+                }
+            };
+            // Extract range bounds — must be `start..end` (half-open)
+            let (start, end) = match &*expr_for.expr {
+                Expr::Range(expr_range) => {
+                    match &expr_range.limits {
+                        RangeLimits::HalfOpen(_) => {}
+                        RangeLimits::Closed(_) => {
+                            return Err(syn::Error::new_spanned(
+                                expr_range.limits,
+                                "inclusive ranges (`..=`) are not supported in GPU kernel \
+                                 `for` loops — use `start..end` instead",
+                            ));
+                        }
+                    }
+                    let start = expr_range.start.as_ref().ok_or_else(|| {
+                        syn::Error::new_spanned(
+                            &expr_for.expr,
+                            "`for` loop range must have a start bound (e.g., `0..n`)",
+                        )
+                    })?;
+                    let end = expr_range.end.as_ref().ok_or_else(|| {
+                        syn::Error::new_spanned(
+                            &expr_for.expr,
+                            "`for` loop range must have an end bound (e.g., `0..n`)",
+                        )
+                    })?;
+                    (parse_expr(start)?, parse_expr(end)?)
+                }
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        &expr_for.expr,
+                        "only `start..end` ranges are supported in GPU kernel `for` loops \
+                         (iterators like `.iter()` or `.step_by()` are not supported)",
+                    ));
+                }
+            };
+            let body = parse_body(&expr_for.body)?;
+            Ok(KernelStmt::For {
+                var,
+                start,
+                end,
+                body,
+                span,
+            })
+        }
+        // while condition { body }
+        Expr::While(expr_while) => {
+            let condition = parse_expr(&expr_while.cond)?;
+            let body = parse_body(&expr_while.body)?;
+            Ok(KernelStmt::While {
+                condition,
+                body,
+                span,
+            })
+        }
         // Assignment: x = expr or arr[idx] = expr
         Expr::Assign(expr_assign) => {
             match expr_assign.left.as_ref() {
@@ -137,11 +204,70 @@ fn parse_expr_stmt(expr: &Expr) -> syn::Result<KernelStmt> {
                 )),
             }
         }
+        // Compound assignment: x += expr, arr[i] += expr
+        // In syn 2, compound assignment is Expr::Binary with BinOp::AddAssign etc.
+        Expr::Binary(expr_bin) if desugar_compound_op(&expr_bin.op).is_some() => {
+            let base_op = desugar_compound_op(&expr_bin.op).unwrap();
+            let rhs = parse_expr(&expr_bin.right)?;
+            match expr_bin.left.as_ref() {
+                // x += expr → Assign { name: "x", value: BinOp(Var("x"), Add, expr) }
+                Expr::Path(expr_path) => {
+                    let name = extract_path_name(expr_path)?;
+                    let lhs_expr = KernelExpr::Var(name.clone(), span);
+                    let value = KernelExpr::BinOp {
+                        op: base_op,
+                        lhs: Box::new(lhs_expr),
+                        rhs: Box::new(rhs),
+                        span,
+                    };
+                    Ok(KernelStmt::Assign { name, value, span })
+                }
+                // arr[i] += expr → IndexAssign { ..., value: BinOp(Index(...), Add, expr) }
+                Expr::Index(expr_index) => {
+                    let array = extract_var_name(&expr_index.expr)?;
+                    let index = parse_expr(&expr_index.index)?;
+                    let lhs_expr = KernelExpr::Index {
+                        array: array.clone(),
+                        index: Box::new(index.clone()),
+                        span,
+                    };
+                    let value = KernelExpr::BinOp {
+                        op: base_op,
+                        lhs: Box::new(lhs_expr),
+                        rhs: Box::new(rhs),
+                        span,
+                    };
+                    Ok(KernelStmt::IndexAssign {
+                        array,
+                        index,
+                        value,
+                        span,
+                    })
+                }
+                _ => Err(syn::Error::new_spanned(
+                    &expr_bin.left,
+                    "unsupported compound assignment target in GPU kernel",
+                )),
+            }
+        }
         // Bare expression
         _ => {
             let kernel_expr = parse_expr(expr)?;
             Ok(KernelStmt::Expr(kernel_expr, span))
         }
+    }
+}
+
+/// Map a compound assignment operator to its base arithmetic operator.
+/// Returns `None` for non-compound operators.
+fn desugar_compound_op(op: &BinOp) -> Option<BinOpKind> {
+    match op {
+        BinOp::AddAssign(_) => Some(BinOpKind::Add),
+        BinOp::SubAssign(_) => Some(BinOpKind::Sub),
+        BinOp::MulAssign(_) => Some(BinOpKind::Mul),
+        BinOp::DivAssign(_) => Some(BinOpKind::Div),
+        BinOp::RemAssign(_) => Some(BinOpKind::Rem),
+        _ => None,
     }
 }
 
@@ -235,17 +361,9 @@ pub fn parse_expr(expr: &Expr) -> syn::Result<KernelExpr> {
             ))
         }
         // --- Unsupported constructs with specific error messages ---
-        Expr::ForLoop(_) => Err(syn::Error::new_spanned(
-            expr,
-            "`for` loops are not supported in GPU kernels (available in Phase 3)",
-        )),
-        Expr::While(_) => Err(syn::Error::new_spanned(
-            expr,
-            "`while` loops are not supported in GPU kernels (available in Phase 3)",
-        )),
         Expr::Loop(_) => Err(syn::Error::new_spanned(
             expr,
-            "`loop` is not supported in GPU kernels (available in Phase 3)",
+            "`loop` is not supported in GPU kernels — use `for` or `while` instead",
         )),
         Expr::Match(_) => Err(syn::Error::new_spanned(
             expr,
@@ -666,27 +784,154 @@ mod tests {
         }
     }
 
+    // --- Loop parsing tests ---
+
+    #[test]
+    fn parse_for_loop() {
+        let block = parse_block(quote! { {
+            for i in 0..n {
+                out[i] = 0.0;
+            }
+        } });
+        let stmts = parse_body(&block).unwrap();
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            KernelStmt::For {
+                var,
+                start,
+                end,
+                body,
+                ..
+            } => {
+                assert_eq!(var, "i");
+                assert!(matches!(start, KernelExpr::LitInt(0, KernelType::I32, _)));
+                assert!(matches!(end, KernelExpr::Var(n, _) if n == "n"));
+                assert_eq!(body.len(), 1);
+            }
+            _ => panic!("expected For"),
+        }
+    }
+
+    #[test]
+    fn parse_while_loop() {
+        let block = parse_block(quote! { {
+            while x > 0 {
+                x = x - 1;
+            }
+        } });
+        let stmts = parse_body(&block).unwrap();
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            KernelStmt::While {
+                condition, body, ..
+            } => {
+                assert!(matches!(
+                    condition,
+                    KernelExpr::BinOp {
+                        op: BinOpKind::Gt,
+                        ..
+                    }
+                ));
+                assert_eq!(body.len(), 1);
+            }
+            _ => panic!("expected While"),
+        }
+    }
+
+    #[test]
+    fn parse_compound_assign_variable() {
+        let block = parse_block(quote! { { x += 1; } });
+        let stmts = parse_body(&block).unwrap();
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            KernelStmt::Assign { name, value, .. } => {
+                assert_eq!(name, "x");
+                // value should be BinOp(Var("x"), Add, LitInt(1))
+                match value {
+                    KernelExpr::BinOp { op, lhs, rhs, .. } => {
+                        assert_eq!(*op, BinOpKind::Add);
+                        assert!(matches!(lhs.as_ref(), KernelExpr::Var(n, _) if n == "x"));
+                        assert!(matches!(rhs.as_ref(), KernelExpr::LitInt(1, _, _)));
+                    }
+                    _ => panic!("expected BinOp"),
+                }
+            }
+            _ => panic!("expected Assign"),
+        }
+    }
+
+    #[test]
+    fn parse_compound_assign_index() {
+        let block = parse_block(quote! { { arr[i] += val; } });
+        let stmts = parse_body(&block).unwrap();
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            KernelStmt::IndexAssign {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                assert_eq!(array, "arr");
+                assert!(matches!(index, KernelExpr::Var(n, _) if n == "i"));
+                // value should be BinOp(Index("arr", Var("i")), Add, Var("val"))
+                match value {
+                    KernelExpr::BinOp { op, lhs, rhs, .. } => {
+                        assert_eq!(*op, BinOpKind::Add);
+                        assert!(matches!(
+                            lhs.as_ref(),
+                            KernelExpr::Index { array: a, .. } if a == "arr"
+                        ));
+                        assert!(matches!(rhs.as_ref(), KernelExpr::Var(n, _) if n == "val"));
+                    }
+                    _ => panic!("expected BinOp"),
+                }
+            }
+            _ => panic!("expected IndexAssign"),
+        }
+    }
+
+    #[test]
+    fn parse_compound_sub_assign() {
+        let block = parse_block(quote! { { x -= 2; } });
+        let stmts = parse_body(&block).unwrap();
+        match &stmts[0] {
+            KernelStmt::Assign { name, value, .. } => {
+                assert_eq!(name, "x");
+                assert!(matches!(
+                    value,
+                    KernelExpr::BinOp {
+                        op: BinOpKind::Sub,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected Assign"),
+        }
+    }
+
+    #[test]
+    fn reject_for_inclusive_range() {
+        let block = parse_block(quote! { { for i in 0..=n {} } });
+        let err = parse_body(&block).unwrap_err();
+        assert!(err.to_string().contains("inclusive range"));
+    }
+
+    #[test]
+    fn reject_for_iterator() {
+        let block = parse_block(quote! { { for i in data {} } });
+        let err = parse_body(&block).unwrap_err();
+        assert!(err.to_string().contains("start..end"));
+    }
+
     // --- Rejection tests ---
-
-    #[test]
-    fn reject_for_loop() {
-        let expr: syn::Expr = syn::parse2(quote! { for i in 0..n {} }).unwrap();
-        let err = parse_expr(&expr).unwrap_err();
-        assert!(err.to_string().contains("for"));
-    }
-
-    #[test]
-    fn reject_while_loop() {
-        let expr: syn::Expr = syn::parse2(quote! { while x > 0 {} }).unwrap();
-        let err = parse_expr(&expr).unwrap_err();
-        assert!(err.to_string().contains("while"));
-    }
 
     #[test]
     fn reject_loop() {
         let expr: syn::Expr = syn::parse2(quote! { loop {} }).unwrap();
         let err = parse_expr(&expr).unwrap_err();
         assert!(err.to_string().contains("loop"));
+        assert!(err.to_string().contains("use `for` or `while`"));
     }
 
     #[test]

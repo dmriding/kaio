@@ -42,6 +42,14 @@ impl KernelType {
         !self.is_slice()
     }
 
+    /// Returns `true` if this is an integer type (I32, U32, I64, U64).
+    pub fn is_integer(&self) -> bool {
+        matches!(
+            self,
+            KernelType::I32 | KernelType::U32 | KernelType::I64 | KernelType::U64
+        )
+    }
+
     /// Returns `true` if this is a mutable slice (`&mut [T]`).
     pub fn is_mut_slice(&self) -> bool {
         matches!(self, KernelType::SliceMutRef(_))

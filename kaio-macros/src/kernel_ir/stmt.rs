@@ -51,6 +51,28 @@ pub enum KernelStmt {
         /// Source span.
         span: Span,
     },
+    /// `for i in start..end { body }`.
+    For {
+        /// Loop variable name.
+        var: String,
+        /// Range start expression (inclusive).
+        start: KernelExpr,
+        /// Range end expression (exclusive).
+        end: KernelExpr,
+        /// Loop body statements.
+        body: Vec<KernelStmt>,
+        /// Source span.
+        span: Span,
+    },
+    /// `while condition { body }`.
+    While {
+        /// Loop condition expression.
+        condition: KernelExpr,
+        /// Loop body statements.
+        body: Vec<KernelStmt>,
+        /// Source span.
+        span: Span,
+    },
     /// Bare expression statement (e.g., a function call).
     Expr(KernelExpr, Span),
 }

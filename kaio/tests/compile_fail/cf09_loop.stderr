@@ -1,4 +1,4 @@
-error: `loop` is not supported in GPU kernels (available in Phase 3)
+error: `loop` is not supported in GPU kernels — use `for` or `while` instead
  --> tests/compile_fail/cf09_loop.rs:6:5
   |
 6 |     loop {}

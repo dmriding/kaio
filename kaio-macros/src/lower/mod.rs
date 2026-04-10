@@ -286,8 +286,28 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
                     format!("variable `{name}` already defined in this kernel"),
                 ));
             }
-            ctx.locals.insert(name.clone(), (reg, ty));
-            Ok(expr_tokens)
+            // If the value expression reuses an existing register (e.g.,
+            // `let i = tid` where tid is a Var lookup with empty tokens),
+            // allocate a fresh register and copy the value. This prevents
+            // the new variable from aliasing the source — critical for
+            // `let mut i = tid; i += 1;` which must not corrupt `tid`.
+            let (final_reg, final_tokens) = if expr_tokens.is_empty() {
+                let new_reg = ctx.fresh_reg();
+                let ptx_ty = ctx.ptx_type_tokens(&ty);
+                let copy_tokens = quote! {
+                    let #new_reg = alloc.alloc(PtxType::#ptx_ty);
+                    kernel.push(PtxInstruction::Mov {
+                        dst: #new_reg,
+                        src: Operand::Reg(#reg),
+                        ty: PtxType::#ptx_ty,
+                    });
+                };
+                (new_reg, copy_tokens)
+            } else {
+                (reg, expr_tokens)
+            };
+            ctx.locals.insert(name.clone(), (final_reg, ty));
+            Ok(final_tokens)
         }
 
         // if cond { then } [else { otherwise }]
@@ -359,11 +379,28 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             Ok(tokens)
         }
 
-        // --- Not yet implemented (Sprint 2.4+) ---
-        KernelStmt::Assign { span, .. } => Err(syn::Error::new(
-            *span,
-            "variable reassignment lowering not yet implemented",
-        )),
+        // x = expr — lower value, emit Mov to existing register
+        KernelStmt::Assign {
+            name, value, span, ..
+        } => {
+            let (existing_reg, existing_ty) = ctx.locals.get(name).cloned().ok_or_else(|| {
+                syn::Error::new(
+                    *span,
+                    format!("cannot assign to undefined variable `{name}` in GPU kernel"),
+                )
+            })?;
+            let (val_reg, _val_ty, val_tokens) = lower_expr(ctx, value)?;
+            let ptx_ty = ctx.ptx_type_tokens(&existing_ty);
+            let tokens = quote! {
+                #val_tokens
+                kernel.push(PtxInstruction::Mov {
+                    dst: #existing_reg,
+                    src: Operand::Reg(#val_reg),
+                    ty: PtxType::#ptx_ty,
+                });
+            };
+            Ok(tokens)
+        }
         KernelStmt::IndexAssign {
             array,
             index,
@@ -392,6 +429,211 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
                 memory::lower_index_write(ctx, array, &array_reg, &idx_reg, &val_reg, &elem_ty);
             Ok(quote! { #idx_tokens #val_tokens #store_tokens })
         }
+
+        // for var in start..end { body }
+        KernelStmt::For {
+            var,
+            start,
+            end,
+            body,
+            span,
+        } => {
+            // 1. Lower end first (its type drives the counter type)
+            let (end_reg, end_ty, end_tokens) = lower_expr(ctx, end)?;
+
+            // 2. Lower start — coerce unsuffixed literals to match end type
+            let coerced_start = coerce_literal_type(start, &end_ty);
+            let start_expr = coerced_start.as_ref().unwrap_or(start);
+            let (start_reg, start_ty, start_tokens) = lower_expr(ctx, start_expr)?;
+
+            // Type check: start and end must have the same type
+            if start_ty != end_ty {
+                return Err(syn::Error::new(
+                    *span,
+                    format!(
+                        "`for` loop range type mismatch: start is `{}` but end is `{}` \
+                         — use explicit suffix (e.g., `0u32..n`)",
+                        start_ty.display_name(),
+                        end_ty.display_name()
+                    ),
+                ));
+            }
+
+            let counter_ty = end_ty;
+            let ptx_ty = ctx.ptx_type_tokens(&counter_ty);
+
+            // 3. Allocate counter register, init from start
+            let counter_reg = ctx.fresh_reg();
+            let init_tokens = quote! {
+                let #counter_reg = alloc.alloc(PtxType::#ptx_ty);
+                kernel.push(PtxInstruction::Mov {
+                    dst: #counter_reg,
+                    src: Operand::Reg(#start_reg),
+                    ty: PtxType::#ptx_ty,
+                });
+            };
+
+            // 4. Register loop var in locals
+            let prev_local = ctx
+                .locals
+                .insert(var.clone(), (counter_reg.clone(), counter_ty.clone()));
+
+            // 5. Generate labels
+            let loop_start = ctx.fresh_label("LOOP_START");
+            let loop_end = ctx.fresh_label("LOOP_END");
+
+            // 6. Emit loop start label
+            let start_label_tokens = quote! {
+                kernel.push(PtxInstruction::Label(#loop_start.to_string()));
+            };
+
+            // 7. Bounds check: setp.ge counter, end → @pred bra LOOP_END
+            let pred_reg = ctx.fresh_reg();
+            let cmp_tokens = quote! {
+                let #pred_reg = alloc.alloc(PtxType::Pred);
+                kernel.push(PtxInstruction::Control(ControlOp::SetP {
+                    dst: #pred_reg,
+                    cmp_op: CmpOp::Ge,
+                    lhs: Operand::Reg(#counter_reg),
+                    rhs: Operand::Reg(#end_reg),
+                    ty: PtxType::#ptx_ty,
+                }));
+                kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+                    pred: #pred_reg,
+                    target: #loop_end.to_string(),
+                    negate: false,
+                }));
+            };
+
+            // 8. Lower body
+            let body_tokens = lower_stmts(ctx, body)?;
+
+            // 9. Increment counter in-place: add counter, counter, 1
+            let imm_one = match &counter_ty {
+                KernelType::I32 => quote! { Operand::ImmI32(1) },
+                KernelType::U32 => quote! { Operand::ImmU32(1) },
+                KernelType::I64 => quote! { Operand::ImmI64(1) },
+                KernelType::U64 => quote! { Operand::ImmU64(1) },
+                _ => {
+                    return Err(syn::Error::new(
+                        *span,
+                        format!(
+                            "`for` loop counter must be an integer type, got `{}`",
+                            counter_ty.display_name()
+                        ),
+                    ));
+                }
+            };
+            let inc_tokens = quote! {
+                kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                    dst: #counter_reg,
+                    lhs: Operand::Reg(#counter_reg),
+                    rhs: #imm_one,
+                    ty: PtxType::#ptx_ty,
+                }));
+            };
+
+            // 10. Back-edge: bra LOOP_START
+            let back_edge_tokens = quote! {
+                kernel.push(PtxInstruction::Control(ControlOp::Bra {
+                    target: #loop_start.to_string(),
+                }));
+            };
+
+            // 11. Loop end label
+            let end_label_tokens = quote! {
+                kernel.push(PtxInstruction::Label(#loop_end.to_string()));
+            };
+
+            // 12. Remove loop var from locals (restore previous if shadowed)
+            match prev_local {
+                Some(prev) => {
+                    ctx.locals.insert(var.clone(), prev);
+                }
+                None => {
+                    ctx.locals.remove(var);
+                }
+            }
+
+            Ok(quote! {
+                #end_tokens
+                #start_tokens
+                #init_tokens
+                #start_label_tokens
+                #cmp_tokens
+                #body_tokens
+                #inc_tokens
+                #back_edge_tokens
+                #end_label_tokens
+            })
+        }
+
+        // while condition { body }
+        KernelStmt::While {
+            condition, body, ..
+        } => {
+            // 1. Generate labels
+            let loop_start = ctx.fresh_label("LOOP_START");
+            let loop_end = ctx.fresh_label("LOOP_END");
+
+            // 2. Emit loop start label
+            let start_label_tokens = quote! {
+                kernel.push(PtxInstruction::Label(#loop_start.to_string()));
+            };
+
+            // 3. Lower condition → predicate
+            let (pred_reg, _pred_ty, cond_tokens) = lower_expr(ctx, condition)?;
+
+            // 4. Branch: @!pred bra LOOP_END (exit if condition is false)
+            let branch_tokens = quote! {
+                kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+                    pred: #pred_reg,
+                    target: #loop_end.to_string(),
+                    negate: true,
+                }));
+            };
+
+            // 5. Lower body
+            let body_tokens = lower_stmts(ctx, body)?;
+
+            // 6. Back-edge: bra LOOP_START
+            let back_edge_tokens = quote! {
+                kernel.push(PtxInstruction::Control(ControlOp::Bra {
+                    target: #loop_start.to_string(),
+                }));
+            };
+
+            // 7. Loop end label
+            let end_label_tokens = quote! {
+                kernel.push(PtxInstruction::Label(#loop_end.to_string()));
+            };
+
+            Ok(quote! {
+                #start_label_tokens
+                #cond_tokens
+                #branch_tokens
+                #body_tokens
+                #back_edge_tokens
+                #end_label_tokens
+            })
+        }
+    }
+}
+
+/// If `expr` is an unsuffixed integer literal (`LitInt` with default type),
+/// return a copy with its type changed to `target_ty`. This allows `0..n`
+/// where `n: u32` to work without requiring `0u32..n`.
+fn coerce_literal_type(expr: &KernelExpr, target_ty: &KernelType) -> Option<KernelExpr> {
+    use crate::kernel_ir::expr::KernelExpr as KE;
+    match expr {
+        // Default-typed integer literals (unsuffixed) have type I32 from the parser.
+        // Coerce to target if the target is also an integer type.
+        KE::LitInt(value, KernelType::I32, span)
+            if target_ty.is_integer() && *target_ty != KernelType::I32 =>
+        {
+            Some(KE::LitInt(*value, target_ty.clone(), *span))
+        }
+        _ => None,
     }
 }
 
@@ -813,5 +1055,166 @@ mod tests {
         };
         let err = lower_expr(&mut ctx, &expr).unwrap_err();
         assert!(err.to_string().contains("not a slice"));
+    }
+
+    // --- Sprint 3.1: Assign + Loops ---
+
+    #[test]
+    fn lower_assign() {
+        let mut ctx = LoweringContext::new();
+        let existing_reg = Ident::new("_kaio_r0", Span::call_site());
+        ctx.locals
+            .insert("x".to_string(), (existing_reg.clone(), KernelType::F32));
+        ctx.locals.insert(
+            "y".to_string(),
+            (Ident::new("_kaio_r1", Span::call_site()), KernelType::F32),
+        );
+
+        let stmt = KernelStmt::Assign {
+            name: "x".to_string(),
+            value: KernelExpr::Var("y".to_string(), Span::call_site()),
+            span: Span::call_site(),
+        };
+        let tokens = lower_stmt(&mut ctx, &stmt).unwrap();
+        let code = tokens.to_string();
+
+        // Should emit Mov to existing register
+        assert!(code.contains("Mov"));
+        assert!(code.contains("Operand :: Reg"));
+
+        // x should still be in locals with the same register
+        let (reg, _) = &ctx.locals["x"];
+        assert_eq!(reg.to_string(), "_kaio_r0");
+    }
+
+    #[test]
+    fn lower_assign_undefined_var() {
+        let mut ctx = LoweringContext::new();
+        let stmt = KernelStmt::Assign {
+            name: "nonexistent".to_string(),
+            value: KernelExpr::LitInt(0, KernelType::I32, Span::call_site()),
+            span: Span::call_site(),
+        };
+        let err = lower_stmt(&mut ctx, &stmt).unwrap_err();
+        assert!(err.to_string().contains("undefined variable"));
+    }
+
+    #[test]
+    fn lower_for_loop() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "n".to_string(),
+            (Ident::new("_kaio_r0", Span::call_site()), KernelType::U32),
+        );
+
+        let stmt = KernelStmt::For {
+            var: "i".to_string(),
+            start: KernelExpr::LitInt(0, KernelType::U32, Span::call_site()),
+            end: KernelExpr::Var("n".to_string(), Span::call_site()),
+            body: vec![],
+            span: Span::call_site(),
+        };
+        let tokens = lower_stmt(&mut ctx, &stmt).unwrap();
+        let code = tokens.to_string();
+
+        // Should contain loop structure
+        assert!(code.contains("LOOP_START_"));
+        assert!(code.contains("LOOP_END_"));
+        assert!(code.contains("SetP"));
+        assert!(code.contains("CmpOp :: Ge"));
+        assert!(code.contains("BraPred"));
+        assert!(code.contains("ArithOp :: Add")); // increment
+        assert!(code.contains("ControlOp :: Bra")); // back-edge
+
+        // Loop var should be removed from locals after the loop
+        assert!(!ctx.locals.contains_key("i"));
+    }
+
+    #[test]
+    fn lower_for_loop_literal_coercion() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "n".to_string(),
+            (Ident::new("_kaio_r0", Span::call_site()), KernelType::U32),
+        );
+
+        // for i in 0..n — start is unsuffixed LitInt (default I32), end is U32
+        // Should coerce start literal to U32
+        let stmt = KernelStmt::For {
+            var: "i".to_string(),
+            start: KernelExpr::LitInt(0, KernelType::I32, Span::call_site()),
+            end: KernelExpr::Var("n".to_string(), Span::call_site()),
+            body: vec![],
+            span: Span::call_site(),
+        };
+        let result = lower_stmt(&mut ctx, &stmt);
+        assert!(
+            result.is_ok(),
+            "literal coercion should allow 0..n where n: u32"
+        );
+    }
+
+    #[test]
+    fn lower_while_loop() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "x".to_string(),
+            (Ident::new("_kaio_r0", Span::call_site()), KernelType::U32),
+        );
+
+        let stmt = KernelStmt::While {
+            condition: KernelExpr::BinOp {
+                op: BinOpKind::Gt,
+                lhs: Box::new(KernelExpr::Var("x".to_string(), Span::call_site())),
+                rhs: Box::new(KernelExpr::LitInt(0, KernelType::U32, Span::call_site())),
+                span: Span::call_site(),
+            },
+            body: vec![],
+            span: Span::call_site(),
+        };
+        let tokens = lower_stmt(&mut ctx, &stmt).unwrap();
+        let code = tokens.to_string();
+
+        // Should contain loop structure
+        assert!(code.contains("LOOP_START_"));
+        assert!(code.contains("LOOP_END_"));
+        assert!(code.contains("negate : true")); // @!pred for while exit
+        assert!(code.contains("ControlOp :: Bra")); // back-edge
+    }
+
+    #[test]
+    fn lower_nested_loops_unique_labels() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "n".to_string(),
+            (Ident::new("_kaio_r0", Span::call_site()), KernelType::U32),
+        );
+        ctx.locals.insert(
+            "m".to_string(),
+            (Ident::new("_kaio_r1", Span::call_site()), KernelType::U32),
+        );
+
+        let inner = KernelStmt::For {
+            var: "j".to_string(),
+            start: KernelExpr::LitInt(0, KernelType::U32, Span::call_site()),
+            end: KernelExpr::Var("m".to_string(), Span::call_site()),
+            body: vec![],
+            span: Span::call_site(),
+        };
+        let outer = KernelStmt::For {
+            var: "i".to_string(),
+            start: KernelExpr::LitInt(0, KernelType::U32, Span::call_site()),
+            end: KernelExpr::Var("n".to_string(), Span::call_site()),
+            body: vec![inner],
+            span: Span::call_site(),
+        };
+        let tokens = lower_stmt(&mut ctx, &outer).unwrap();
+        let code = tokens.to_string();
+
+        // Should have 4 unique labels (2 per loop)
+        assert!(code.contains("LOOP_START_0"));
+        assert!(code.contains("LOOP_END_1"));
+        assert!(code.contains("LOOP_START_2"));
+        assert!(code.contains("LOOP_END_3"));
     }
 }

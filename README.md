@@ -2,10 +2,10 @@
 
 **Rust-native GPU kernel authoring framework.**
 
-KAIO (from the Greek καίω — _to kindle, to ignite_) lets you write GPU
+KAIO (from the Greek καίω - _to kindle, to ignite_) lets you write GPU
 compute kernels in Rust and compile them to PTX for execution on NVIDIA
 GPUs. Cross-platform (Windows + Linux), compile-time PTX emission, and
-Rust's type safety — no CUDA C++, no Python, no runtime JIT.
+Rust's type safety: no CUDA C++, no Python, no runtime JIT.
 
 ## Why KAIO?
 
