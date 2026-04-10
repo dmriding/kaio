@@ -1,7 +1,7 @@
 # Sprint 2.3 — Comparisons + If/Else + `@!pred`
 
 **Status:** Complete
-**Commit:** (pending)
+**Commit:** `1652d43`
 
 ## Context
 
