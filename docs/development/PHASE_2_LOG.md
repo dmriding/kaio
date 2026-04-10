@@ -10,7 +10,7 @@ Master plan: [phase2_master_plan.md](phase2_master_plan.md)
 | Sprint | Scope | Status | Commit | Tests |
 |---|---|---|---|---|
 | [2.1](sprints/sprint_2_1.md) | Macro skeleton + fn signature parsing | Done | `b3d254f` | +23 = 76 |
-| [2.2](sprints/sprint_2_2.md) | Expression lowering: arithmetic | Planned | — | — |
+| [2.2](sprints/sprint_2_2.md) | Expression lowering: arithmetic | Done | `5468051` | +44 = 120 |
 | [2.3](sprints/sprint_2_3.md) | Comparisons + if/else + `@!pred` | Planned | — | — |
 | [2.4](sprints/sprint_2_4.md) | Array indexing + memory access | Planned | — | — |
 | [2.5](sprints/sprint_2_5.md) | Built-in functions (thread/block, math) | Planned | — | — |

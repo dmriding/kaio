@@ -1,7 +1,7 @@
 # Sprint 2.2 — Arithmetic Expression Lowering
 
 **Status:** Complete
-**Commit:** (pending)
+**Commit:** `5468051`
 
 ## Context
 
