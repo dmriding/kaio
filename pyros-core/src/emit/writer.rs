@@ -49,6 +49,13 @@ impl PtxWriter {
         Ok(())
     }
 
+    /// Write a line without indentation (for labels and top-level directives).
+    pub fn raw_line(&mut self, s: &str) -> fmt::Result {
+        self.buf.push_str(s);
+        self.buf.push('\n');
+        Ok(())
+    }
+
     /// Write a blank line.
     pub fn blank(&mut self) -> fmt::Result {
         self.buf.push('\n');

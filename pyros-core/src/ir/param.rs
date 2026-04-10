@@ -51,6 +51,21 @@ impl PtxParam {
             Self::Scalar { name, .. } | Self::Pointer { name, .. } => name,
         }
     }
+
+    /// PTX parameter declaration string (without trailing comma).
+    ///
+    /// - Scalar: `.param .u32 n`
+    /// - Pointer: `.param .u64 a_ptr` (always 64-bit address)
+    pub fn ptx_decl(&self) -> String {
+        match self {
+            Self::Scalar { name, ptx_type } => {
+                format!(".param {} {}", ptx_type.ptx_suffix(), name)
+            }
+            Self::Pointer { name, .. } => {
+                format!(".param .u64 {}", name)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -81,5 +96,18 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn scalar_ptx_decl() {
+        let p = PtxParam::scalar("n", PtxType::U32);
+        assert_eq!(p.ptx_decl(), ".param .u32 n");
+    }
+
+    #[test]
+    fn pointer_ptx_decl() {
+        let p = PtxParam::pointer("a_ptr", PtxType::F32);
+        // Pointers always declared as .u64 regardless of elem_type
+        assert_eq!(p.ptx_decl(), ".param .u64 a_ptr");
     }
 }
