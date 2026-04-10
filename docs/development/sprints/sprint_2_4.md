@@ -1,7 +1,7 @@
 # Sprint 2.4 — Array Indexing + Memory Access
 
 **Status:** Complete
-**Commit:** (pending)
+**Commit:** `374530d`
 
 ## Context
 
