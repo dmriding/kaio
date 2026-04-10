@@ -1,7 +1,7 @@
 # Sprint 2.6 — Launch Wrapper + Full Pipeline
 
 **Status:** Complete
-**Commit:** (pending)
+**Commit:** `a89eb2b`
 
 ## Context
 
