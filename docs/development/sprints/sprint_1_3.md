@@ -1,6 +1,6 @@
 # Sprint 1.3 — Memory Instructions
 
-**Commit:** pending
+**Commit:** `23db945`
 **Status:** Complete
 
 ## Context
