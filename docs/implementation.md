@@ -1,6 +1,6 @@
-# PYROS — Implementation Details
+# KAIO — Implementation Details
 
-## Layer 1: PTX Codegen (`pyros-core`)
+## Layer 1: PTX Codegen (`kaio-core`)
 
 ### What This Layer Does
 
@@ -111,7 +111,7 @@ Each IR node implements `emit(&self, writer: &mut PtxWriter) -> Result<()>`:
 
 ---
 
-## Layer 2: Runtime (`pyros-runtime`)
+## Layer 2: Runtime (`kaio-runtime`)
 
 ### What This Layer Does
 
@@ -119,9 +119,9 @@ Handles all interaction with the GPU: loading compiled PTX modules, allocating d
 
 ### Foundation: cudarc
 
-[`cudarc`](https://github.com/chelsea0x3b/cudarc) provides safe Rust bindings to the CUDA driver API. PYROS builds on top of this rather than writing raw FFI bindings. (Note: the canonical crates.io release is now the `chelsea0x3b/cudarc` fork; earlier docs referenced `coreylowman/cudarc`.)
+[`cudarc`](https://github.com/chelsea0x3b/cudarc) provides safe Rust bindings to the CUDA driver API. KAIO builds on top of this rather than writing raw FFI bindings. (Note: the canonical crates.io release is now the `chelsea0x3b/cudarc` fork; earlier docs referenced `coreylowman/cudarc`.)
 
-Key `cudarc` capabilities PYROS uses:
+Key `cudarc` capabilities KAIO uses:
 - `CudaDevice` — device handle, context management
 - `CudaSlice<T>` — device memory allocation with type safety
 - `CudaModule` / `CudaFunction` — PTX module loading and kernel launch
@@ -213,7 +213,7 @@ pub fn enumerate_devices() -> Result<Vec<DeviceInfo>>;
 
 ---
 
-## Layer 3: Proc Macro DSL (`pyros-macros`)
+## Layer 3: Proc Macro DSL (`kaio-macros`)
 
 ### What This Layer Does
 
@@ -222,7 +222,7 @@ Provides the `#[gpu_kernel]` attribute macro that transforms Rust-like function 
 ### User-Facing API
 
 ```rust
-use pyros::prelude::*;
+use kaio::prelude::*;
 
 #[gpu_kernel(block_size = 256)]
 fn vector_add(a: &[f32], b: &[f32], out: &mut [f32], n: u32) {
@@ -233,7 +233,7 @@ fn vector_add(a: &[f32], b: &[f32], out: &mut [f32], n: u32) {
 }
 
 fn main() -> Result<()> {
-    let device = PyrosDevice::new(0)?;
+    let device = KaioDevice::new(0)?;
     let a = device.alloc_from(&vec![1.0f32; 1024])?;
     let b = device.alloc_from(&vec![2.0f32; 1024])?;
     let mut out = device.alloc_zeroed::<f32>(1024)?;
@@ -252,7 +252,7 @@ The `#[gpu_kernel]` macro:
 
 1. Parses the function body using `syn`
 2. Validates types (only `GpuType` types allowed as parameters)
-3. Transforms the AST into PYROS IR (Layer 1)
+3. Transforms the AST into KAIO IR (Layer 1)
 4. Emits PTX via Layer 1 at compile time
 5. Generates a launch wrapper function that:
    - Accepts host-side typed arguments
@@ -290,11 +290,11 @@ The `#[gpu_kernel]` macro:
 
 ---
 
-## Layer 4: Block-Level Operations (`pyros-ops`)
+## Layer 4: Block-Level Operations (`kaio-ops`)
 
 ### What This Layer Does
 
-Provides higher-level abstractions for operating on blocks/tiles of data rather than individual elements. This is where PYROS approaches Triton's core innovation — the programmer thinks in blocks, the framework handles thread mapping and shared memory.
+Provides higher-level abstractions for operating on blocks/tiles of data rather than individual elements. This is where KAIO approaches Triton's core innovation — the programmer thinks in blocks, the framework handles thread mapping and shared memory.
 
 ### Key Abstractions
 
@@ -356,11 +356,11 @@ The framework automatically:
 
 ### Error Handling
 
-PYROS uses a unified error type across all layers:
+KAIO uses a unified error type across all layers:
 
 ```rust
 #[derive(Debug, thiserror::Error)]
-pub enum PyrosError {
+pub enum KaioError {
     #[error("CUDA error: {0}")]
     Cuda(#[from] cudarc::driver::DriverError),
 
@@ -380,10 +380,10 @@ pub enum PyrosError {
 
 ### Logging & Diagnostics
 
-- `PYROS_LOG=debug` — print emitted PTX to stderr
-- `PYROS_LOG=trace` — print IR transformations
-- `PYROS_DUMP_PTX=1` — write `.ptx` files to disk alongside the binary
-- `PYROS_PROFILE=1` — print kernel launch times and memory transfer times
+- `KAIO_LOG=debug` — print emitted PTX to stderr
+- `KAIO_LOG=trace` — print IR transformations
+- `KAIO_DUMP_PTX=1` — write `.ptx` files to disk alongside the binary
+- `KAIO_PROFILE=1` — print kernel launch times and memory transfer times
 
 ### Platform-Specific Notes
 

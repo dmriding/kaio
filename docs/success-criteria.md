@@ -1,4 +1,4 @@
-# PYROS — Success Criteria
+# KAIO — Success Criteria
 
 ## Universal Quality Gates
 
@@ -45,14 +45,14 @@ These gates apply to ALL phases. No phase is considered complete unless every ga
 | 1.5 | Correct results for all supported dtypes: `f32`, `f64`, `i32`, `u32` | Parameterized integration tests |
 | 1.6 | Device enumeration returns correct GPU name and compute capability | Integration test against known hardware |
 | 1.7 | Host → device → host round-trip preserves data exactly | Integration test: send 10K elements, read back, assert equal |
-| 1.8 | OOM error is caught and returned as `PyrosError::OutOfMemory` | Integration test: attempt allocation larger than device memory |
+| 1.8 | OOM error is caught and returned as `KaioError::OutOfMemory` | Integration test: attempt allocation larger than device memory |
 
 ### Coverage Targets
 
 | Crate | Minimum Line Coverage |
 |-------|----------------------|
-| `pyros-core` | 70% (instruction emitters are highly testable) |
-| `pyros-runtime` | 60% (some paths require GPU, harder to test in CI) |
+| `kaio-core` | 70% (instruction emitters are highly testable) |
+| `kaio-runtime` | 60% (some paths require GPU, harder to test in CI) |
 | **Workspace total** | **≥60%** |
 
 ### Performance Criteria (Phase 1)
@@ -75,7 +75,7 @@ None. Phase 1 is about correctness, not performance. If `vector_add` runs and pr
 | 2.6 | Error messages include the source location within the kernel body | `trybuild` output inspection |
 | 2.7 | `if/else` branches produce correct predicated code | Integration test: kernel with conditional logic |
 | 2.8 | Type casting (`as`) produces correct `cvt` instructions | Integration test: `f32` → `i32`, `i32` → `f32`, etc. |
-| 2.9 | `PYROS_DUMP_PTX=1` writes `.ptx` files to disk | Integration test: check file existence and validity |
+| 2.9 | `KAIO_DUMP_PTX=1` writes `.ptx` files to disk | Integration test: check file existence and validity |
 | 2.10 | Math functions produce results within tolerance of CPU reference | Integration test: `sqrt`, `exp`, `log`, `tanh` against `f32` stdlib |
 
 ### Compile-Fail Test Cases (minimum set)
@@ -97,9 +97,9 @@ None. Phase 1 is about correctness, not performance. If `vector_add` runs and pr
 
 | Crate | Minimum Line Coverage |
 |-------|----------------------|
-| `pyros-core` | 70% |
-| `pyros-runtime` | 60% |
-| `pyros-macros` | 65% (proc macro logic is testable via expansion) |
+| `kaio-core` | 70% |
+| `kaio-runtime` | 60% |
+| `kaio-macros` | 65% (proc macro logic is testable via expansion) |
 | **Workspace total** | **≥60%** |
 
 ### Numerical Accuracy Criteria
@@ -144,9 +144,9 @@ None. Phase 1 is about correctness, not performance. If `vector_add` runs and pr
 
 | Crate | Minimum Line Coverage |
 |-------|----------------------|
-| `pyros-core` | 70% |
-| `pyros-runtime` | 60% |
-| `pyros-macros` | 65% |
+| `kaio-core` | 70% |
+| `kaio-runtime` | 60% |
+| `kaio-macros` | 65% |
 | **Workspace total** | **≥65%** |
 
 Note: Coverage target increases by 5% from Phase 2. Each phase should improve coverage, not just maintain it.
@@ -164,7 +164,7 @@ Note: Coverage target increases by 5% from Phase 2. Each phase should improve co
 | 4.3 | Tiled `matmul` produces correct results for square matrices | Integration test: A×B = C, compare to CPU reference |
 | 4.4 | Tiled `matmul` produces correct results for non-square matrices | Integration test: (M×K) × (K×N) for various M, K, N |
 | 4.5 | Tiled `matmul` handles non-tile-aligned dimensions | Integration test: M, K, N not divisible by tile size |
-| 4.6 | Performance within 60% of cuBLAS `sgemm` for 2048×2048 f32 | Benchmark: `pyros_matmul` vs `cublas_sgemm` |
+| 4.6 | Performance within 60% of cuBLAS `sgemm` for 2048×2048 f32 | Benchmark: `kaio_matmul` vs `cublas_sgemm` |
 | 4.7 | Memory coalescing warnings emitted for known-bad patterns | Compile-time diagnostic test |
 | 4.8 | No shared memory bank conflicts in generated matmul PTX | `ncu` profiling or compile-time analysis |
 
@@ -182,10 +182,10 @@ These are v0.1 targets. Performance optimization continues post-release.
 
 | Crate | Minimum Line Coverage |
 |-------|----------------------|
-| `pyros-core` | 70% |
-| `pyros-runtime` | 60% |
-| `pyros-macros` | 65% |
-| `pyros-ops` | 65% |
+| `kaio-core` | 70% |
+| `kaio-runtime` | 60% |
+| `kaio-macros` | 65% |
+| `kaio-ops` | 65% |
 | **Workspace total** | **≥65%** |
 
 ---
@@ -217,7 +217,7 @@ These are v0.1 targets. Performance optimization continues post-release.
 
 | # | Item | Status |
 |---|------|--------|
-| P1 | Crate name `pyros` claimed on crates.io | ☐ |
+| P1 | Crate name `kaio` claimed on crates.io | ☐ |
 | P2 | License: MIT OR Apache-2.0 (dual license) | ☐ |
 | P3 | `Cargo.toml` metadata: description, repository, keywords, categories | ☐ |
 | P4 | `CHANGELOG.md` covers all phases | ☐ |
@@ -232,10 +232,10 @@ These are v0.1 targets. Performance optimization continues post-release.
 
 | Crate | Minimum Line Coverage |
 |-------|----------------------|
-| `pyros-core` | 75% |
-| `pyros-runtime` | 65% |
-| `pyros-macros` | 70% |
-| `pyros-ops` | 70% |
+| `kaio-core` | 75% |
+| `kaio-runtime` | 65% |
+| `kaio-macros` | 70% |
+| `kaio-ops` | 70% |
 | **Workspace total** | **≥70%** |
 
 ---

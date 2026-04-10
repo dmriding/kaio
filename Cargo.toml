@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["pyros-core", "pyros-runtime", "pyros-macros", "pyros"]
+members = ["kaio-core", "kaio-runtime", "kaio-macros", "kaio"]
 
 [workspace.package]
 version = "0.0.2"
@@ -8,7 +8,7 @@ edition = "2024"
 rust-version = "1.94"
 authors = ["Dave Riding <david@netviper.gr>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/dmriding/pyros"
+repository = "https://github.com/dmriding/kaio"
 
 [workspace.dependencies]
 # cudarc requires selecting one cuda-XXXXX feature to pick FFI binding headers.
@@ -18,7 +18,7 @@ repository = "https://github.com/dmriding/pyros"
 #
 # nvrtc: required for the Ptx type + CudaContext::load_module(). Despite the
 # name, we do NOT use NVRTC for C kernel compilation — we use Ptx::from_src()
-# to pass PYROS-emitted PTX text to the driver's cuModuleLoadData. The nvrtc
+# to pass KAIO-emitted PTX text to the driver's cuModuleLoadData. The nvrtc
 # feature just compiles the module containing these types. With dynamic-loading,
 # the NVRTC shared library is only dlopened if compile_ptx() is called (we don't).
 cudarc = { version = "0.19", default-features = false, features = ["driver", "std", "dynamic-loading", "cuda-12080", "nvrtc"] }

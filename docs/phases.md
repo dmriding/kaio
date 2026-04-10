@@ -1,8 +1,8 @@
-# PYROS — Development Phases
+# KAIO — Development Phases
 
 ## Overview
 
-PYROS is developed in five phases, each producing a shippable milestone. Phases are designed to be Forge-friendly: decomposable into independent sprints with clear inputs, outputs, and testable boundaries.
+KAIO is developed in five phases, each producing a shippable milestone. Phases are designed to be Forge-friendly: decomposable into independent sprints with clear inputs, outputs, and testable boundaries.
 
 Each phase builds on the previous. No phase is started until the prior phase meets its success criteria (see `success-criteria.md`).
 
@@ -15,8 +15,8 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 **Duration:** 2 weeks
 
 **Deliverables:**
-- `pyros-core` crate with PTX IR types and instruction emission
-- `pyros-runtime` crate with basic device management and kernel launch
+- `kaio-core` crate with PTX IR types and instruction emission
+- `kaio-runtime` crate with basic device management and kernel launch
 - One working end-to-end kernel: `vector_add`
 - PTX output passes `ptxas --verify` on both Windows and Linux
 - Kernel executes on a real GPU and produces correct output
@@ -53,16 +53,16 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 **Duration:** 2-3 weeks
 
 **Deliverables:**
-- `pyros-macros` crate with `#[gpu_kernel]` attribute macro
+- `kaio-macros` crate with `#[gpu_kernel]` attribute macro
 - Macro parses a subset of Rust (arithmetic, comparisons, `if/else`, `let`, array indexing)
-- Macro emits PTX via `pyros-core` at compile time
+- Macro emits PTX via `kaio-core` at compile time
 - Macro generates launch wrapper function
 - Working kernels: `vector_add`, `saxpy`, `fused_gelu`, `fused_relu`
 - Compile-fail tests for invalid kernel signatures (via `trybuild`)
 
 **What Gets Built:**
 - `syn`-based parser for the supported Rust subset
-- AST → PYROS IR lowering
+- AST → KAIO IR lowering
 - Type inference and validation within kernel bodies
 - Launch wrapper code generation (grid/block computation, argument marshaling)
 - Built-in function registry (`thread_idx_x()`, `block_idx_x()`, `sqrt()`, `exp()`, etc.)
@@ -80,7 +80,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 | 2.7 | Type validation + error messages | Compile-fail tests, clear diagnostics |
 | 2.8 | End-to-end kernel tests | `vector_add`, `saxpy`, `fused_gelu`, `fused_relu` |
 
-**Key Risk:** Proc macro debugging is painful. Mitigation: extensive `trybuild` test suite, `PYROS_DUMP_PTX` for inspecting output.
+**Key Risk:** Proc macro debugging is painful. Mitigation: extensive `trybuild` test suite, `KAIO_DUMP_PTX` for inspecting output.
 
 ---
 
@@ -130,7 +130,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 **Duration:** 3-4 weeks
 
 **Deliverables:**
-- `pyros-ops` crate with block-level abstractions
+- `kaio-ops` crate with block-level abstractions
 - `block_load` / `block_store` — coalesced global ↔ shared memory transfers
 - `block_dot` — tiled matrix multiply via shared memory
 - Tiled matmul kernel benchmarked against cuBLAS
@@ -163,7 +163,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 
 ## Phase 5: Fused Attention & Community Release
 
-**Goal:** Implement fused multi-head attention and publish PYROS to crates.io.
+**Goal:** Implement fused multi-head attention and publish KAIO to crates.io.
 
 **Duration:** 3-4 weeks
 
@@ -171,7 +171,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 - Fused multi-head attention kernel (FlashAttention-style)
 - Attention kernel validated against PyTorch `F.scaled_dot_product_attention`
 - Auto-tuning: grid search over block sizes and tiling configurations
-- `pyros` published to crates.io as v0.1.0
+- `kaio` published to crates.io as v0.1.0
 - Documentation: README, API docs, tutorial kernels, architecture guide
 - Blog post / r/rust announcement
 
@@ -207,6 +207,6 @@ These are future directions, not commitments:
 - **Quantized kernels:** INT8/INT4 for efficient inference
 - **Multi-GPU:** Kernel launch across multiple devices
 - **AMD ROCm support:** Emit GCN/CDNA ISA instead of PTX
-- **PyO3 bindings:** Use PYROS kernels from Python
+- **PyO3 bindings:** Use KAIO kernels from Python
 - **Tensor core ops:** `mma` instructions for fp16/bf16 matmul
 - **Async memory copies:** `cp.async` for Ampere+ architectures

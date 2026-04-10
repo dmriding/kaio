@@ -5,7 +5,7 @@
 
 ## Context
 
-First sprint of Phase 2. Establishes the `pyros-macros` crate, the parsing
+First sprint of Phase 2. Establishes the `kaio-macros` crate, the parsing
 layer, and the kernel IR type system. After this sprint, `#[gpu_kernel]`
 compiles (with a placeholder expansion) and all signature/attribute validation
 works.
@@ -101,20 +101,20 @@ validation, prelude, gpu_builtins stubs.
 Completed as planned.
 
 **Files created:** 7
-- `pyros-macros/Cargo.toml`
-- `pyros-macros/src/lib.rs`
-- `pyros-macros/src/parse/mod.rs`
-- `pyros-macros/src/parse/attrs.rs`
-- `pyros-macros/src/parse/signature.rs`
-- `pyros-macros/src/kernel_ir/mod.rs`
-- `pyros-macros/src/kernel_ir/types.rs`
+- `kaio-macros/Cargo.toml`
+- `kaio-macros/src/lib.rs`
+- `kaio-macros/src/parse/mod.rs`
+- `kaio-macros/src/parse/attrs.rs`
+- `kaio-macros/src/parse/signature.rs`
+- `kaio-macros/src/kernel_ir/mod.rs`
+- `kaio-macros/src/kernel_ir/types.rs`
 
 **Files modified:** 3
 - `Cargo.toml` (workspace members)
-- `pyros/Cargo.toml` (pyros-macros dependency)
-- `pyros/src/lib.rs` (re-export gpu_kernel)
+- `kaio/Cargo.toml` (kaio-macros dependency)
+- `kaio/src/lib.rs` (re-export gpu_kernel)
 
-**Tests:** 76 total (53 existing Phase 1 + 23 new pyros-macros), all passing.
+**Tests:** 76 total (53 existing Phase 1 + 23 new kaio-macros), all passing.
 - 8 attribute parsing tests (valid configs, rejection of invalid/missing)
 - 11 signature parsing tests (vector_add, all scalar types, f64 slices,
   rejection of return types/generics/unsupported types/lifetimes/self/

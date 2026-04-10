@@ -13,15 +13,15 @@ doc in [sprints/](sprints/) with full reasoning traces for every decision.
 | [1.3](sprints/sprint_1_3.md) | Memory instructions (LdParam, LdGlobal, StGlobal, CvtaToGlobal) | Done | `23db945` | +7 = 34 |
 | [1.4](sprints/sprint_1_4.md) | Control flow + special registers (SetP, Bra, BraPred, Ret) | Done | `3d96685` | +8 = 42 |
 | [1.5](sprints/sprint_1_5.md) | PtxWriter + full module emission (vector_add PTX emits!) | Done | `d635721` | +10 = 52 |
-| [1.6](sprints/sprint_1_6.md) | Runtime device + buffers (PyrosDevice, GpuBuffer, PyrosError) | Done | `83bbe31` | +7 GPU |
+| [1.6](sprints/sprint_1_6.md) | Runtime device + buffers (KaioDevice, GpuBuffer, KaioError) | Done | `83bbe31` | +7 GPU |
 | [1.7](sprints/sprint_1_7.md) | **Runtime launch + vector_add E2E — PHASE 1 GATE PASSED** | Done | `6b2f49b` | +2 GPU E2E |
 | [1.8](sprints/sprint_1_8.md) | Testing + coverage + docs polish — **PHASE 1 COMPLETE** | Done | `9f32721` | +1 ptxas = 53 host + 9 GPU |
 
 ## Key Validations
 
-- **nvcc golden PTX:** `pyros-core/tests/golden/nvcc_vector_add_sm89.ptx` —
+- **nvcc golden PTX:** `kaio-core/tests/golden/nvcc_vector_add_sm89.ptx` —
   compiled with `nvcc --ptx -arch=sm_89` from CUDA 12.8 on RTX 4090. All
   instruction emitters validated byte-for-byte against this file.
-- **cudarc smoke test:** `pyros-runtime` `#[ignore]` test confirms
+- **cudarc smoke test:** `kaio-runtime` `#[ignore]` test confirms
   `CudaContext::new(0)` + host↔device roundtrip works on the RTX 4090.
 - **PTX ISA version:** `.version 8.7` (CUDA 12.8 = PTX ISA 8.7, not 7.8).

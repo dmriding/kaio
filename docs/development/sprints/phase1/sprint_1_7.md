@@ -14,7 +14,7 @@ core thesis: Rust IR → PTX text → GPU execution.
 ### Enable cudarc `nvrtc` feature — not what we expected
 
 **Context:** Sprint 1.0 explicitly excluded the `nvrtc` feature because
-"PYROS emits PTX, doesn't compile C kernels." We discovered that
+"KAIO emits PTX, doesn't compile C kernels." We discovered that
 `CudaContext::load_module()` and the `Ptx` type are gated behind
 `#[cfg(feature = "nvrtc")]`.
 
@@ -39,13 +39,13 @@ chaining and `.launch(cfg)`. Wrapping it adds a layer of indirection,
 lifetime management, and maintenance burden — all for an API that
 Phase 2's macro will replace entirely with typed safe wrappers.
 
-**Decision:** Ship thin wrappers only (PyrosModule, PyrosFunction) and
+**Decision:** Ship thin wrappers only (KaioModule, KaioFunction) and
 use cudarc's launch builder directly in the E2E test. The unsafe launch
 is explicit and visible. No premature abstraction.
 
 ### stream() visibility — pub(crate) vs pub
 
-**Context:** `PyrosDevice::stream()` was `pub(crate)` from Sprint 1.6.
+**Context:** `KaioDevice::stream()` was `pub(crate)` from Sprint 1.6.
 The E2E integration test (in `tests/`) is outside the crate boundary
 and can't access `pub(crate)` methods.
 
@@ -75,8 +75,8 @@ at 2am, the test output shows exactly what PTX was generated.
 
 ## Scope
 
-**In:** cudarc `nvrtc` feature enablement, PyrosModule, PyrosFunction,
-PyrosDevice::load_ptx, stream() made public, LaunchConfig re-export,
+**In:** cudarc `nvrtc` feature enablement, KaioModule, KaioFunction,
+KaioDevice::load_ptx, stream() made public, LaunchConfig re-export,
 2 E2E GPU tests (small 3-element + large 10k-element).
 
 **Out:** LaunchPending abstraction, typed launch wrappers, compute_grid_1d
@@ -97,7 +97,7 @@ Two compile fixes during implementation:
 **Quality gates:**
 - `cargo build --workspace`: clean
 - `cargo test --workspace`: 52 host tests pass
-- `cargo test -p pyros-runtime -- --ignored`: 9 GPU tests pass (7 device + 2 E2E)
+- `cargo test -p kaio-runtime -- --ignored`: 9 GPU tests pass (7 device + 2 E2E)
 - `cargo fmt --all --check`: clean
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean
 

@@ -32,7 +32,7 @@ output, including paths and line numbers. They break when error messages
 change or the Rust toolchain updates.
 
 **Decision:** Document the regen command in the test file:
-`TRYBUILD=overwrite cargo test -p pyros compile_fail`. The pinned
+`TRYBUILD=overwrite cargo test -p kaio compile_fail`. The pinned
 toolchain in `rust-toolchain.toml` helps stability. Note that Windows-
 generated .stderr files may not match Linux output (path separators).
 
@@ -61,23 +61,23 @@ Completed as planned. All 10 compile-fail tests generate clear, span-
 accurate error messages.
 
 **Files created:** 12
-- `pyros/tests/compile_fail.rs` (trybuild runner)
-- `pyros/tests/compile_fail/cf01_string_param.rs`
-- `pyros/tests/compile_fail/cf02_return_type.rs`
-- `pyros/tests/compile_fail/cf03_println.rs`
-- `pyros/tests/compile_fail/cf04_unknown_call.rs`
-- `pyros/tests/compile_fail/cf05_missing_block_size.rs`
-- `pyros/tests/compile_fail/cf06_block_size_not_pow2.rs`
-- `pyros/tests/compile_fail/cf07_block_size_too_large.rs`
-- `pyros/tests/compile_fail/cf08_lifetime.rs`
-- `pyros/tests/compile_fail/cf09_loop.rs`
-- `pyros/tests/compile_fail/cf10_generics.rs`
+- `kaio/tests/compile_fail.rs` (trybuild runner)
+- `kaio/tests/compile_fail/cf01_string_param.rs`
+- `kaio/tests/compile_fail/cf02_return_type.rs`
+- `kaio/tests/compile_fail/cf03_println.rs`
+- `kaio/tests/compile_fail/cf04_unknown_call.rs`
+- `kaio/tests/compile_fail/cf05_missing_block_size.rs`
+- `kaio/tests/compile_fail/cf06_block_size_not_pow2.rs`
+- `kaio/tests/compile_fail/cf07_block_size_too_large.rs`
+- `kaio/tests/compile_fail/cf08_lifetime.rs`
+- `kaio/tests/compile_fail/cf09_loop.rs`
+- `kaio/tests/compile_fail/cf10_generics.rs`
 - 10 `.stderr` files (auto-generated)
 
 **Files modified:** 1
-- `pyros/Cargo.toml` (trybuild dev-dep)
+- `kaio/Cargo.toml` (trybuild dev-dep)
 
-**Tests:** 163 total (72 pyros-core + 90 pyros-macros + 1 compile_fail), all passing.
+**Tests:** 163 total (72 kaio-core + 90 kaio-macros + 1 compile_fail), all passing.
 - +1 trybuild test (runs 10 compile-fail cases internally)
 
 **Quality gates:** `cargo fmt --check` clean, `cargo clippy -- -D warnings`

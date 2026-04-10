@@ -13,7 +13,7 @@ functions needed for `fused_gelu` in Sprint 2.8.
 
 ### Thread/block builtins generate `special::` helper calls
 
-**Context:** pyros-core already has `special::tid_x()` etc. from Phase 1.
+**Context:** kaio-core already has `special::tid_x()` etc. from Phase 1.
 How should the macro's lowering call them?
 
 **Decision:** Generate `let (reg, instr) = special::tid_x(&mut alloc);
@@ -57,11 +57,11 @@ omission — explicitly scoped out.
 ## Scope
 
 **In:**
-- pyros-core: 7 new ArithOp variants (Abs, Min, Max, Sqrt, Ex2, Lg2, Rcp)
-- pyros-macros: `lower/builtins.rs` with 12 thread/block builtins +
+- kaio-core: 7 new ArithOp variants (Abs, Min, Max, Sqrt, Ex2, Lg2, Rcp)
+- kaio-macros: `lower/builtins.rs` with 12 thread/block builtins +
   7 math builtins (sqrt, abs, min, max, exp, log, tanh)
 - Wire `BuiltinCall` into `lower_expr`
-- 18 new tests (7 pyros-core + 11 pyros-macros)
+- 18 new tests (7 kaio-core + 11 kaio-macros)
 
 **Out:** `ArithOp::Fma` (deferred, not needed for Phase 2 E2E kernels).
 
@@ -70,15 +70,15 @@ omission — explicitly scoped out.
 Completed as planned.
 
 **Files created:** 1
-- `pyros-macros/src/lower/builtins.rs`
+- `kaio-macros/src/lower/builtins.rs`
 
 **Files modified:** 2
-- `pyros-core/src/instr/arith.rs` (7 new variants + Emit + 7 tests)
-- `pyros-macros/src/lower/mod.rs` (`pub mod builtins`, BuiltinCall in lower_expr)
+- `kaio-core/src/instr/arith.rs` (7 new variants + Emit + 7 tests)
+- `kaio-macros/src/lower/mod.rs` (`pub mod builtins`, BuiltinCall in lower_expr)
 
-**Tests:** 157 total (72 pyros-core + 85 pyros-macros), all passing.
-- pyros-core: +7 (abs, min, max, sqrt, ex2, lg2, rcp emit tests)
-- pyros-macros: +11 (thread_idx_x, block_idx_x, block_dim_x, sqrt, abs,
+**Tests:** 157 total (72 kaio-core + 85 kaio-macros), all passing.
+- kaio-core: +7 (abs, min, max, sqrt, ex2, lg2, rcp emit tests)
+- kaio-macros: +11 (thread_idx_x, block_idx_x, block_dim_x, sqrt, abs,
   min_max, exp synthesis, log synthesis, tanh synthesis with register
   reuse check, unknown builtin rejection, arg count rejection)
 

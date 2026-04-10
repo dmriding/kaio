@@ -8,7 +8,7 @@
 Sprint 1.5 is the orchestration sprint. All individual instruction emitters
 from sprints 1.2–1.4 are wired into a complete pipeline: PtxModule →
 PtxKernel → register declarations → instruction body → labels. This is the
-Phase 1 milestone for pyros-core — the crate can now produce a complete
+Phase 1 milestone for kaio-core — the crate can now produce a complete
 `.ptx` file from an IR tree.
 
 ## Decisions

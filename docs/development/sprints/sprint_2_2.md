@@ -5,14 +5,14 @@
 
 ## Context
 
-Sprint 2.1 delivered the `pyros-macros` crate skeleton with attribute and
+Sprint 2.1 delivered the `kaio-macros` crate skeleton with attribute and
 signature parsing. Sprint 2.2 builds the two key pieces needed for
-expression codegen: new arithmetic instructions in `pyros-core`, and the
-body parsing + expression lowering pipeline in `pyros-macros`.
+expression codegen: new arithmetic instructions in `kaio-core`, and the
+body parsing + expression lowering pipeline in `kaio-macros`.
 
 This sprint establishes the "generate code that builds IR" pattern: the
 macro's lowering pass produces `TokenStream` fragments that, when compiled,
-call `pyros-core`'s `RegisterAllocator`, `PtxInstruction`, and `ArithOp`
+call `kaio-core`'s `RegisterAllocator`, `PtxInstruction`, and `ArithOp`
 constructors. Every subsequent sprint follows this same pattern.
 
 ## Decisions
@@ -36,7 +36,7 @@ Floats have no mode.
 
 **Decision:** The `Emit` impl checks the type: floats emit `mul.f32` /
 `mul.f64`, integers emit `mul.lo.s32` / `mul.lo.u32` / etc. This is handled
-entirely in `pyros-core`'s emit logic — the macro's lowering doesn't need
+entirely in `kaio-core`'s emit logic — the macro's lowering doesn't need
 to know about it.
 
 ### LoweringContext includes locals map from Sprint 2.2
@@ -95,12 +95,12 @@ functions are future API surface.
 ## Scope
 
 **In:**
-- pyros-core: Sub, Mul, Div, Rem, Neg ArithOp variants + Emit + 11 tests
-- pyros-macros: KernelExpr, KernelStmt, BinOpKind, UnaryOpKind types
-- pyros-macros: parse/body.rs — full syn-to-KernelIR conversion
-- pyros-macros: lower/mod.rs — LoweringContext + lower_expr orchestrator
-- pyros-macros: lower/arith.rs — lower_binop + lower_neg
-- 33 new pyros-macros tests, 11 new pyros-core tests
+- kaio-core: Sub, Mul, Div, Rem, Neg ArithOp variants + Emit + 11 tests
+- kaio-macros: KernelExpr, KernelStmt, BinOpKind, UnaryOpKind types
+- kaio-macros: parse/body.rs — full syn-to-KernelIR conversion
+- kaio-macros: lower/mod.rs — LoweringContext + lower_expr orchestrator
+- kaio-macros: lower/arith.rs — lower_binop + lower_neg
+- 33 new kaio-macros tests, 11 new kaio-core tests
 
 **Out:** Comparison lowering (Sprint 2.3), if/else lowering (Sprint 2.3),
 array indexing (Sprint 2.4), built-in functions (Sprint 2.5), launch wrapper
@@ -111,23 +111,23 @@ codegen (Sprint 2.6), type validation (Sprint 2.7).
 Completed as planned.
 
 **Files created:** 5
-- `pyros-macros/src/kernel_ir/expr.rs`
-- `pyros-macros/src/kernel_ir/stmt.rs`
-- `pyros-macros/src/parse/body.rs`
-- `pyros-macros/src/lower/mod.rs`
-- `pyros-macros/src/lower/arith.rs`
+- `kaio-macros/src/kernel_ir/expr.rs`
+- `kaio-macros/src/kernel_ir/stmt.rs`
+- `kaio-macros/src/parse/body.rs`
+- `kaio-macros/src/lower/mod.rs`
+- `kaio-macros/src/lower/arith.rs`
 
 **Files modified:** 4
-- `pyros-core/src/instr/arith.rs` (5 new variants + Emit + 11 tests)
-- `pyros-macros/src/kernel_ir/mod.rs` (add expr, stmt exports)
-- `pyros-macros/src/parse/mod.rs` (add body module)
-- `pyros-macros/src/lib.rs` (add `mod lower`)
+- `kaio-core/src/instr/arith.rs` (5 new variants + Emit + 11 tests)
+- `kaio-macros/src/kernel_ir/mod.rs` (add expr, stmt exports)
+- `kaio-macros/src/parse/mod.rs` (add body module)
+- `kaio-macros/src/lib.rs` (add `mod lower`)
 
-**Tests:** 120 total (64 pyros-core + 56 pyros-macros), all passing.
-- pyros-core: +11 (emit_sub_s32, emit_sub_f32, emit_mul_lo_s32, emit_mul_f32,
+**Tests:** 120 total (64 kaio-core + 56 kaio-macros), all passing.
+- kaio-core: +11 (emit_sub_s32, emit_sub_f32, emit_mul_lo_s32, emit_mul_f32,
   emit_mul_lo_u32_with_immediate, emit_div_f32, emit_div_s32, emit_rem_u32,
   emit_neg_f32, emit_neg_s32, sub_via_ptx_instruction)
-- pyros-macros: +33 (17 body parsing, 2 expr type, 4 arith lowering,
+- kaio-macros: +33 (17 body parsing, 2 expr type, 4 arith lowering,
   8 lower_expr orchestrator, 2 BinOpKind classification)
 
 **Quality gates:** `cargo fmt --check` clean, `cargo clippy -- -D warnings`

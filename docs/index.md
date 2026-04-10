@@ -1,12 +1,12 @@
-# PYROS — Rust-Native GPU Kernel Authoring Framework
+# KAIO — Rust-Native GPU Kernel Authoring Framework
 
 > πῦρ (pyr) — fire. The forge where GPU kernels are crafted.
 
-## What Is PYROS?
+## What Is KAIO?
 
-PYROS is a Rust crate that lets developers write GPU compute kernels in Rust and compile them to PTX for execution on NVIDIA GPUs. It eliminates the need to write CUDA C++ or depend on Python-based tooling like OpenAI's Triton.
+KAIO is a Rust crate that lets developers write GPU compute kernels in Rust and compile them to PTX for execution on NVIDIA GPUs. It eliminates the need to write CUDA C++ or depend on Python-based tooling like OpenAI's Triton.
 
-## Why PYROS Exists
+## Why KAIO Exists
 
 The Rust ML ecosystem has no native way to author custom GPU kernels. Every project that needs a custom operation — fused activations, quantized inference, custom attention — hits the same wall: drop into CUDA C++, wrestle with FFI bindings, or accept the performance ceiling of pre-built ops.
 
@@ -17,7 +17,7 @@ Triton (OpenAI) solves this for Python, but:
 - **Slow compilation.** Kernels compile at runtime through Python → MLIR → LLVM → PTX. First launch can take 30+ seconds.
 - **Silent failures.** Wrong index math produces garbage output with no error.
 
-PYROS targets these gaps directly:
+KAIO targets these gaps directly:
 
 - **Cross-platform from day one.** Windows and Linux. `cargo build` just works.
 - **Compile-time PTX emission.** Kernels are compiled during `cargo build` via proc macros. Zero cold-start.
@@ -26,7 +26,7 @@ PYROS targets these gaps directly:
 
 ## Architecture Overview
 
-PYROS is structured in four layers, each building on the one below:
+KAIO is structured in four layers, each building on the one below:
 
 ```
 ┌─────────────────────────────────────────┐
@@ -47,12 +47,12 @@ PYROS is structured in four layers, each building on the one below:
 ## Crate Structure
 
 ```
-pyros/
-├── pyros-core/        # PTX codegen + IR (Layer 1)
-├── pyros-runtime/     # CUDA driver API bindings, kernel launch (Layer 2)
-├── pyros-macros/      # #[gpu_kernel] proc macro (Layer 3)
-├── pyros-ops/         # Block-level operations library (Layer 4)
-├── pyros/             # Umbrella crate re-exporting everything
+kaio/
+├── kaio-core/        # PTX codegen + IR (Layer 1)
+├── kaio-runtime/     # CUDA driver API bindings, kernel launch (Layer 2)
+├── kaio-macros/      # #[gpu_kernel] proc macro (Layer 3)
+├── kaio-ops/         # Block-level operations library (Layer 4)
+├── kaio/             # Umbrella crate re-exporting everything
 ├── tests/             # Integration tests, golden-reference validation
 ├── benches/           # Benchmarks against cuBLAS / known-good implementations
 └── examples/          # Standalone example kernels
@@ -85,8 +85,8 @@ pyros/
 
 - **Owner:** Dave Riding / NetViper
 - **License:** MIT OR Apache-2.0 (dual-licensed for ecosystem adoption)
-- **Repository:** https://github.com/dmriding/pyros
-- **Crates.io:** `pyros` — name reserved at `v0.0.1` (publish pending Phase 1 completion)
+- **Repository:** https://github.com/dmriding/kaio
+- **Crates.io:** `kaio` — name reserved at `v0.0.1` (publish pending Phase 1 completion)
 - **Rust Edition:** 2024
 - **Minimum Rust Version:** 1.94 (pinned to match the dev environment during Phase 1; may relax to 1.85, the edition 2024 floor, in later phases)
 
@@ -94,6 +94,6 @@ pyros/
 
 1. **Correctness over performance initially.** A correct kernel that's 80% as fast as cuBLAS is infinitely more useful than an optimized kernel that silently produces wrong results.
 2. **Incremental complexity.** A user writing their first elementwise kernel should not need to understand tiling, shared memory, or warp-level programming.
-3. **No hidden magic.** The generated PTX should be inspectable and understandable. Users should be able to see exactly what PYROS produces.
+3. **No hidden magic.** The generated PTX should be inspectable and understandable. Users should be able to see exactly what KAIO produces.
 4. **Windows is not an afterthought.** Every feature is tested on Windows and Linux before merge.
 5. **Forge-friendly architecture.** Modules are decomposable into independent sprint-sized units with clear interfaces and testable boundaries.

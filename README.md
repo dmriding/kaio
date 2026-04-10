@@ -1,13 +1,13 @@
-# PYROS
+# KAIO
 
 **Rust-native GPU kernel authoring framework.**
 
-PYROS (πῦρ — fire) lets developers write GPU compute kernels in Rust and
+KAIO (to ignite) lets developers write GPU compute kernels in Rust and
 compile them to PTX for execution on NVIDIA GPUs. It is a Rust alternative
 to OpenAI's Triton, targeting Windows and Linux from day one, with
 compile-time PTX emission and Rust's type-safety guarantees.
 
-## Why PYROS?
+## Why KAIO?
 
 - **Cross-platform from day one.** Windows and Linux. `cargo build` just works.
 - **Compile-time PTX emission.** Kernels compile during `cargo build` via proc macros. Zero cold-start.
@@ -16,7 +16,7 @@ compile-time PTX emission and Rust's type-safety guarantees.
 
 ## Architecture
 
-PYROS is structured in four layers:
+KAIO is structured in four layers:
 
 ```
 Layer 4: Block-Level Operations        (tiled matmul, fused attention)
@@ -29,9 +29,9 @@ Layer 1: PTX Codegen                   (instruction emission, IR)
 
 | Crate | Description |
 |-------|-------------|
-| `pyros` | Umbrella crate — re-exports `pyros-core` and `pyros-runtime` |
-| `pyros-core` | PTX IR types, instruction emitters, PtxWriter |
-| `pyros-runtime` | CUDA driver API wrapper, kernel launch, device memory |
+| `kaio` | Umbrella crate — re-exports `kaio-core` and `kaio-runtime` |
+| `kaio-core` | PTX IR types, instruction emitters, PtxWriter |
+| `kaio-runtime` | CUDA driver API wrapper, kernel launch, device memory |
 
 ## Current Status
 
@@ -47,12 +47,12 @@ that transforms Rust function syntax into PTX. See
 ### Phase 1 Example (IR API)
 
 ```rust
-use pyros_core::emit::{Emit, PtxWriter};
-use pyros_core::instr::{ArithOp, MadMode, special};
-use pyros_core::instr::control::{CmpOp, ControlOp};
-use pyros_core::instr::memory::MemoryOp;
-use pyros_core::ir::*;
-use pyros_core::types::PtxType;
+use kaio_core::emit::{Emit, PtxWriter};
+use kaio_core::instr::{ArithOp, MadMode, special};
+use kaio_core::instr::control::{CmpOp, ControlOp};
+use kaio_core::instr::memory::MemoryOp;
+use kaio_core::ir::*;
+use kaio_core::types::PtxType;
 
 // Build a vector_add kernel via the IR API
 let mut alloc = RegisterAllocator::new();
@@ -72,14 +72,14 @@ module.emit(&mut w).unwrap();
 let ptx_text = w.finish();
 
 // Load and run on GPU
-use pyros_runtime::{PyrosDevice, LaunchConfig};
-let device = PyrosDevice::new(0)?;
+use kaio_runtime::{KaioDevice, LaunchConfig};
+let device = KaioDevice::new(0)?;
 let module = device.load_ptx(&ptx_text)?;
 let func = module.function("vector_add")?;
 // ... allocate buffers, launch kernel, read results ...
 ```
 
-See [pyros-runtime/tests/vector_add_e2e.rs](pyros-runtime/tests/vector_add_e2e.rs)
+See [kaio-runtime/tests/vector_add_e2e.rs](kaio-runtime/tests/vector_add_e2e.rs)
 for the complete working example.
 
 ## Target Hardware
@@ -94,7 +94,7 @@ for the complete working example.
 # Requires Rust 1.94+ (pinned via rust-toolchain.toml)
 cargo build --workspace
 cargo test --workspace           # host-only tests (no GPU required)
-cargo test -p pyros-runtime -- --ignored   # GPU tests (requires NVIDIA GPU)
+cargo test -p kaio-runtime -- --ignored   # GPU tests (requires NVIDIA GPU)
 ```
 
 ## Development

@@ -1,0 +1,13 @@
+[package]
+name = "kaio-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "KAIO core — PTX IR types and emission. Part of the KAIO GPU kernel authoring framework."
+keywords = ["gpu", "cuda", "ptx", "codegen", "ir"]
+categories = ["hardware-support", "compilers"]
+
+[dependencies]

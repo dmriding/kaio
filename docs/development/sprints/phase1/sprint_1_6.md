@@ -5,18 +5,18 @@
 
 ## Context
 
-Sprint 1.6 crosses from Layer 1 (pyros-core / PTX codegen) into Layer 2
-(pyros-runtime / CUDA runtime). It wraps cudarc 0.19's driver API into
-PYROS-specific types: `PyrosDevice`, `GpuBuffer<T>`, `DeviceInfo`, and
-`PyrosError`.
+Sprint 1.6 crosses from Layer 1 (kaio-core / PTX codegen) into Layer 2
+(kaio-runtime / CUDA runtime). It wraps cudarc 0.19's driver API into
+KAIO-specific types: `KaioDevice`, `GpuBuffer<T>`, `DeviceInfo`, and
+`KaioError`.
 
 ## Decisions
 
-### PyrosDevice field types — Arc vs owned
+### KaioDevice field types — Arc vs owned
 
 **Context:** cudarc's `CudaContext::new()` returns `Arc<CudaContext>`.
 `default_stream()` takes `&Arc<Self>` and returns `Arc<CudaStream>`.
-Should PyrosDevice store the Arcs directly or unwrap them?
+Should KaioDevice store the Arcs directly or unwrap them?
 
 **Decision:** Store `Arc<CudaContext>` and `Arc<CudaStream>` directly.
 cudarc's API is designed around Arc — `CudaSlice` internally clones the
@@ -38,7 +38,7 @@ infrequently.
 
 ### T bounds — GpuType or cudarc's traits?
 
-**Context:** Should `alloc_from<T>` require `T: GpuType` (PYROS trait)
+**Context:** Should `alloc_from<T>` require `T: GpuType` (KAIO trait)
 or `T: DeviceRepr` (cudarc trait)?
 
 **Discovery:** cudarc's methods have specific trait requirements:
@@ -76,7 +76,7 @@ in a library — the invariant is simple and well-documented.
 
 ### Debug impl — derive vs manual
 
-**Context:** `PyrosDevice` contains `Arc<CudaContext>` and `Arc<CudaStream>`
+**Context:** `KaioDevice` contains `Arc<CudaContext>` and `Arc<CudaStream>`
 which may not implement `Debug`. `#[derive(Debug)]` would fail.
 
 **Decision:** Manual `Debug` impl printing just the ordinal number. The
@@ -85,7 +85,7 @@ The ordinal is the meaningful identifier.
 
 ### context() accessor — allow dead_code
 
-**Context:** `PyrosDevice::context()` is pre-wired for Sprint 1.7's
+**Context:** `KaioDevice::context()` is pre-wired for Sprint 1.7's
 `load_ptx` method but isn't called yet. clippy with `-D warnings` would
 error on this.
 
@@ -95,7 +95,7 @@ unnecessary churn. Pre-wiring with an allow attribute is cleaner.
 
 ## Scope
 
-**In:** PyrosError (5 variants), PyrosDevice (new, info, alloc_from,
+**In:** KaioError (5 variants), KaioDevice (new, info, alloc_from,
 alloc_zeros), GpuBuffer (len, is_empty, inner, inner_mut, to_host),
 DeviceInfo (name, compute_capability, total_memory), Result type alias.
 7 GPU-gated tests.
@@ -107,7 +107,7 @@ bounds on allocation.
 
 Completed with three compile-time fixes:
 1. `device::get_attribute()` is unsafe — added unsafe blocks with SAFETY comments
-2. `PyrosDevice` needed Debug for test assertions — added manual impl
+2. `KaioDevice` needed Debug for test assertions — added manual impl
 3. `context()` unused warning — added `#[allow(dead_code)]`
 
 cudarc `to_host` trait bounds: `T: DeviceRepr + Default + Clone + Unpin`
@@ -116,13 +116,13 @@ was the initial guess. Actual bound needed was just `DeviceRepr` (cudarc
 
 **Quality gates:**
 - `cargo build --workspace`: clean (no GPU needed)
-- `cargo test -p pyros-runtime -- --ignored`: **7 passed** on RTX 4090
+- `cargo test -p kaio-runtime -- --ignored`: **7 passed** on RTX 4090
 - `cargo fmt --all --check`: clean
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean
 
 **GPU test note:** Standard `cargo test --workspace` skips GPU tests
 (they're `#[ignore]`). Full quality gate on GPU machines:
-`cargo test --workspace && cargo test -p pyros-runtime -- --ignored`
+`cargo test --workspace && cargo test -p kaio-runtime -- --ignored`
 
 **Files created:** 3 (error.rs, device.rs, buffer.rs)
 **Files modified:** 1 (lib.rs — complete rewrite from stub)

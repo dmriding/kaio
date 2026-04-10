@@ -6,7 +6,7 @@
 ## Context
 
 Sprint 1.1 creates the type system, IR tree, register allocator, and
-emit scaffold inside `pyros-core`. This is the load-bearing foundation —
+emit scaffold inside `kaio-core`. This is the load-bearing foundation —
 every subsequent sprint (1.2–1.8) builds directly on these types. Nothing
 downstream starts until 1.1 compiles and passes tests.
 
@@ -46,7 +46,7 @@ the instruction, not the register name.
   stored on the Register struct for `.reg` declaration emission.
 
 **Decision:** (B) 5 counters. Matches nvcc output, avoids name collisions,
-and users inspecting PYROS-emitted PTX will recognize the convention.
+and users inspecting KAIO-emitted PTX will recognize the convention.
 
 ### Register declarations — typed (.s32) vs untyped (.b32)
 
@@ -68,7 +68,7 @@ to PTX ISA 8.7, not 7.8.
 
 **Decision:** Changed `PtxModule::new()` default to `"8.7"`. Saved the
 nvcc output as a golden reference file at
-`pyros-core/tests/golden/nvcc_vector_add_sm89.ptx`.
+`kaio-core/tests/golden/nvcc_vector_add_sm89.ptx`.
 
 ### Operand immediates — single i32 vs separate signed/unsigned
 
@@ -100,15 +100,15 @@ compiler enforces unreachability. When Sprint 1.2 adds variants, `match
 *self {}` breaks intentionally, forcing the implementer to write real
 emission logic. Documented handoff notes on each stub enum.
 
-### Emit trait returns fmt::Result, not PyrosError
+### Emit trait returns fmt::Result, not KaioError
 
-**Context:** `PyrosError` lives in `pyros-runtime`. If `Emit::emit()`
-returned `Result<(), PyrosError>`, `pyros-core` would need to depend on
-`pyros-runtime` — creating a circular dependency (runtime depends on core).
+**Context:** `KaioError` lives in `kaio-runtime`. If `Emit::emit()`
+returned `Result<(), KaioError>`, `kaio-core` would need to depend on
+`kaio-runtime` — creating a circular dependency (runtime depends on core).
 
 **Decision:** `Emit::emit()` returns `std::fmt::Result`. PTX emission
 writes into a `String` — the only failure mode is OOM, which `fmt::Result`
-handles. This keeps `pyros-core` zero-dependency and decoupled from the
+handles. This keeps `kaio-core` zero-dependency and decoupled from the
 runtime error type.
 
 ### PtxWriter::instruction — &[&dyn Display] vs macro

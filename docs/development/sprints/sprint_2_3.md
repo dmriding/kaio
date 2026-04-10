@@ -49,10 +49,10 @@ produce a compile error. The `locals` HashMap was already added to
 ## Scope
 
 **In:**
-- pyros-core: `negate: bool` on BraPred, emit `@!pred`, update 3 call sites
-- pyros-macros: `lower/compare.rs`, comparisons wired into `lower_expr`,
+- kaio-core: `negate: bool` on BraPred, emit `@!pred`, update 3 call sites
+- kaio-macros: `lower/compare.rs`, comparisons wired into `lower_expr`,
   `lower_stmt`/`lower_stmts` with Let + If/Else handling, `fresh_label()`
-- 8 new tests (1 pyros-core + 3 compare + 4 lower_stmt)
+- 8 new tests (1 kaio-core + 3 compare + 4 lower_stmt)
 
 **Out:** Array indexing (Sprint 2.4), built-in functions (Sprint 2.5),
 Assign/IndexAssign statement lowering (Sprint 2.4).
@@ -62,18 +62,18 @@ Assign/IndexAssign statement lowering (Sprint 2.4).
 Completed as planned.
 
 **Files created:** 1
-- `pyros-macros/src/lower/compare.rs`
+- `kaio-macros/src/lower/compare.rs`
 
 **Files modified:** 4
-- `pyros-core/src/instr/control.rs` (negate field + emit + 1 new test)
-- `pyros-core/tests/common/mod.rs` (negate: false)
-- `pyros-runtime/tests/vector_add_e2e.rs` (negate: false)
-- `pyros-macros/src/lower/mod.rs` (compare module, comparisons in
+- `kaio-core/src/instr/control.rs` (negate field + emit + 1 new test)
+- `kaio-core/tests/common/mod.rs` (negate: false)
+- `kaio-runtime/tests/vector_add_e2e.rs` (negate: false)
+- `kaio-macros/src/lower/mod.rs` (compare module, comparisons in
   lower_expr, lower_stmt/lower_stmts, fresh_label, 6 new tests)
 
-**Tests:** 128 total (65 pyros-core + 64 pyros-macros), all passing.
-- pyros-core: +1 (emit_bra_pred_negated)
-- pyros-macros: +8 (3 comparison lowering, 1 label uniqueness,
+**Tests:** 128 total (65 kaio-core + 64 kaio-macros), all passing.
+- kaio-core: +1 (emit_bra_pred_negated)
+- kaio-macros: +8 (3 comparison lowering, 1 label uniqueness,
   1 let registration, 1 if simple, 1 if/else, 1 comparison in lower_expr)
 
 **Quality gates:** `cargo fmt --check` clean, `cargo clippy -- -D warnings`

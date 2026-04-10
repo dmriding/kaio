@@ -54,17 +54,17 @@ for all types, but PTX ISA mandates a modifier for float division.
 ## Results
 
 **Files created:** 4
-- `pyros/tests/vector_add_macro.rs`
-- `pyros/tests/saxpy_macro.rs`
-- `pyros/tests/fused_relu_macro.rs`
-- `pyros/tests/fused_gelu_macro.rs`
+- `kaio/tests/vector_add_macro.rs`
+- `kaio/tests/saxpy_macro.rs`
+- `kaio/tests/fused_relu_macro.rs`
+- `kaio/tests/fused_gelu_macro.rs`
 
 **Files modified:** 2
-- `pyros-macros/src/lower/params.rs` (eager cvta emission for pointer params)
-- `pyros-core/src/instr/arith.rs` (float div.approx/div.rn modifier)
+- `kaio-macros/src/lower/params.rs` (eager cvta emission for pointer params)
+- `kaio-core/src/instr/arith.rs` (float div.approx/div.rn modifier)
 
 **Tests:** 168 total host + 5 GPU, all passing.
-- Host: 163 (70 pyros-core + 90 pyros-macros + 1 compile_fail + 2 integration)
+- Host: 163 (70 kaio-core + 90 kaio-macros + 1 compile_fail + 2 integration)
 - GPU: 5 (vector_add_small, vector_add_large, saxpy, fused_relu, fused_gelu)
 
 **Quality gates:** `cargo fmt --check` clean, `cargo clippy -- -D warnings`

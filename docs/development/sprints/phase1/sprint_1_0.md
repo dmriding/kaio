@@ -5,10 +5,10 @@
 
 ## Context
 
-The name-reservation crate (`pyros v0.0.1`) was a single crate at the
+The name-reservation crate (`kaio v0.0.1`) was a single crate at the
 workspace root — `Cargo.toml` had both `[workspace]` and `[package]`
 sections, with `members = ["."]`. Phase 1 requires three crates
-(`pyros`, `pyros-core`, `pyros-runtime`), so the repo needed
+(`kaio`, `kaio-core`, `kaio-runtime`), so the repo needed
 restructuring before any code sprints could begin.
 
 ## Decisions
@@ -23,8 +23,8 @@ restructuring before any code sprints could begin.
 
 **Options considered:**
 - **(A) Keep umbrella at root.** Simpler — no move needed. But when
-  `pyros-core/` is added as a sibling, you end up with `src/` (the
-  umbrella), `pyros-core/src/`, and `pyros-runtime/src/` at the same
+  `kaio-core/` is added as a sibling, you end up with `src/` (the
+  umbrella), `kaio-core/src/`, and `kaio-runtime/src/` at the same
   level. Confusing for contributors. Also doesn't match the crate
   structure diagram in `docs/index.md`.
 - **(B) Virtual workspace.** Matches `docs/index.md`'s stated layout.
@@ -64,14 +64,14 @@ Documented the reasoning in a comment in root `Cargo.toml`.
 
 ### README / LICENSE placement
 
-**Context:** `cargo publish -p pyros` packages only files inside the
+**Context:** `cargo publish -p kaio` packages only files inside the
 crate directory. The workspace root has `README.md` and `LICENSE-*`
-for GitHub browsing. The `pyros/` crate needs its own copies for the
+for GitHub browsing. The `kaio/` crate needs its own copies for the
 crate tarball to be self-contained.
 
-**Decision:** Copy (not symlink) README + LICENSE files into `pyros/`.
+**Decision:** Copy (not symlink) README + LICENSE files into `kaio/`.
 Symlinks work on Linux but are flaky on Windows. Duplication is cheap —
-these are short, static files. Verified with `cargo package -p pyros
+these are short, static files. Verified with `cargo package -p kaio
 --allow-dirty --list` that the tarball contains the expected 8 files.
 
 ## Scope

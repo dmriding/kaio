@@ -16,7 +16,7 @@ bugs before kernel-level testing.
 
 **Pattern:** `cvta.to.global → mul.wide (idx × sizeof(T)) → add.s64 → ld/st.global`
 
-This is byte-for-byte the same pattern from `pyros-runtime/tests/vector_add_e2e.rs`.
+This is byte-for-byte the same pattern from `kaio-runtime/tests/vector_add_e2e.rs`.
 No optimization, no divergence from the proven path.
 
 ### CvtaToGlobal cached, byte offsets not cached
@@ -69,14 +69,14 @@ The check uses `KernelType::is_mut_slice()` from Sprint 2.1.
 Completed as planned.
 
 **Files created:** 1
-- `pyros-macros/src/lower/memory.rs`
+- `kaio-macros/src/lower/memory.rs`
 
 **Files modified:** 1
-- `pyros-macros/src/lower/mod.rs` (`pub mod memory`, `global_addrs` field,
+- `kaio-macros/src/lower/mod.rs` (`pub mod memory`, `global_addrs` field,
   Index in lower_expr, IndexAssign in lower_stmt, 4 integration tests)
 
-**Tests:** 138 total (65 pyros-core + 74 pyros-macros), all passing.
-- pyros-macros: +10 (3 standalone sizeof tests, 2 read/write, 1 cvta cache,
+**Tests:** 138 total (65 kaio-core + 74 kaio-macros), all passing.
+- kaio-macros: +10 (3 standalone sizeof tests, 2 read/write, 1 cvta cache,
   1 index read integration, 1 index write integration, 1 immutability
   rejection, 1 scalar index rejection)
 

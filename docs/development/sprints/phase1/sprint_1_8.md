@@ -14,13 +14,13 @@ all documentation for the Phase 1 milestone.
 
 ### Umbrella re-exports — crate aliases vs selective re-exports
 
-**Context:** Should `pyros` re-export individual types (`pub use pyros_core::ir::PtxModule`)
-or crate-level aliases (`pub use pyros_core as core`)?
+**Context:** Should `kaio` re-export individual types (`pub use kaio_core::ir::PtxModule`)
+or crate-level aliases (`pub use kaio_core as core`)?
 
-**Decision:** Crate aliases. `pyros::core::ir::PtxModule` and
-`pyros::runtime::PyrosDevice` are clear without being opinionated about
+**Decision:** Crate aliases. `kaio::core::ir::PtxModule` and
+`kaio::runtime::KaioDevice` are clear without being opinionated about
 which types belong in a prelude. Phase 2's proc macro will define the
-actual user-facing API — at that point a prelude module (`pyros::prelude`)
+actual user-facing API — at that point a prelude module (`kaio::prelude`)
 makes sense. For now, the umbrella is a pass-through.
 
 ### ptxas test — #[ignore] vs soft-skip
@@ -43,7 +43,7 @@ two places instead of one.
 
 **Decision:** Extract to `tests/common/mod.rs`. Both integration tests
 import `mod common;` and call `common::build_vector_add_ptx()`. The
-E2E test in `pyros-runtime` keeps its own copy because cross-crate test
+E2E test in `kaio-runtime` keeps its own copy because cross-crate test
 helper sharing would require a test-utils crate (overkill for Phase 1).
 
 ### Coverage — host-only vs GPU-inclusive
@@ -70,7 +70,7 @@ these paths.
 
 ## Scope
 
-**In:** Umbrella crate wiring (pyros deps + re-exports), ptxas verification
+**In:** Umbrella crate wiring (kaio deps + re-exports), ptxas verification
 test, shared test helper extraction, coverage measurement + documentation,
 README update with Phase 1 example, CHANGELOG finalization, doc link fixes.
 
@@ -79,13 +79,13 @@ README update with Phase 1 example, CHANGELOG finalization, doc link fixes.
 ## Results
 
 Completed as planned. Fixes during implementation:
-- Doc link `[PyrosModule]` → `[crate::module::PyrosModule]` in device.rs
+- Doc link `[KaioModule]` → `[crate::module::KaioModule]` in device.rs
 
 **Coverage (host-only, cargo llvm-cov):**
 
 | Crate / File | Line Coverage | Target | Status |
 |---|---|---|---|
-| **pyros-core total** | **~91%** | ≥70% | **Exceeds** |
+| **kaio-core total** | **~91%** | ≥70% | **Exceeds** |
 | types.rs | 100% | — | — |
 | instr/arith.rs | 100% | — | — |
 | instr/control.rs | 100% | — | — |
@@ -94,18 +94,18 @@ Completed as planned. Fixes during implementation:
 | ir/operand.rs | 40% | — | Expected (unused Display impls) |
 | emit/emit_trait.rs | 98.7% | — | — |
 | emit/writer.rs | 97.4% | — | — |
-| **pyros-runtime** | **0%** | ≥60% | Expected (GPU tests are #[ignore]) |
+| **kaio-runtime** | **0%** | ≥60% | Expected (GPU tests are #[ignore]) |
 | **Workspace total** | **82.8%** | ≥60% | **Exceeds** |
 
 **Quality gates:**
 - `cargo build --workspace`: clean
 - `cargo test --workspace`: 53 host tests pass (including ptxas verify)
-- `cargo test -p pyros-runtime -- --ignored`: 9 GPU tests pass
+- `cargo test -p kaio-runtime -- --ignored`: 9 GPU tests pass
 - `cargo fmt --all --check`: clean
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean
 - `cargo doc --workspace --no-deps`: clean (0 warnings)
-- `cargo package -p pyros --allow-dirty --list`: 8 files, correct
+- `cargo package -p kaio --allow-dirty --list`: 8 files, correct
 
 **Files created:** 3 (ptxas_verify.rs, common/mod.rs, sprint_1_8.md)
-**Files modified:** 6 (pyros/Cargo.toml, pyros/src/lib.rs, pyros/README.md,
+**Files modified:** 6 (kaio/Cargo.toml, kaio/src/lib.rs, kaio/README.md,
 README.md, CHANGELOG.md, vector_add_emit.rs, device.rs)

@@ -74,7 +74,7 @@ is `.address_size 64`. Should we make the address type a field for
 forward compatibility (32-bit address spaces)?
 
 **Decision:** Hardcoded `.u64` in the emitter, no type field. 32-bit
-address space support is extremely unlikely for PYROS (no modern GPU
+address space support is extremely unlikely for KAIO (no modern GPU
 uses 32-bit addressing). Adding a field "for future flexibility" would
 be dead weight now and create a decision point at every call site for
 something that's always `.u64`. If needed later, it's a one-field-add

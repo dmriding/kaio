@@ -8,10 +8,10 @@
 
 ## 1. Goal
 
-Transform PYROS from an internal IR library into a user-facing GPU kernel framework. Users write:
+Transform KAIO from an internal IR library into a user-facing GPU kernel framework. Users write:
 
 ```rust
-use pyros::prelude::*;
+use kaio::prelude::*;
 
 #[gpu_kernel(block_size = 256)]
 fn vector_add(a: &[f32], b: &[f32], out: &mut [f32], n: u32) {
@@ -22,7 +22,7 @@ fn vector_add(a: &[f32], b: &[f32], out: &mut [f32], n: u32) {
 }
 
 fn main() -> Result<()> {
-    let device = PyrosDevice::new(0)?;
+    let device = KaioDevice::new(0)?;
     let a = device.alloc_from(&vec![1.0f32; 1024])?;
     let b = device.alloc_from(&vec![2.0f32; 1024])?;
     let mut out = device.alloc_zeros::<f32>(1024)?;
@@ -32,15 +32,15 @@ fn main() -> Result<()> {
 }
 ```
 
-Phase 2 delivers: `pyros-macros` crate, four working kernels through the macro
+Phase 2 delivers: `kaio-macros` crate, four working kernels through the macro
 (`vector_add`, `saxpy`, `fused_relu`, `fused_gelu`), compile-fail diagnostics
-via trybuild, and the `pyros::prelude` user-facing API.
+via trybuild, and the `kaio::prelude` user-facing API.
 
 ---
 
 ## 2. Architecture Decision: Runtime IR Construction
 
-**Decision:** The macro generates Rust code that builds `pyros-core` IR at
+**Decision:** The macro generates Rust code that builds `kaio-core` IR at
 runtime, emits PTX via `PtxWriter`, and caches the result in
 `OnceLock<String>`.
 
@@ -48,13 +48,13 @@ runtime, emits PTX via `PtxWriter`, and caches the result in
 
 | Option | Approach | Rejected because |
 |---|---|---|
-| A | Compile-time PTX string embedding | Proc-macro crates can't link against non-proc-macro crates at expansion time. Would require duplicating all of pyros-core's emission logic inside the macro crate. |
+| A | Compile-time PTX string embedding | Proc-macro crates can't link against non-proc-macro crates at expansion time. Would require duplicating all of kaio-core's emission logic inside the macro crate. |
 | C | const fn / build.rs hybrid | Rust const eval can't run `format!` or complex allocation. build.rs adds a separate compilation step for negligible benefit. |
 
 **Why Option B wins:**
-- Zero duplication: generated code calls the existing pyros-core IR builders
+- Zero duplication: generated code calls the existing kaio-core IR builders
 - Negligible cost: PTX construction + emission is microseconds, cached via `OnceLock`
-- Debuggability: `PYROS_DUMP_PTX=1` can write generated PTX at runtime
+- Debuggability: `KAIO_DUMP_PTX=1` can write generated PTX at runtime
 - Future-proof: parameterized kernels (Phase 3+ loops with bounds) become trivial
 
 ---
@@ -66,11 +66,11 @@ The macro expands `#[gpu_kernel] fn name(...)` into a Rust module:
 ```rust
 mod vector_add {
     use std::sync::OnceLock;
-    use pyros::core::emit::{Emit, PtxWriter};
-    use pyros::core::instr::*;
-    use pyros::core::ir::*;
-    use pyros::core::types::PtxType;
-    use pyros::runtime::{GpuBuffer, LaunchConfig, PyrosDevice, PyrosError};
+    use kaio::core::emit::{Emit, PtxWriter};
+    use kaio::core::instr::*;
+    use kaio::core::ir::*;
+    use kaio::core::types::PtxType;
+    use kaio::runtime::{GpuBuffer, LaunchConfig, KaioDevice, KaioError};
 
     static PTX_CACHE: OnceLock<String> = OnceLock::new();
 
@@ -85,19 +85,19 @@ mod vector_add {
         let mut w = PtxWriter::new();
         module.emit(&mut w).unwrap();
         let ptx = w.finish();
-        if std::env::var("PYROS_DUMP_PTX").is_ok() {
-            eprintln!("=== PYROS PTX: vector_add ===\n{ptx}");
+        if std::env::var("KAIO_DUMP_PTX").is_ok() {
+            eprintln!("=== KAIO PTX: vector_add ===\n{ptx}");
         }
         ptx
     }
 
     pub fn launch(
-        device: &PyrosDevice,
+        device: &KaioDevice,
         a: &GpuBuffer<f32>,
         b: &GpuBuffer<f32>,
         out: &mut GpuBuffer<f32>,
         n: u32,
-    ) -> Result<(), PyrosError> {
+    ) -> Result<(), KaioError> {
         let ptx = PTX_CACHE.get_or_init(build_ptx);
         let module = device.load_ptx(ptx)?;
         let func = module.function("vector_add")?;
@@ -130,7 +130,7 @@ mod vector_add {
 The `OnceLock` caches the PTX string. The `CudaModule` is re-loaded on each
 `launch()` call. This is intentional for Phase 2:
 - cudarc's CUDA driver caches loaded modules internally per context
-- A second `OnceLock<PyrosModule>` would tie it to a specific `PyrosDevice`,
+- A second `OnceLock<KaioModule>` would tie it to a specific `KaioDevice`,
   complicating multi-device use
 - No correctness impact; tight-loop benchmarks would see overhead but
   typical use (one launch per kernel invocation) is fine
@@ -138,10 +138,10 @@ The `OnceLock` caches the PTX string. The `CudaModule` is re-loaded on each
 
 ---
 
-## 4. Crate Structure: `pyros-macros`
+## 4. Crate Structure: `kaio-macros`
 
 ```
-pyros-macros/
+kaio-macros/
   Cargo.toml              # proc-macro = true; deps: syn 2 (full), quote 1, proc-macro2 1
   src/
     lib.rs                 # #[proc_macro_attribute] pub fn gpu_kernel
@@ -186,7 +186,7 @@ User source (#[gpu_kernel] fn ...)
        |
   [kernel_ir/*]         Our intermediate representation (not syn types)
        |
-  [lower/*]             Transform KernelIR -> TokenStream fragments calling pyros-core
+  [lower/*]             Transform KernelIR -> TokenStream fragments calling kaio-core
        |
   [codegen/*]           Assemble final TokenStream: mod { build_ptx + launch }
        |
@@ -197,7 +197,7 @@ User source (#[gpu_kernel] fn ...)
 
 ## 5. Kernel IR (Intermediate Representation)
 
-Types inside `pyros-macros` that bridge syn's AST to the generated pyros-core
+Types inside `kaio-macros` that bridge syn's AST to the generated kaio-core
 API calls. Never publicly exposed.
 
 ### KernelType
@@ -273,7 +273,7 @@ struct KernelDef { sig: KernelSignature, body: Vec<KernelStmt> }
 
 ---
 
-## 6. New pyros-core Instructions Required
+## 6. New kaio-core Instructions Required
 
 ### Arithmetic (Sprint 2.2)
 
@@ -329,10 +329,10 @@ conditionally skip code blocks.
 **Decision:** (B). Add a `negate: bool` field to `BraPred`. When true, emit
 `@!{pred} bra {target};`. This is the simplest change (one field, one format
 character in the emit match arm) and makes generated PTX readable. Every
-developer who runs `PYROS_DUMP_PTX=1` will see comparisons that match
+developer who runs `KAIO_DUMP_PTX=1` will see comparisons that match
 their source code.
 
-**Implementation:** In `pyros-core/src/instr/control.rs`:
+**Implementation:** In `kaio-core/src/instr/control.rs`:
 
 ```rust
 BraPred {
@@ -381,7 +381,7 @@ struct LoweringContext {
 }
 ```
 
-Register naming in generated code: `let _pyros_r{N} = alloc.alloc(PtxType::...);`
+Register naming in generated code: `let _kaio_r{N} = alloc.alloc(PtxType::...);`
 with monotonic counter. These are Rust variable names in the generated
 `build_ptx()` — the actual PTX register names come from `RegisterAllocator`.
 
@@ -412,7 +412,7 @@ with monotonic counter. These are Rust variable names in the generated
 
 ### IDE stubs
 
-`pyros/src/gpu_builtins.rs` exports real Rust functions that panic at runtime:
+`kaio/src/gpu_builtins.rs` exports real Rust functions that panic at runtime:
 
 ```rust
 /// Returns the thread index in the X dimension. Only valid inside #[gpu_kernel].
@@ -427,14 +427,14 @@ in generated code. Purpose: rust-analyzer autocomplete + docs + type checking.
 ## 10. Prelude
 
 ```rust
-// pyros/src/prelude.rs
-pub use crate::runtime::{PyrosDevice, GpuBuffer, LaunchConfig, PyrosError, Result};
+// kaio/src/prelude.rs
+pub use crate::runtime::{KaioDevice, GpuBuffer, LaunchConfig, KaioError, Result};
 pub use crate::gpu_kernel;
 pub use crate::gpu_builtins::*;
 ```
 
-Intentionally excludes: `pyros::core::*` (internal IR), `PyrosModule`,
-`PyrosFunction` (hidden behind launch wrapper).
+Intentionally excludes: `kaio::core::*` (internal IR), `KaioModule`,
+`KaioFunction` (hidden behind launch wrapper).
 
 ---
 
@@ -462,7 +462,7 @@ CF1-CF10 for the required minimum.
 ## 12. Design Decisions Not Revisited
 
 These carry forward from Phase 1:
-- Virtual workspace structure (pyros, pyros-core, pyros-runtime, +pyros-macros)
+- Virtual workspace structure (kaio, kaio-core, kaio-runtime, +kaio-macros)
 - Register allocator: 5-counter model (%r, %rd, %f, %fd, %p)
 - PTX ISA 8.7, `.target sm_89`, `.address_size 64` (sm_89 hardcoded for Phase 2)
 - Register declarations: `.b32`/`.b64` untyped (matches nvcc)
@@ -485,9 +485,9 @@ Per `docs/success-criteria.md` Phase 2:
 
 | Crate | Target |
 |---|---|
-| `pyros-core` | 70% |
-| `pyros-runtime` | 60% |
-| `pyros-macros` | 65% |
+| `kaio-core` | 70% |
+| `kaio-runtime` | 60% |
+| `kaio-macros` | 65% |
 | **Workspace** | **>=60%** |
 
 Proc macro code is inherently harder to cover (expansion tests don't show as
@@ -535,7 +535,7 @@ assembly with `quote!` is complex and hard to debug.
 
 **Mitigation:**
 - `cargo expand` during development to inspect generated code
-- `PYROS_DUMP_EXPANSION=1` env var check in the macro to print expansion
+- `KAIO_DUMP_EXPANSION=1` env var check in the macro to print expansion
 - Snapshot tests on generated TokenStream
 - Build incrementally: get vector_add through the pipeline first, then
   validate other kernels
@@ -545,7 +545,7 @@ assembly with `quote!` is complex and hard to debug.
 **Mitigation:**
 - Extensive unit tests on each lowering function in isolation
 - `trybuild` compile-fail tests catch regression early
-- `PYROS_DUMP_PTX=1` for runtime PTX inspection
+- `KAIO_DUMP_PTX=1` for runtime PTX inspection
 - Golden PTX comparison: macro-generated vector_add vs hand-built E2E
 
 ---
