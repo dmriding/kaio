@@ -3,6 +3,7 @@
 
 pub mod arith;
 pub mod compare;
+pub mod memory;
 
 use std::collections::HashMap;
 
@@ -25,6 +26,10 @@ pub struct LoweringContext {
     /// Key: variable name, Value: (register Ident in generated code, type).
     /// Populated by parameter loading (Sprint 2.6) and let-binding lowering.
     pub locals: HashMap<String, (Ident, KernelType)>,
+    /// Cached `cvta.to.global` results per pointer parameter.
+    /// Key: param name, Value: register Ident holding the global address.
+    /// One CvtaToGlobal per pointer, reused across multiple index accesses.
+    pub global_addrs: HashMap<String, Ident>,
 }
 
 #[allow(dead_code)] // Methods used in lower/arith.rs + Sprint 2.6 codegen
@@ -35,6 +40,7 @@ impl LoweringContext {
             reg_counter: 0,
             label_counter: 0,
             locals: HashMap::new(),
+            global_addrs: HashMap::new(),
         }
     }
 
@@ -206,11 +212,25 @@ pub fn lower_expr(
         // Parenthesized: just recurse
         KernelExpr::Paren(inner, _span) => lower_expr(ctx, inner),
 
-        // --- Not yet implemented (Sprint 2.3-2.5) ---
-        KernelExpr::Index { span, .. } => Err(syn::Error::new(
-            *span,
-            "array indexing lowering not yet implemented (Sprint 2.4)",
-        )),
+        // Array index read: a[idx]
+        KernelExpr::Index { array, index, span } => {
+            let (array_reg, array_ty) = ctx.locals.get(array).cloned().ok_or_else(|| {
+                syn::Error::new(*span, format!("undefined array `{array}` in GPU kernel"))
+            })?;
+            let elem_ty = array_ty.elem_type().cloned().ok_or_else(|| {
+                syn::Error::new(
+                    *span,
+                    format!(
+                        "cannot index into `{array}`: type `{}` is not a slice",
+                        array_ty.display_name()
+                    ),
+                )
+            })?;
+            let (idx_reg, _idx_ty, idx_tokens) = lower_expr(ctx, index)?;
+            let (result, mem_tokens) =
+                memory::lower_index_read(ctx, array, &array_reg, &idx_reg, &elem_ty);
+            Ok((result, elem_ty, quote! { #idx_tokens #mem_tokens }))
+        }
         KernelExpr::BuiltinCall { span, .. } => Err(syn::Error::new(
             *span,
             "built-in function lowering not yet implemented (Sprint 2.5)",
@@ -326,10 +346,34 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             *span,
             "variable reassignment lowering not yet implemented",
         )),
-        KernelStmt::IndexAssign { span, .. } => Err(syn::Error::new(
-            *span,
-            "array index assignment lowering not yet implemented (Sprint 2.4)",
-        )),
+        KernelStmt::IndexAssign {
+            array,
+            index,
+            value,
+            span,
+        } => {
+            let (array_reg, array_ty) = ctx.locals.get(array).cloned().ok_or_else(|| {
+                syn::Error::new(*span, format!("undefined array `{array}` in GPU kernel"))
+            })?;
+            // Must be &mut [T] for writes
+            if !array_ty.is_mut_slice() {
+                return Err(syn::Error::new(
+                    *span,
+                    format!(
+                        "cannot write to immutable slice parameter `{array}`: \
+                         declare as `&mut [T]`"
+                    ),
+                ));
+            }
+            let elem_ty = array_ty.elem_type().cloned().ok_or_else(|| {
+                syn::Error::new(*span, "internal error: mut slice has no element type")
+            })?;
+            let (idx_reg, _idx_ty, idx_tokens) = lower_expr(ctx, index)?;
+            let (val_reg, _val_ty, val_tokens) = lower_expr(ctx, value)?;
+            let store_tokens =
+                memory::lower_index_write(ctx, array, &array_reg, &idx_reg, &val_reg, &elem_ty);
+            Ok(quote! { #idx_tokens #val_tokens #store_tokens })
+        }
     }
 }
 
@@ -635,5 +679,121 @@ mod tests {
         assert_eq!(l1, "IF_END_0");
         assert_eq!(l2, "IF_ELSE_1");
         assert_eq!(l3, "IF_END_2");
+    }
+
+    // --- Sprint 2.4: Array Indexing ---
+
+    #[test]
+    fn lower_expr_index_read() {
+        let mut ctx = LoweringContext::new();
+        // Simulate a pointer param "a" loaded as SliceRef(F32)
+        ctx.locals.insert(
+            "a".to_string(),
+            (
+                Ident::new("_pyros_r0", Span::call_site()),
+                KernelType::SliceRef(Box::new(KernelType::F32)),
+            ),
+        );
+        ctx.locals.insert(
+            "idx".to_string(),
+            (Ident::new("_pyros_r1", Span::call_site()), KernelType::U32),
+        );
+
+        let expr = KernelExpr::Index {
+            array: "a".to_string(),
+            index: Box::new(KernelExpr::Var("idx".to_string(), Span::call_site())),
+            span: Span::call_site(),
+        };
+        let (result, ty, tokens) = lower_expr(&mut ctx, &expr).unwrap();
+
+        assert_eq!(ty, KernelType::F32); // result is the element type
+        assert!(result.to_string().starts_with("_pyros_r"));
+        let code = tokens.to_string();
+        assert!(code.contains("CvtaToGlobal"));
+        assert!(code.contains("MulWide"));
+        assert!(code.contains("LdGlobal"));
+    }
+
+    #[test]
+    fn lower_stmt_index_assign() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "out".to_string(),
+            (
+                Ident::new("_pyros_r0", Span::call_site()),
+                KernelType::SliceMutRef(Box::new(KernelType::F32)),
+            ),
+        );
+        ctx.locals.insert(
+            "idx".to_string(),
+            (Ident::new("_pyros_r1", Span::call_site()), KernelType::U32),
+        );
+        ctx.locals.insert(
+            "val".to_string(),
+            (Ident::new("_pyros_r2", Span::call_site()), KernelType::F32),
+        );
+
+        let stmt = KernelStmt::IndexAssign {
+            array: "out".to_string(),
+            index: KernelExpr::Var("idx".to_string(), Span::call_site()),
+            value: KernelExpr::Var("val".to_string(), Span::call_site()),
+            span: Span::call_site(),
+        };
+        let tokens = lower_stmt(&mut ctx, &stmt).unwrap();
+        let code = tokens.to_string();
+
+        assert!(code.contains("CvtaToGlobal"));
+        assert!(code.contains("StGlobal"));
+        assert!(code.contains("PtxType :: F32"));
+    }
+
+    #[test]
+    fn reject_write_to_immutable_slice() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "a".to_string(),
+            (
+                Ident::new("_pyros_r0", Span::call_site()),
+                KernelType::SliceRef(Box::new(KernelType::F32)), // &[f32], NOT &mut
+            ),
+        );
+        ctx.locals.insert(
+            "idx".to_string(),
+            (Ident::new("_pyros_r1", Span::call_site()), KernelType::U32),
+        );
+        ctx.locals.insert(
+            "val".to_string(),
+            (Ident::new("_pyros_r2", Span::call_site()), KernelType::F32),
+        );
+
+        let stmt = KernelStmt::IndexAssign {
+            array: "a".to_string(),
+            index: KernelExpr::Var("idx".to_string(), Span::call_site()),
+            value: KernelExpr::Var("val".to_string(), Span::call_site()),
+            span: Span::call_site(),
+        };
+        let err = lower_stmt(&mut ctx, &stmt).unwrap_err();
+        assert!(err.to_string().contains("immutable slice"));
+    }
+
+    #[test]
+    fn reject_index_into_scalar() {
+        let mut ctx = LoweringContext::new();
+        ctx.locals.insert(
+            "n".to_string(),
+            (Ident::new("_pyros_r0", Span::call_site()), KernelType::U32),
+        );
+        ctx.locals.insert(
+            "idx".to_string(),
+            (Ident::new("_pyros_r1", Span::call_site()), KernelType::U32),
+        );
+
+        let expr = KernelExpr::Index {
+            array: "n".to_string(),
+            index: Box::new(KernelExpr::Var("idx".to_string(), Span::call_site())),
+            span: Span::call_site(),
+        };
+        let err = lower_expr(&mut ctx, &expr).unwrap_err();
+        assert!(err.to_string().contains("not a slice"));
     }
 }
