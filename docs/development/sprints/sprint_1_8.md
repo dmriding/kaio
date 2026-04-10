@@ -1,6 +1,6 @@
 # Sprint 1.8 — Testing + Coverage + Docs Polish
 
-**Commit:** pending
+**Commit:** `9f32721`
 **Status:** Complete
 
 ## Context

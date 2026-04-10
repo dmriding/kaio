@@ -15,7 +15,7 @@ doc in [sprints/](sprints/) with full reasoning traces for every decision.
 | [1.5](sprints/sprint_1_5.md) | PtxWriter + full module emission (vector_add PTX emits!) | Done | `d635721` | +10 = 52 |
 | [1.6](sprints/sprint_1_6.md) | Runtime device + buffers (PyrosDevice, GpuBuffer, PyrosError) | Done | `83bbe31` | +7 GPU |
 | [1.7](sprints/sprint_1_7.md) | **Runtime launch + vector_add E2E — PHASE 1 GATE PASSED** | Done | `6b2f49b` | +2 GPU E2E |
-| [1.8](sprints/sprint_1_8.md) | Testing + coverage + docs polish — **PHASE 1 COMPLETE** | Done | pending | +1 ptxas = 53 host + 9 GPU |
+| [1.8](sprints/sprint_1_8.md) | Testing + coverage + docs polish — **PHASE 1 COMPLETE** | Done | `9f32721` | +1 ptxas = 53 host + 9 GPU |
 
 ## Key Validations
 
