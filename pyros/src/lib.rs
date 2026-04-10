@@ -25,3 +25,6 @@ pub use pyros_core as core;
 
 /// CUDA runtime — device management, buffers, PTX loading, kernel launch.
 pub use pyros_runtime as runtime;
+
+/// Re-export the `#[gpu_kernel]` attribute macro.
+pub use pyros_macros::gpu_kernel;

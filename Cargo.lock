@@ -41,12 +41,22 @@ name = "pyros"
 version = "0.0.2"
 dependencies = [
  "pyros-core",
+ "pyros-macros",
  "pyros-runtime",
 ]
 
 [[package]]
 name = "pyros-core"
 version = "0.0.2"
+
+[[package]]
+name = "pyros-macros"
+version = "0.0.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "pyros-runtime"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["pyros-core", "pyros-runtime", "pyros"]
+members = ["pyros-core", "pyros-runtime", "pyros-macros", "pyros"]
 
 [workspace.package]
 version = "0.0.2"
