@@ -5,6 +5,16 @@
 //! Rust types modelling PTX programs, instruction emitters, and a writer
 //! that renders valid `.ptx` text output.
 //!
-//! **Status:** Phase 1 scaffolding. No public API yet.
+//! ## Modules
+//!
+//! - [`types`] — PTX type system and Rust-to-PTX type mapping
+//! - [`ir`] — Intermediate representation (modules, kernels, instructions)
+//! - [`instr`] — Instruction category enums (arithmetic, memory, control)
+//! - [`emit`] — PTX text emission (`Emit` trait + `PtxWriter`)
 
 #![warn(missing_docs)]
+
+pub mod emit;
+pub mod instr;
+pub mod ir;
+pub mod types;
