@@ -3,8 +3,10 @@
 
 pub mod arith;
 pub mod builtins;
+pub mod cast;
 pub mod compare;
 pub mod memory;
+pub mod params;
 
 use std::collections::HashMap;
 
@@ -247,10 +249,14 @@ pub fn lower_expr(
                 builtins::lower_builtin(ctx, name, &arg_regs, &arg_types, *span)?;
             Ok((result, result_ty, quote! { #arg_tokens #builtin_tokens }))
         }
-        KernelExpr::Cast { span, .. } => Err(syn::Error::new(
-            *span,
-            "type cast lowering not yet implemented (Sprint 2.6)",
-        )),
+        // Type cast: x as f32
+        KernelExpr::Cast {
+            expr, target_ty, ..
+        } => {
+            let (src_reg, src_ty, src_tokens) = lower_expr(ctx, expr)?;
+            let (dst, cast_tokens) = cast::lower_cast(ctx, &src_reg, &src_ty, target_ty);
+            Ok((dst, target_ty.clone(), quote! { #src_tokens #cast_tokens }))
+        }
     }
 }
 

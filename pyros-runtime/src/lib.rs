@@ -38,6 +38,7 @@ pub mod module;
 
 pub use buffer::GpuBuffer;
 pub use cudarc::driver::LaunchConfig;
+pub use cudarc::driver::PushKernelArg;
 pub use device::{DeviceInfo, PyrosDevice};
 pub use error::{PyrosError, Result};
 pub use module::{PyrosFunction, PyrosModule};

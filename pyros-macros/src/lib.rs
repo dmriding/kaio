@@ -9,16 +9,17 @@
 
 #![warn(missing_docs)]
 
+mod codegen;
 mod kernel_ir;
 mod lower;
 mod parse;
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
 use syn::ItemFn;
 
 use parse::attrs::parse_kernel_config;
+use parse::body::parse_body;
 use parse::signature::parse_kernel_signature;
 
 /// Marks a function as a GPU kernel compiled to PTX.
@@ -59,17 +60,9 @@ fn gpu_kernel_impl(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenS
     // Parse and validate signature
     let sig = parse_kernel_signature(&func, config)?;
 
-    // Phase 2 Sprint 2.1: return a placeholder module.
-    // Sprints 2.2-2.6 will replace this with real codegen.
-    let mod_name = syn::Ident::new(&sig.name, sig.name_span);
-    let _block_size = sig.config.block_size;
+    // Parse body into kernel IR
+    let body = parse_body(&func.block)?;
 
-    Ok(quote! {
-        /// Generated GPU kernel module. Codegen not yet implemented —
-        /// will produce `build_ptx()` + `launch()` after Sprint 2.6.
-        mod #mod_name {
-            // Placeholder: signature parsed successfully.
-            // Parameters: #(#param_names: #param_types),*
-        }
-    })
+    // Generate the kernel module (build_ptx + launch)
+    codegen::generate_kernel_module(&sig, &body)
 }

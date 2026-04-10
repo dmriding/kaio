@@ -14,11 +14,13 @@
 //!
 //! ## Status
 //!
-//! **Phase 1 complete.** The IR and runtime layers can construct, emit, load,
-//! and execute a `vector_add` kernel on a real GPU. The user-facing proc macro
-//! API (`#[gpu_kernel]`) is Phase 2.
+//! **Phase 2 in progress.** `#[gpu_kernel]` proc macro transforms Rust
+//! function syntax into PTX codegen + typed launch wrappers.
 
 #![warn(missing_docs)]
+
+pub mod gpu_builtins;
+pub mod prelude;
 
 /// PTX code generation — IR types, instruction emitters, and PTX text emission.
 pub use pyros_core as core;
