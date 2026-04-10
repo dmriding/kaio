@@ -10,7 +10,7 @@ doc in [sprints/](sprints/) with full reasoning traces for every decision.
 | [1.0](sprints/sprint_1_0.md) | Workspace restructure | Done | `8e59f66` | — |
 | [1.1](sprints/sprint_1_1.md) | Types + IR skeleton + register allocator | Done | `b2dac92` | 20 |
 | [1.2](sprints/sprint_1_2.md) | Arithmetic instructions (Add, Mad, MulWide) | Done | `279c799` | +7 = 27 |
-| [1.3](sprints/sprint_1_3.md) | Memory instructions | Pending | — | — |
+| [1.3](sprints/sprint_1_3.md) | Memory instructions (LdParam, LdGlobal, StGlobal, CvtaToGlobal) | Done | `pending` | +7 = 34 |
 | [1.4](sprints/sprint_1_4.md) | Control flow + special registers | Pending | — | — |
 | [1.5](sprints/sprint_1_5.md) | PtxWriter + full module emission | Pending | — | — |
 | [1.6](sprints/sprint_1_6.md) | Runtime device + buffers | Pending | — | — |
