@@ -44,6 +44,21 @@ impl PtxType {
         }
     }
 
+    /// PTX type used in `.reg` declarations.
+    ///
+    /// Matches `nvcc` convention: integer registers use untyped `.b32`/`.b64`
+    /// (the instruction carries signed/unsigned), while floats and predicates
+    /// keep their typed declarations.
+    pub fn reg_decl_type(&self) -> &'static str {
+        match self {
+            Self::F32 => ".f32",
+            Self::F64 => ".f64",
+            Self::S32 | Self::U32 => ".b32",
+            Self::S64 | Self::U64 => ".b64",
+            Self::Pred => ".pred",
+        }
+    }
+
     /// Which register kind this type maps to.
     pub fn reg_kind(&self) -> RegKind {
         match self {
@@ -153,6 +168,19 @@ mod tests {
         assert_eq!(PtxType::S64.ptx_suffix(), ".s64");
         assert_eq!(PtxType::U64.ptx_suffix(), ".u64");
         assert_eq!(PtxType::Pred.ptx_suffix(), ".pred");
+    }
+
+    #[test]
+    fn ptx_type_reg_decl_type() {
+        // Integers collapse to untyped bit-width (matches nvcc convention)
+        assert_eq!(PtxType::S32.reg_decl_type(), ".b32");
+        assert_eq!(PtxType::U32.reg_decl_type(), ".b32");
+        assert_eq!(PtxType::S64.reg_decl_type(), ".b64");
+        assert_eq!(PtxType::U64.reg_decl_type(), ".b64");
+        // Floats and predicates keep their typed declarations
+        assert_eq!(PtxType::F32.reg_decl_type(), ".f32");
+        assert_eq!(PtxType::F64.reg_decl_type(), ".f64");
+        assert_eq!(PtxType::Pred.reg_decl_type(), ".pred");
     }
 
     #[test]

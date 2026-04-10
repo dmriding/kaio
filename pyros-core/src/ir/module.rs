@@ -21,10 +21,10 @@ pub struct PtxModule {
 impl PtxModule {
     /// Create a new module targeting the given SM architecture.
     ///
-    /// Defaults: PTX version `7.8`, address size `64`.
+    /// Defaults: PTX version `8.7` (CUDA 12.8), address size `64`.
     pub fn new(target: &str) -> Self {
         Self {
-            version: "7.8".to_string(),
+            version: "8.7".to_string(),
             target: target.to_string(),
             address_size: 64,
             kernels: Vec::new(),
