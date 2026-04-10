@@ -22,3 +22,6 @@ include = [
 pyros-core = { version = "0.0.2", path = "../pyros-core" }
 pyros-runtime = { version = "0.0.2", path = "../pyros-runtime" }
 pyros-macros = { version = "0.0.2", path = "../pyros-macros" }
+
+[dev-dependencies]
+trybuild = "1"

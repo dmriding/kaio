@@ -1,0 +1,5 @@
+error: generic type parameters are not supported in GPU kernels
+ --> tests/compile_fail/cf10_generics.rs:5:10
+  |
+5 | fn kernel<T>(data: &[f32], n: u32) {}
+  |          ^^^

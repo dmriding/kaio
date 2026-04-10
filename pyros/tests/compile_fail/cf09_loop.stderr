@@ -1,0 +1,5 @@
+error: `loop` is not supported in GPU kernels (available in Phase 3)
+ --> tests/compile_fail/cf09_loop.rs:6:5
+  |
+6 |     loop {}
+  |     ^^^^^^^

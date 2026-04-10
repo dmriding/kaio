@@ -1,0 +1,5 @@
+error: `block_size` cannot exceed 1024, got 2048
+ --> tests/compile_fail/cf07_block_size_too_large.rs:4:27
+  |
+4 | #[gpu_kernel(block_size = 2048)]
+  |                           ^^^^

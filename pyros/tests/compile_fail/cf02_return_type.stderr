@@ -1,0 +1,5 @@
+error: GPU kernels must return `()`. Found a return type.
+ --> tests/compile_fail/cf02_return_type.rs:5:22
+  |
+5 | fn kernel(n: u32) -> u32 {
+  |                      ^^^

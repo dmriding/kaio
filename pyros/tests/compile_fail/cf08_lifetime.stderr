@@ -1,0 +1,5 @@
+error: lifetime parameters are not supported in GPU kernels
+ --> tests/compile_fail/cf08_lifetime.rs:5:17
+  |
+5 | fn kernel(data: &'static [f32], n: u32) {}
+  |                 ^^^^^^^^^^^^^^

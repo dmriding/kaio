@@ -1,0 +1,5 @@
+error: `block_size` must be a power of 2, got 100
+ --> tests/compile_fail/cf06_block_size_not_pow2.rs:4:27
+  |
+4 | #[gpu_kernel(block_size = 100)]
+  |                           ^^^

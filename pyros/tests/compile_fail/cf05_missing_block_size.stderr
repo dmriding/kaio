@@ -1,0 +1,7 @@
+error: `block_size` is required in `#[gpu_kernel(...)]`
+ --> tests/compile_fail/cf05_missing_block_size.rs:4:1
+  |
+4 | #[gpu_kernel]
+  | ^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `gpu_kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
