@@ -1,6 +1,7 @@
 # Sprint 3.1 — Loops + Compound Assignment
 
 **Status:** Complete
+**Commit:** `3c3b291`
 **Date:** 2026-04-11
 **Depends on:** Phase 2 complete (commit `50a3ab0`)
 
