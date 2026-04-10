@@ -2,6 +2,7 @@
 //! that construct `pyros-core` IR at runtime.
 
 pub mod arith;
+pub mod builtins;
 pub mod compare;
 pub mod memory;
 
@@ -231,10 +232,21 @@ pub fn lower_expr(
                 memory::lower_index_read(ctx, array, &array_reg, &idx_reg, &elem_ty);
             Ok((result, elem_ty, quote! { #idx_tokens #mem_tokens }))
         }
-        KernelExpr::BuiltinCall { span, .. } => Err(syn::Error::new(
-            *span,
-            "built-in function lowering not yet implemented (Sprint 2.5)",
-        )),
+        // Built-in function call: thread_idx_x(), sqrt(x), etc.
+        KernelExpr::BuiltinCall { name, args, span } => {
+            let mut arg_regs = Vec::new();
+            let mut arg_types = Vec::new();
+            let mut arg_tokens = TokenStream::new();
+            for arg in args {
+                let (reg, ty, tokens) = lower_expr(ctx, arg)?;
+                arg_regs.push(reg);
+                arg_types.push(ty);
+                arg_tokens.extend(tokens);
+            }
+            let (result, result_ty, builtin_tokens) =
+                builtins::lower_builtin(ctx, name, &arg_regs, &arg_types, *span)?;
+            Ok((result, result_ty, quote! { #arg_tokens #builtin_tokens }))
+        }
         KernelExpr::Cast { span, .. } => Err(syn::Error::new(
             *span,
             "type cast lowering not yet implemented (Sprint 2.6)",

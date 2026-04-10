@@ -167,6 +167,77 @@ pub enum ArithOp {
         /// PTX type suffix.
         ty: PtxType,
     },
+    /// Absolute value: `abs{ty} dst, src;`
+    ///
+    /// Example: `abs.f32 %f0, %f1;`
+    Abs {
+        /// Destination register.
+        dst: Register,
+        /// Source operand.
+        src: Operand,
+        /// PTX type suffix.
+        ty: PtxType,
+    },
+    /// Minimum: `min{ty} dst, lhs, rhs;`
+    ///
+    /// Example: `min.f32 %f0, %f1, %f2;`
+    Min {
+        /// Destination register.
+        dst: Register,
+        /// Left-hand source operand.
+        lhs: Operand,
+        /// Right-hand source operand.
+        rhs: Operand,
+        /// PTX type suffix.
+        ty: PtxType,
+    },
+    /// Maximum: `max{ty} dst, lhs, rhs;`
+    ///
+    /// Example: `max.f32 %f0, %f1, %f2;`
+    Max {
+        /// Destination register.
+        dst: Register,
+        /// Left-hand source operand.
+        lhs: Operand,
+        /// Right-hand source operand.
+        rhs: Operand,
+        /// PTX type suffix.
+        ty: PtxType,
+    },
+    /// Approximate square root: `sqrt.approx.f32 dst, src;`
+    ///
+    /// f32 only in Phase 2. Uses `.approx` for fast-math (matches GPU behavior).
+    Sqrt {
+        /// Destination register.
+        dst: Register,
+        /// Source operand.
+        src: Operand,
+    },
+    /// Approximate base-2 exponential: `ex2.approx.f32 dst, src;`
+    ///
+    /// Used to synthesize `exp(x) = 2^(x * log2(e))`.
+    Ex2 {
+        /// Destination register.
+        dst: Register,
+        /// Source operand.
+        src: Operand,
+    },
+    /// Approximate base-2 logarithm: `lg2.approx.f32 dst, src;`
+    ///
+    /// Used to synthesize `ln(x) = log2(x) * ln(2)`.
+    Lg2 {
+        /// Destination register.
+        dst: Register,
+        /// Source operand.
+        src: Operand,
+    },
+    /// Approximate reciprocal: `rcp.approx.f32 dst, src;`
+    Rcp {
+        /// Destination register.
+        dst: Register,
+        /// Source operand.
+        src: Operand,
+    },
 }
 
 impl Emit for ArithOp {
@@ -220,6 +291,30 @@ impl Emit for ArithOp {
             ArithOp::Neg { dst, src, ty } => {
                 let mnemonic = format!("neg{}", ty.ptx_suffix());
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, src])
+            }
+            ArithOp::Abs { dst, src, ty } => {
+                let mnemonic = format!("abs{}", ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, src])
+            }
+            ArithOp::Min { dst, lhs, rhs, ty } => {
+                let mnemonic = format!("min{}", ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Max { dst, lhs, rhs, ty } => {
+                let mnemonic = format!("max{}", ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Sqrt { dst, src } => {
+                w.instruction("sqrt.approx.f32", &[dst as &dyn fmt::Display, src])
+            }
+            ArithOp::Ex2 { dst, src } => {
+                w.instruction("ex2.approx.f32", &[dst as &dyn fmt::Display, src])
+            }
+            ArithOp::Lg2 { dst, src } => {
+                w.instruction("lg2.approx.f32", &[dst as &dyn fmt::Display, src])
+            }
+            ArithOp::Rcp { dst, src } => {
+                w.instruction("rcp.approx.f32", &[dst as &dyn fmt::Display, src])
             }
         }
     }
@@ -495,5 +590,103 @@ mod tests {
         });
         instr.emit(&mut w).unwrap();
         assert_eq!(w.finish(), "    sub.s32 %r0, %r1, 1;\n");
+    }
+
+    // --- Sprint 2.5: Math operations ---
+
+    #[test]
+    fn emit_abs_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Abs {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            src: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+            ty: PtxType::F32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    abs.f32 %f0, %f1;\n");
+    }
+
+    #[test]
+    fn emit_min_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Min {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            lhs: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+            rhs: Operand::Reg(reg(RegKind::F, 2, PtxType::F32)),
+            ty: PtxType::F32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    min.f32 %f0, %f1, %f2;\n");
+    }
+
+    #[test]
+    fn emit_max_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Max {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            lhs: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+            rhs: Operand::Reg(reg(RegKind::F, 2, PtxType::F32)),
+            ty: PtxType::F32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    max.f32 %f0, %f1, %f2;\n");
+    }
+
+    #[test]
+    fn emit_sqrt_approx_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Sqrt {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            src: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    sqrt.approx.f32 %f0, %f1;\n");
+    }
+
+    #[test]
+    fn emit_ex2_approx_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Ex2 {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            src: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    ex2.approx.f32 %f0, %f1;\n");
+    }
+
+    #[test]
+    fn emit_lg2_approx_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Lg2 {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            src: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    lg2.approx.f32 %f0, %f1;\n");
+    }
+
+    #[test]
+    fn emit_rcp_approx_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Rcp {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            src: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    rcp.approx.f32 %f0, %f1;\n");
     }
 }
