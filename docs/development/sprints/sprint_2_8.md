@@ -1,7 +1,7 @@
 # Sprint 2.8 — End-to-End Kernel Tests
 
 **Status:** Complete
-**Commit:** (pending)
+**Commit:** `8012f3a`
 
 ## Context
 

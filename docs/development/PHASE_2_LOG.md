@@ -16,7 +16,7 @@ Master plan: [phase2_master_plan.md](phase2_master_plan.md)
 | [2.5](sprints/sprint_2_5.md) | Built-in functions (thread/block, math) | Done | `89a7a61` | +18 = 157 |
 | [2.6](sprints/sprint_2_6.md) | Launch wrapper + full pipeline | Done | `a89eb2b` | +5 = 162 |
 | [2.7](sprints/sprint_2_7.md) | Type validation + compile-fail tests | Done | `8dcfa52` | +1 = 163 |
-| [2.8](sprints/sprint_2_8.md) | E2E kernel tests | Planned | — | — |
+| [2.8](sprints/sprint_2_8.md) | E2E kernel tests | Done | `8012f3a` | +5 GPU = 168+5 |
 
 ## Key References
 
