@@ -15,5 +15,11 @@ repository = "https://github.com/dmriding/pyros"
 # cuda-12080 matches CUDA 12.8 headers. Combined with dynamic-loading, this
 # picks the binding ABI at build time but resolves the actual driver at
 # runtime via nvcuda.dll / libcuda.so — no CUDA toolkit needed to build.
-cudarc = { version = "0.19", default-features = false, features = ["driver", "std", "dynamic-loading", "cuda-12080"] }
+#
+# nvrtc: required for the Ptx type + CudaContext::load_module(). Despite the
+# name, we do NOT use NVRTC for C kernel compilation — we use Ptx::from_src()
+# to pass PYROS-emitted PTX text to the driver's cuModuleLoadData. The nvrtc
+# feature just compiles the module containing these types. With dynamic-loading,
+# the NVRTC shared library is only dlopened if compile_ptx() is called (we don't).
+cudarc = { version = "0.19", default-features = false, features = ["driver", "std", "dynamic-loading", "cuda-12080", "nvrtc"] }
 thiserror = "2"

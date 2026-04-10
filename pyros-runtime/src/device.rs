@@ -60,15 +60,30 @@ impl PyrosDevice {
         Ok(GpuBuffer::from_raw(slice))
     }
 
-    /// Access the underlying CUDA stream (for buffer transfers).
-    pub(crate) fn stream(&self) -> &Arc<CudaStream> {
+    /// Access the underlying CUDA stream for kernel launch operations.
+    ///
+    /// Used with cudarc's `launch_builder` to launch kernels. In Phase 2,
+    /// the proc macro will generate typed wrappers that hide this.
+    pub fn stream(&self) -> &Arc<CudaStream> {
         &self.stream
     }
 
-    /// Access the underlying CUDA context (for module loading in Sprint 1.7).
-    #[allow(dead_code)] // used in Sprint 1.7 for load_ptx
-    pub(crate) fn context(&self) -> &Arc<CudaContext> {
-        &self.ctx
+    /// Load a PTX module from source text and return a [`PyrosModule`].
+    ///
+    /// The PTX text is passed to the CUDA driver's `cuModuleLoadData` —
+    /// no NVRTC compilation occurs. The driver JIT-compiles the PTX for
+    /// the current GPU.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let module = device.load_ptx(&ptx_text)?;
+    /// let func = module.function("vector_add")?;
+    /// ```
+    pub fn load_ptx(&self, ptx_text: &str) -> Result<crate::module::PyrosModule> {
+        let ptx = cudarc::nvrtc::Ptx::from_src(ptx_text);
+        let module = self.ctx.load_module(ptx)?;
+        Ok(crate::module::PyrosModule::from_raw(module))
     }
 }
 
