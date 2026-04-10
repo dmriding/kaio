@@ -1,7 +1,7 @@
 # Sprint 2.1 — Macro Skeleton + Function Parsing
 
 **Status:** Complete
-**Commit:** (pending)
+**Commit:** `b3d254f`
 
 ## Context
 
