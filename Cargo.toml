@@ -1,23 +1,19 @@
 [workspace]
-members = ["."]
-resolver = "2"
+resolver = "3"
+members = ["pyros-core", "pyros-runtime", "pyros"]
 
-[package]
-name = "pyros"
-version = "0.0.1"
+[workspace.package]
+version = "0.0.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.94"
 authors = ["Dave Riding <david@netviper.gr>"]
-description = "Rust-native GPU kernel authoring framework. Write GPU compute kernels in Rust, compile to PTX. Cross-platform (Windows + Linux), compile-time PTX emission, type-safe."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dmriding/pyros"
-readme = "README.md"
-keywords = ["gpu", "cuda", "ptx", "kernel", "compute"]
-categories = ["hardware-support", "compilers", "science"]
-include = [
-    "/src/**/*.rs",
-    "/README.md",
-    "/LICENSE-MIT",
-    "/LICENSE-APACHE",
-    "/Cargo.toml",
-]
+
+[workspace.dependencies]
+# cudarc requires selecting one cuda-XXXXX feature to pick FFI binding headers.
+# cuda-12080 matches CUDA 12.8 headers. Combined with dynamic-loading, this
+# picks the binding ABI at build time but resolves the actual driver at
+# runtime via nvcuda.dll / libcuda.so — no CUDA toolkit needed to build.
+cudarc = { version = "0.19", default-features = false, features = ["driver", "std", "dynamic-loading", "cuda-12080"] }
+thiserror = "2"

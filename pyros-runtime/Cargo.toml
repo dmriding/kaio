@@ -1,0 +1,16 @@
+[package]
+name = "pyros-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PYROS runtime — CUDA driver API wrapper, kernel launch, and device memory management. Part of the PYROS GPU kernel authoring framework."
+keywords = ["gpu", "cuda", "ptx", "runtime", "kernel"]
+categories = ["hardware-support"]
+
+[dependencies]
+cudarc = { workspace = true }
+thiserror = { workspace = true }
+pyros-core = { version = "0.0.2", path = "../pyros-core" }

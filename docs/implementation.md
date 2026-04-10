@@ -119,7 +119,7 @@ Handles all interaction with the GPU: loading compiled PTX modules, allocating d
 
 ### Foundation: cudarc
 
-`cudarc` (https://github.com/coreylowman/cudarc) provides safe Rust bindings to the CUDA driver API. PYROS builds on top of this rather than writing raw FFI bindings.
+[`cudarc`](https://github.com/chelsea0x3b/cudarc) provides safe Rust bindings to the CUDA driver API. PYROS builds on top of this rather than writing raw FFI bindings. (Note: the canonical crates.io release is now the `chelsea0x3b/cudarc` fork; earlier docs referenced `coreylowman/cudarc`.)
 
 Key `cudarc` capabilities PYROS uses:
 - `CudaDevice` — device handle, context management

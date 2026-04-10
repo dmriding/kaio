@@ -1,0 +1,19 @@
+[package]
+name = "pyros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust-native GPU kernel authoring framework. Write GPU compute kernels in Rust, compile to PTX. Cross-platform (Windows + Linux), compile-time PTX emission, type-safe."
+readme = "README.md"
+keywords = ["gpu", "cuda", "ptx", "kernel", "compute"]
+categories = ["hardware-support", "compilers", "science"]
+include = [
+    "/src/**/*.rs",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/Cargo.toml",
+    "/README.md",
+]

@@ -84,10 +84,11 @@ pyros/
 ## Project Metadata
 
 - **Owner:** Dave Riding / NetViper
-- **License:** TBD (likely MIT or Apache-2.0 dual license for ecosystem adoption)
-- **Repository:** TBD (github.com/dmriding/pyros)
-- **Crates.io:** `pyros` (to be claimed)
-- **Minimum Rust Version:** 1.75+ (for stable proc macro and async features)
+- **License:** MIT OR Apache-2.0 (dual-licensed for ecosystem adoption)
+- **Repository:** https://github.com/dmriding/pyros
+- **Crates.io:** `pyros` — name reserved at `v0.0.1` (publish pending Phase 1 completion)
+- **Rust Edition:** 2024
+- **Minimum Rust Version:** 1.94 (pinned to match the dev environment during Phase 1; may relax to 1.85, the edition 2024 floor, in later phases)
 
 ## Design Principles
 
