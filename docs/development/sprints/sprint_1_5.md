@@ -1,6 +1,6 @@
 # Sprint 1.5 — PtxWriter + Full Module Emission
 
-**Commit:** pending
+**Commit:** `d635721`
 **Status:** Complete
 
 ## Context

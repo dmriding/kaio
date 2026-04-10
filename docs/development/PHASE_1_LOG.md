@@ -12,7 +12,7 @@ doc in [sprints/](sprints/) with full reasoning traces for every decision.
 | [1.2](sprints/sprint_1_2.md) | Arithmetic instructions (Add, Mad, MulWide) | Done | `279c799` | +7 = 27 |
 | [1.3](sprints/sprint_1_3.md) | Memory instructions (LdParam, LdGlobal, StGlobal, CvtaToGlobal) | Done | `23db945` | +7 = 34 |
 | [1.4](sprints/sprint_1_4.md) | Control flow + special registers (SetP, Bra, BraPred, Ret) | Done | `3d96685` | +8 = 42 |
-| [1.5](sprints/sprint_1_5.md) | PtxWriter + full module emission (vector_add PTX emits!) | Done | pending | +10 = 52 |
+| [1.5](sprints/sprint_1_5.md) | PtxWriter + full module emission (vector_add PTX emits!) | Done | `d635721` | +10 = 52 |
 | [1.6](sprints/sprint_1_6.md) | Runtime device + buffers | Pending | — | — |
 | [1.7](sprints/sprint_1_7.md) | Runtime launch + vector_add E2E | Pending | — | — |
 | [1.8](sprints/sprint_1_8.md) | Testing + coverage + docs polish | Pending | — | — |
