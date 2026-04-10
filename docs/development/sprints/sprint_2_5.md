@@ -1,7 +1,7 @@
 # Sprint 2.5 — Built-in Functions
 
 **Status:** Complete
-**Commit:** (pending)
+**Commit:** `89a7a61`
 
 ## Context
 

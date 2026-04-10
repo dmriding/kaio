@@ -13,7 +13,7 @@ Master plan: [phase2_master_plan.md](phase2_master_plan.md)
 | [2.2](sprints/sprint_2_2.md) | Expression lowering: arithmetic | Done | `5468051` | +44 = 120 |
 | [2.3](sprints/sprint_2_3.md) | Comparisons + if/else + `@!pred` | Done | `1652d43` | +9 = 128 |
 | [2.4](sprints/sprint_2_4.md) | Array indexing + memory access | Done | `374530d` | +10 = 138 |
-| [2.5](sprints/sprint_2_5.md) | Built-in functions (thread/block, math) | Planned | — | — |
+| [2.5](sprints/sprint_2_5.md) | Built-in functions (thread/block, math) | Done | `89a7a61` | +18 = 157 |
 | [2.6](sprints/sprint_2_6.md) | Launch wrapper + full pipeline | Planned | — | — |
 | [2.7](sprints/sprint_2_7.md) | Type validation + compile-fail tests | Planned | — | — |
 | [2.8](sprints/sprint_2_8.md) | E2E kernel tests | Planned | — | — |
