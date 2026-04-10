@@ -1,6 +1,6 @@
 # Sprint 1.6 — Runtime Device + Buffers
 
-**Commit:** pending
+**Commit:** `83bbe31`
 **Status:** Complete
 
 ## Context
