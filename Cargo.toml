@@ -1,0 +1,23 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "pyros"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Dave Riding <david@netviper.gr>"]
+description = "Rust-native GPU kernel authoring framework. Write GPU compute kernels in Rust, compile to PTX. Cross-platform (Windows + Linux), compile-time PTX emission, type-safe."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dmriding/pyros"
+readme = "README.md"
+keywords = ["gpu", "cuda", "ptx", "kernel", "compute"]
+categories = ["hardware-support", "compilers", "science"]
+include = [
+    "/src/**/*.rs",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/Cargo.toml",
+]
