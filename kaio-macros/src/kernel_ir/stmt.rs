@@ -73,6 +73,17 @@ pub enum KernelStmt {
         /// Source span.
         span: Span,
     },
+    /// `let buf = shared_mem![T; N];` — declare a shared memory buffer.
+    SharedMemDecl {
+        /// Buffer name from the `let` binding.
+        name: String,
+        /// Element type (e.g., F32, U32).
+        elem_ty: KernelType,
+        /// Number of elements.
+        count: usize,
+        /// Source span.
+        span: Span,
+    },
     /// Bare expression statement (e.g., a function call).
     Expr(KernelExpr, Span),
 }

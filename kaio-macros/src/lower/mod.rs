@@ -33,6 +33,9 @@ pub struct LoweringContext {
     /// Key: param name, Value: register Ident holding the global address.
     /// One CvtaToGlobal per pointer, reused across multiple index accesses.
     pub global_addrs: HashMap<String, Ident>,
+    /// Declared shared memory buffers.
+    /// Key: buffer name, Value: (element type, element count).
+    pub shared_arrays: HashMap<String, (KernelType, usize)>,
 }
 
 #[allow(dead_code)] // Methods used in lower/arith.rs + Sprint 2.6 codegen
@@ -44,6 +47,7 @@ impl LoweringContext {
             label_counter: 0,
             locals: HashMap::new(),
             global_addrs: HashMap::new(),
+            shared_arrays: HashMap::new(),
         }
     }
 
@@ -217,6 +221,14 @@ pub fn lower_expr(
 
         // Array index read: a[idx]
         KernelExpr::Index { array, index, span } => {
+            // Check shared memory first
+            if let Some((elem_ty, _count)) = ctx.shared_arrays.get(array).cloned() {
+                let (idx_reg, _idx_ty, idx_tokens) = lower_expr(ctx, index)?;
+                let (result, mem_tokens) =
+                    memory::lower_shared_index_read(ctx, array, &idx_reg, &elem_ty);
+                return Ok((result, elem_ty, quote! { #idx_tokens #mem_tokens }));
+            }
+            // Global memory path
             let (array_reg, array_ty) = ctx.locals.get(array).cloned().ok_or_else(|| {
                 syn::Error::new(*span, format!("undefined array `{array}` in GPU kernel"))
             })?;
@@ -407,6 +419,15 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             value,
             span,
         } => {
+            // Check shared memory first — always mutable
+            if let Some((elem_ty, _count)) = ctx.shared_arrays.get(array).cloned() {
+                let (idx_reg, _idx_ty, idx_tokens) = lower_expr(ctx, index)?;
+                let (val_reg, _val_ty, val_tokens) = lower_expr(ctx, value)?;
+                let store_tokens =
+                    memory::lower_shared_index_write(ctx, array, &idx_reg, &val_reg, &elem_ty);
+                return Ok(quote! { #idx_tokens #val_tokens #store_tokens });
+            }
+            // Global memory path
             let (array_reg, array_ty) = ctx.locals.get(array).cloned().ok_or_else(|| {
                 syn::Error::new(*span, format!("undefined array `{array}` in GPU kernel"))
             })?;
@@ -428,6 +449,33 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             let store_tokens =
                 memory::lower_index_write(ctx, array, &array_reg, &idx_reg, &val_reg, &elem_ty);
             Ok(quote! { #idx_tokens #val_tokens #store_tokens })
+        }
+
+        // shared_mem![T; N] — declare shared memory buffer
+        KernelStmt::SharedMemDecl {
+            name,
+            elem_ty,
+            count,
+            span,
+        } => {
+            if ctx.shared_arrays.contains_key(name) {
+                return Err(syn::Error::new(
+                    *span,
+                    format!("shared memory buffer `{name}` already declared in this kernel"),
+                ));
+            }
+            ctx.shared_arrays
+                .insert(name.clone(), (elem_ty.clone(), *count));
+            let size_bytes = (elem_ty.size_bytes() * count) as u32;
+            let align = elem_ty.size_bytes() as u32;
+            let ptx_name = name.clone();
+            Ok(quote! {
+                kernel.add_shared_decl(SharedDecl {
+                    name: #ptx_name.to_string(),
+                    align: #align,
+                    size_bytes: #size_bytes,
+                });
+            })
         }
 
         // for var in start..end { body }

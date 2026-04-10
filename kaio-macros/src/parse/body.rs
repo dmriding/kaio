@@ -6,6 +6,7 @@
 
 #![allow(dead_code)] // All functions used in Sprint 2.6 codegen; tested in this module
 
+use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::{BinOp, Block, Expr, ExprLit, Lit, Local, RangeLimits, Stmt, UnOp};
 
@@ -69,6 +70,20 @@ fn parse_let(local: &Local) -> syn::Result<KernelStmt> {
     let init = local.init.as_ref().ok_or_else(|| {
         syn::Error::new(span, "let bindings in GPU kernels must have an initializer")
     })?;
+
+    // Check for shared_mem! macro: `let buf = shared_mem![f32; 256];`
+    if let Expr::Macro(expr_macro) = init.expr.as_ref()
+        && expr_macro.mac.path.is_ident("shared_mem")
+    {
+        let (elem_ty, count) = parse_shared_mem_tokens(&expr_macro.mac, span)?;
+        return Ok(KernelStmt::SharedMemDecl {
+            name,
+            elem_ty,
+            count,
+            span,
+        });
+    }
+
     let value = parse_expr(&init.expr)?;
 
     Ok(KernelStmt::Let {
@@ -77,6 +92,49 @@ fn parse_let(local: &Local) -> syn::Result<KernelStmt> {
         value,
         span,
     })
+}
+
+/// Parse the inner tokens of `shared_mem![T; N]`.
+fn parse_shared_mem_tokens(mac: &syn::Macro, span: Span) -> syn::Result<(KernelType, usize)> {
+    use syn::parse::Parser;
+
+    let parser = |input: syn::parse::ParseStream| {
+        // Parse type: f32, u32, etc.
+        let ty: syn::Type = input.parse()?;
+        // Parse semicolon separator
+        input.parse::<syn::Token![;]>()?;
+        // Parse count: integer literal
+        let count: syn::LitInt = input.parse()?;
+        Ok((ty, count))
+    };
+
+    let (ty, count_lit) = parser.parse2(mac.tokens.clone()).map_err(|_| {
+        syn::Error::new(
+            span,
+            "invalid shared_mem! syntax — expected `shared_mem![Type; count]` \
+             (e.g., `shared_mem![f32; 256]`)",
+        )
+    })?;
+
+    let elem_ty = parse_type_from_syn(&ty)?;
+    if elem_ty.is_slice() {
+        return Err(syn::Error::new(
+            span,
+            "shared_mem! element type must be a scalar (f32, u32, etc.), not a slice",
+        ));
+    }
+
+    let count: usize = count_lit
+        .base10_parse()
+        .map_err(|_| syn::Error::new(span, "shared_mem! count must be a positive integer"))?;
+    if count == 0 {
+        return Err(syn::Error::new(
+            span,
+            "shared_mem! count must be greater than 0",
+        ));
+    }
+
+    Ok((elem_ty, count))
 }
 
 /// Parse an expression as a statement (handles assignment, if, and bare expressions).
@@ -381,10 +439,20 @@ pub fn parse_expr(expr: &Expr) -> syn::Result<KernelExpr> {
             expr,
             "`unsafe` blocks are not supported in GPU kernels",
         )),
-        Expr::Macro(_) => Err(syn::Error::new_spanned(
-            expr,
-            "macro invocations are not supported in GPU kernels",
-        )),
+        Expr::Macro(expr_macro) => {
+            if expr_macro.mac.path.is_ident("shared_mem") {
+                Err(syn::Error::new_spanned(
+                    expr,
+                    "shared_mem![] must be assigned to a variable: \
+                     `let buf = shared_mem![f32; 256];`",
+                ))
+            } else {
+                Err(syn::Error::new_spanned(
+                    expr,
+                    "macro invocations are not supported in GPU kernels",
+                ))
+            }
+        }
         Expr::MethodCall(_) => Err(syn::Error::new_spanned(
             expr,
             "method calls are not supported in GPU kernels",
@@ -953,5 +1021,54 @@ mod tests {
         let expr: syn::Expr = syn::parse2(quote! { x.foo() }).unwrap();
         let err = parse_expr(&expr).unwrap_err();
         assert!(err.to_string().contains("method call"));
+    }
+
+    // --- shared_mem! parsing tests ---
+
+    #[test]
+    fn parse_shared_mem_f32() {
+        let block = parse_block(quote! { { let sdata = shared_mem![f32; 256]; } });
+        let stmts = parse_body(&block).unwrap();
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            KernelStmt::SharedMemDecl {
+                name,
+                elem_ty,
+                count,
+                ..
+            } => {
+                assert_eq!(name, "sdata");
+                assert_eq!(*elem_ty, KernelType::F32);
+                assert_eq!(*count, 256);
+            }
+            _ => panic!("expected SharedMemDecl"),
+        }
+    }
+
+    #[test]
+    fn parse_shared_mem_u32() {
+        let block = parse_block(quote! { { let buf = shared_mem![u32; 128]; } });
+        let stmts = parse_body(&block).unwrap();
+        match &stmts[0] {
+            KernelStmt::SharedMemDecl {
+                name,
+                elem_ty,
+                count,
+                ..
+            } => {
+                assert_eq!(name, "buf");
+                assert_eq!(*elem_ty, KernelType::U32);
+                assert_eq!(*count, 128);
+            }
+            _ => panic!("expected SharedMemDecl"),
+        }
+    }
+
+    #[test]
+    fn reject_shared_mem_bare() {
+        // shared_mem! without let binding
+        let expr: syn::Expr = syn::parse2(quote! { shared_mem![f32; 256] }).unwrap();
+        let err = parse_expr(&expr).unwrap_err();
+        assert!(err.to_string().contains("must be assigned to a variable"));
     }
 }

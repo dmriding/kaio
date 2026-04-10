@@ -199,6 +199,19 @@ mod tests {
     }
 
     #[test]
+    fn emit_mov_shared_addr() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let instr = PtxInstruction::Mov {
+            dst: reg(RegKind::R, 0, PtxType::U32),
+            src: Operand::SharedAddr("sdata".to_string()),
+            ty: PtxType::U32,
+        };
+        instr.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    mov.u32 %r0, sdata;\n");
+    }
+
+    #[test]
     fn emit_cvt() {
         let mut w = PtxWriter::new();
         w.indent();

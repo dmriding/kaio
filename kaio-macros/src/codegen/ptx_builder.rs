@@ -36,6 +36,7 @@ pub fn generate_build_ptx(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Re
             use kaio::core::instr::special;
             use kaio::core::ir::{
                 Operand, PtxInstruction, PtxKernel, PtxModule, PtxParam, RegisterAllocator,
+                SharedDecl,
             };
             use kaio::core::types::PtxType;
 

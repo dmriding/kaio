@@ -101,3 +101,20 @@ pub fn log(_x: f32) -> f32 {
 pub fn tanh(_x: f32) -> f32 {
     panic!("tanh() can only be called inside a #[gpu_kernel] function")
 }
+
+/// Declare a shared memory buffer inside a `#[gpu_kernel]` function.
+///
+/// ```ignore
+/// let sdata = shared_mem![f32; 256];  // 256 f32 elements in shared memory
+/// sdata[tid] = value;                 // write via st.shared
+/// let val = sdata[tid];               // read via ld.shared
+/// ```
+///
+/// Shared memory is block-scoped SRAM — all threads in a block share the same
+/// allocation. Use `bar_sync()` to synchronize between writes and reads.
+#[macro_export]
+macro_rules! shared_mem {
+    ($ty:ty; $n:expr) => {
+        compile_error!("shared_mem![] can only be used inside a #[gpu_kernel] function")
+    };
+}

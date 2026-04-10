@@ -23,6 +23,11 @@ pub enum Operand {
     ImmF64(f64),
     /// A PTX special register (`%tid.x`, `%ntid.x`, etc.).
     SpecialReg(SpecialReg),
+    /// Address of a named shared memory allocation.
+    ///
+    /// Used with `Mov` to load a shared allocation's base address into a
+    /// register: `mov.u32 %r0, sdata;`. Displays as the bare name.
+    SharedAddr(String),
 }
 
 impl fmt::Display for Operand {
@@ -49,6 +54,7 @@ impl fmt::Display for Operand {
                 }
             }
             Self::SpecialReg(sr) => write!(f, "{}", sr.ptx_name()),
+            Self::SharedAddr(name) => write!(f, "{name}"),
         }
     }
 }
