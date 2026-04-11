@@ -133,35 +133,53 @@ pub fn lower_index_write(
 
 /// Compute a shared memory address for `array_name[index]`.
 ///
-/// **Shared memory uses 32-bit addressing (U32)**, unlike global memory which
-/// uses 64-bit (S64/U64). This is correct — shared memory is per-SM SRAM with
-/// a 32-bit address space, while global memory is VRAM addressed at 64 bits.
+/// **Shared memory uses 32-bit addressing (U32)** — this is a deliberate
+/// PTX/shared-space choice. `.shared` is per-SM SRAM with a 32-bit address
+/// space, distinct from 64-bit global memory.
 ///
-/// For the current single-allocation case, the shared address is simply the
-/// byte offset: `mul.lo.u32 offset, index, sizeof(T)`. The PTX `.shared`
-/// declaration places the allocation at offset 0 in shared space.
+/// Uses named-symbol base addressing:
+/// 1. `mov.u32 base, <symbol>` — PTX resolves to the allocation's base
+/// 2. `mul.u32 byte_off, index, sizeof(T)` — byte offset within allocation
+/// 3. `add.u32 addr, base, byte_off` — final address
 ///
-/// When multiple shared allocations are needed (Sprint 3.5 reductions), this
-/// function will need a base offset parameter to address non-zero-based
-/// allocations.
+/// This pattern works correctly for any number of shared allocations.
+/// The base load + add are emitted unconditionally (even when there's only
+/// one allocation where base = 0). This is an intentional simplicity
+/// tradeoff — may be optimized via base hoisting in Phase 4.6+.
 fn compute_shared_address(
     ctx: &mut LoweringContext,
-    _array_name: &str,
+    array_name: &str,
     index_reg: &Ident,
     elem_ty: &KernelType,
 ) -> (Ident, TokenStream) {
     let size = elem_ty.size_bytes() as u32;
-
-    // Byte offset = index * sizeof(T) — 32-bit multiply
-    // For a single shared allocation, the byte offset IS the address
-    // (allocation starts at shared offset 0).
+    let ptx_name = array_name.to_string();
+    let base_reg = ctx.fresh_reg();
+    let byte_off_reg = ctx.fresh_reg();
     let addr_reg = ctx.fresh_reg();
+
     let tokens = quote! {
-        let #addr_reg = alloc.alloc(PtxType::U32);
+        // Load base address of shared allocation (32-bit shared space)
+        let #base_reg = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Mov {
+            dst: #base_reg,
+            src: Operand::SharedAddr(#ptx_name.to_string()),
+            ty: PtxType::U32,
+        });
+        // Byte offset within allocation
+        let #byte_off_reg = alloc.alloc(PtxType::U32);
         kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-            dst: #addr_reg,
+            dst: #byte_off_reg,
             lhs: Operand::Reg(#index_reg),
             rhs: Operand::ImmU32(#size),
+            ty: PtxType::U32,
+        }));
+        // Final address = base + byte_offset
+        let #addr_reg = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: #addr_reg,
+            lhs: Operand::Reg(#base_reg),
+            rhs: Operand::Reg(#byte_off_reg),
             ty: PtxType::U32,
         }));
     };

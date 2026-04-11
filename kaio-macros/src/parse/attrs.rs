@@ -1,4 +1,5 @@
-//! Parse `#[gpu_kernel(block_size = N)]` attribute arguments.
+//! Parse `#[gpu_kernel(block_size = N)]` or `#[gpu_kernel(block_size = (X, Y))]`
+//! attribute arguments.
 
 use proc_macro2::TokenStream;
 use syn::parse::{Parse, ParseStream};
@@ -9,11 +10,13 @@ use crate::kernel_ir::KernelConfig;
 /// Raw parsed attribute key-value pairs.
 struct GpuKernelAttrs {
     block_size: Option<(u32, proc_macro2::Span)>,
+    block_size_y: Option<(u32, proc_macro2::Span)>,
 }
 
 impl Parse for GpuKernelAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut block_size = None;
+        let mut block_size_y = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -21,12 +24,31 @@ impl Parse for GpuKernelAttrs {
 
             match key.to_string().as_str() {
                 "block_size" => {
-                    let lit: LitInt = input.parse()?;
-                    let span = lit.span();
-                    let value: u32 = lit.base10_parse().map_err(|_| {
-                        syn::Error::new(span, "block_size must be a positive integer")
-                    })?;
-                    block_size = Some((value, span));
+                    if input.peek(syn::token::Paren) {
+                        // 2D: block_size = (X, Y)
+                        let content;
+                        let _paren = syn::parenthesized!(content in input);
+                        let x_lit: LitInt = content.parse()?;
+                        content.parse::<Token![,]>()?;
+                        let y_lit: LitInt = content.parse()?;
+                        let span = x_lit.span();
+                        let x_val: u32 = x_lit.base10_parse().map_err(|_| {
+                            syn::Error::new(span, "block_size X must be a positive integer")
+                        })?;
+                        let y_val: u32 = y_lit.base10_parse().map_err(|_| {
+                            syn::Error::new(y_lit.span(), "block_size Y must be a positive integer")
+                        })?;
+                        block_size = Some((x_val, span));
+                        block_size_y = Some((y_val, y_lit.span()));
+                    } else {
+                        // 1D: block_size = N
+                        let lit: LitInt = input.parse()?;
+                        let span = lit.span();
+                        let value: u32 = lit.base10_parse().map_err(|_| {
+                            syn::Error::new(span, "block_size must be a positive integer")
+                        })?;
+                        block_size = Some((value, span));
+                    }
                 }
                 other => {
                     return Err(syn::Error::new(
@@ -42,7 +64,10 @@ impl Parse for GpuKernelAttrs {
             }
         }
 
-        Ok(GpuKernelAttrs { block_size })
+        Ok(GpuKernelAttrs {
+            block_size,
+            block_size_y,
+        })
     }
 }
 
@@ -57,26 +82,55 @@ pub fn parse_kernel_config(attr: TokenStream) -> syn::Result<KernelConfig> {
         )
     })?;
 
-    // Validate: must be power of 2
-    if !block_size.is_power_of_two() {
-        return Err(syn::Error::new(
+    if let Some((block_size_y, y_span)) = attrs.block_size_y {
+        // 2D validation
+        if block_size == 0 {
+            return Err(syn::Error::new(
+                block_size_span,
+                "block_size X dimension must be > 0",
+            ));
+        }
+        if block_size_y == 0 {
+            return Err(syn::Error::new(
+                y_span,
+                "block_size Y dimension must be > 0",
+            ));
+        }
+        let total = block_size * block_size_y;
+        if total > 1024 {
+            return Err(syn::Error::new(
+                block_size_span,
+                format!(
+                    "total thread count ({block_size} * {block_size_y} = {total}) \
+                     cannot exceed 1024"
+                ),
+            ));
+        }
+        Ok(KernelConfig {
+            block_size,
+            block_size_y: Some(block_size_y),
             block_size_span,
-            format!("`block_size` must be a power of 2, got {block_size}"),
-        ));
-    }
-
-    // Validate: must be in range [1, 1024]
-    if block_size > 1024 {
-        return Err(syn::Error::new(
+        })
+    } else {
+        // 1D validation (unchanged)
+        if !block_size.is_power_of_two() {
+            return Err(syn::Error::new(
+                block_size_span,
+                format!("`block_size` must be a power of 2, got {block_size}"),
+            ));
+        }
+        if block_size > 1024 {
+            return Err(syn::Error::new(
+                block_size_span,
+                format!("`block_size` cannot exceed 1024, got {block_size}"),
+            ));
+        }
+        Ok(KernelConfig {
+            block_size,
+            block_size_y: None,
             block_size_span,
-            format!("`block_size` cannot exceed 1024, got {block_size}"),
-        ));
+        })
     }
-
-    Ok(KernelConfig {
-        block_size,
-        block_size_span,
-    })
 }
 
 #[cfg(test)]
@@ -89,6 +143,7 @@ mod tests {
         let tokens = quote! { block_size = 256 };
         let config = parse_kernel_config(tokens).unwrap();
         assert_eq!(config.block_size, 256);
+        assert_eq!(config.block_size_y, None);
     }
 
     #[test]
@@ -138,5 +193,37 @@ mod tests {
         let tokens = quote! { block_size = 256, warp_size = 32 };
         let err = parse_kernel_config(tokens).unwrap_err();
         assert!(err.to_string().contains("unknown attribute"));
+    }
+
+    // --- 2D block_size tests ---
+
+    #[test]
+    fn parse_block_size_2d() {
+        let tokens = quote! { block_size = (16, 16) };
+        let config = parse_kernel_config(tokens).unwrap();
+        assert_eq!(config.block_size, 16);
+        assert_eq!(config.block_size_y, Some(16));
+    }
+
+    #[test]
+    fn parse_block_size_2d_asymmetric() {
+        let tokens = quote! { block_size = (32, 8) };
+        let config = parse_kernel_config(tokens).unwrap();
+        assert_eq!(config.block_size, 32);
+        assert_eq!(config.block_size_y, Some(8));
+    }
+
+    #[test]
+    fn reject_block_size_2d_exceeds_1024() {
+        let tokens = quote! { block_size = (32, 64) };
+        let err = parse_kernel_config(tokens).unwrap_err();
+        assert!(err.to_string().contains("1024"));
+    }
+
+    #[test]
+    fn reject_block_size_2d_zero_y() {
+        let tokens = quote! { block_size = (16, 0) };
+        let err = parse_kernel_config(tokens).unwrap_err();
+        assert!(err.to_string().contains("must be > 0"));
     }
 }

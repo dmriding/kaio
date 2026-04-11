@@ -1,0 +1,23 @@
+[package]
+name = "kaio-ops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pre-built GPU operations for KAIO. Matrix multiplication and more."
+keywords = ["gpu", "cuda", "matmul", "linear-algebra", "compute"]
+categories = ["hardware-support", "science"]
+readme = "README.md"
+include = [
+    "/src/**/*.rs",
+    "/Cargo.toml",
+    "/README.md",
+]
+
+[dependencies]
+kaio = { version = "0.0.4", path = "../kaio" }
+
+[dev-dependencies]
+cudarc = { version = "0.19", default-features = false, features = ["driver", "std", "dynamic-loading", "cuda-12080", "cublas"] }

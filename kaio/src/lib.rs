@@ -13,13 +13,14 @@
 //! - [`kaio_core`] — PTX IR types, instruction emitters, PtxWriter
 //! - [`kaio_runtime`] — CUDA device management, buffers, PTX loading, kernel launch
 //! - `kaio_macros` — `#[gpu_kernel]` proc macro (re-exported here)
+//! - `kaio_ops` — pre-built GPU operations (matmul, more planned).
+//!   Separate crate, not re-exported from `kaio`. Add with `cargo add kaio-ops`.
 //!
 //! ## Status
 //!
-//! **Phase 3 complete.** Loops, shared memory, reductions, and softmax.
-//! `#[gpu_kernel]` proc macro transforms Rust function syntax into PTX
-//! codegen + typed launch wrappers. See the repository README for the
-//! full feature table and roadmap.
+//! **Phase 4 complete.** Tiled matmul (31% of cuBLAS sgemm), `kaio-ops`
+//! crate, 2D thread blocks, FMA, PTX inspection tools. See the
+//! repository README for the full feature table and roadmap.
 
 #![warn(missing_docs)]
 

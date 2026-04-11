@@ -8,7 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Phase 3 Complete
+## [0.0.4] — Phase 4: Tiled MatMul & Block-Level API
+
+### Added — Phase 4
+- **`kaio-ops` crate** with `matmul()` — tiled matrix multiplication on GPU.
+  Host-side API: `matmul(&device, &a, &b, &mut c, m, n, k)`.
+- **FMA instruction**: `fma(a, b, c)` builtin for f32 fused multiply-add.
+- **2D thread blocks**: `#[gpu_kernel(block_size = (16, 16))]` tuple syntax
+  with 2D grid launch model (`grid: (u32, u32, u32)`).
+- **2D thread indices**: `thread_idx_y()`, `block_idx_y()`, `block_dim_y()`,
+  `grid_dim_y()`.
+- **Multi-allocation shared memory**: multiple `shared_mem!` calls per kernel,
+  each tracked independently via named PTX symbols.
+- **Register-tiled matmul kernel**: 64x64 block tiles, 4x4 per thread,
+  bank conflict padding (stride 17/65). 31% of cuBLAS sgemm on RTX 4090.
+- **Benchmark harness** vs cuBLAS sgemm: deterministic inputs, 5 warm-up,
+  20 measured, median TFLOPS. Results in `docs/benchmarks.md`.
+- **`KAIO_PTX_STATS=1`**: instruction/register/shared-mem statistics at
+  kernel compile time.
+- **`KAIO_PTX_ANNOTATE=1`**: source-construct annotations in emitted PTX.
+- **`docs/performance.md`**: coalescing patterns, bank conflict avoidance,
+  register tiling guide, PTX inspection tool documentation.
+- 207 host tests + 41 GPU tests + 1 benchmark.
+
+### Fixed — Phase 4
+- **Launch config block_dim mismatch**: cudarc's `for_num_elems()` hardcoded
+  block_dim=1024 regardless of declared `block_size`. 1D launch wrapper now
+  computes its own LaunchConfig.
+- **Shared memory multi-allocation overlap**: `compute_shared_address()` assumed
+  offset 0 for all allocations. Fixed with named-symbol base addressing
+  (`Operand::SharedAddr`).
+- **FMA builtin argument validation**: previously only validated first argument.
+  Now all 3 args are checked for f32 type.
+- **`block_reduce_*` in 2D kernels**: reductions derive thread identity from
+  TidX only, which is wrong for 2D blocks. Now rejected at compile time with
+  clear error message (fix planned for Phase 5).
+
+## [0.0.3] — Phase 3 Complete
 
 ### Added — Phase 3: Loops, Reductions & Softmax
 - **`for`/`while` loop support** in `#[gpu_kernel]`: `for i in start..end`

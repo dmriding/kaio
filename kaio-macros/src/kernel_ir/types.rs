@@ -111,12 +111,15 @@ pub struct KernelParam {
     pub span: Span,
 }
 
-/// Configuration parsed from `#[gpu_kernel(block_size = N)]`.
+/// Configuration parsed from `#[gpu_kernel(block_size = N)]` or
+/// `#[gpu_kernel(block_size = (X, Y))]` for 2D thread blocks.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // block_size_span used in Sprint 2.7 validation
+#[allow(dead_code)]
 pub struct KernelConfig {
-    /// Thread block size (number of threads per block).
+    /// Thread block size X dimension (or total for 1D).
     pub block_size: u32,
+    /// Thread block size Y dimension. `Some` for 2D kernels, `None` for 1D.
+    pub block_size_y: Option<u32>,
     /// Source span of the block_size value for error reporting.
     pub block_size_span: Span,
 }

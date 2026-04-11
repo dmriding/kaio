@@ -116,7 +116,9 @@ generated once at first call and cached. No unsafe in user code.
 | Type casts | `x as f32` | ✅ |
 | Math builtins | `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max` | ✅ |
 | Thread indices | `thread_idx_x()`, `block_idx_x()`, `block_dim_x()` | ✅ |
-| Tiled matmul | `block_load`, `block_dot` | 🚧 Phase 4 |
+| FMA | `fma(a, b, c)` | ✅ |
+| 2D blocks | `block_size = (16, 16)`, `thread_idx_y()` | ✅ |
+| Tiled matmul | `kaio_ops::matmul()` ([31% of cuBLAS](docs/benchmarks.md)) | ✅ |
 | Fused attention | FlashAttention-style | 🚧 Phase 5 |
 
 ## Architecture
@@ -141,6 +143,7 @@ KAIO is structured in four layers:
 | `kaio-macros` | `#[gpu_kernel]` proc macro |
 | `kaio-core` | PTX IR, instruction emitters, zero external dependencies |
 | `kaio-runtime` | CUDA driver wrapper via [cudarc](https://github.com/coreylowman/cudarc) |
+| `kaio-ops` | Pre-built GPU operations (matmul, more planned) |
 
 ## Target Hardware
 
@@ -207,7 +210,8 @@ for a complete end-to-end example.
 - [x] **Phase 2** — `#[gpu_kernel]` proc macro (arithmetic, control
   flow, memory access, math builtins)
 - [x] **Phase 3** — Loops, shared memory, reductions, softmax
-- [ ] **Phase 4** — Tiled matrix multiplication, block-level API
+- [x] **Phase 4** — Tiled matmul (31% of cuBLAS), `kaio-ops` crate,
+  2D blocks, FMA, PTX inspection tools
 - [ ] **Phase 5** — Fused attention, auto-tuning, crates.io v0.1.0
 
 See [docs/phases.md](docs/phases.md) for detailed plans and

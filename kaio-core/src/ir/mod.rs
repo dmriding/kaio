@@ -12,7 +12,7 @@ pub mod param;
 pub mod register;
 
 pub use instruction::PtxInstruction;
-pub use kernel::{PtxKernel, SharedDecl};
+pub use kernel::{KernelStats, PtxKernel, SharedDecl};
 pub use module::PtxModule;
 pub use operand::{Operand, SpecialReg};
 pub use param::PtxParam;
