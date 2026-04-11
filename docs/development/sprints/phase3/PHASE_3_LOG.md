@@ -13,7 +13,7 @@ Master plan: [phase3_master_plan.md](phase3_master_plan.md)
 | [3.2](sprint_3_2.md) | Shared memory + barrier + shuffle instructions (kaio-core) | Done | `d82cc1f` | +7 unit, +2 integ = 188 total |
 | [3.3](sprint_3_3.md) | Shared memory in macro DSL (`shared_mem![]`) | Done | `218162d` | +7 = 190 total |
 | [3.4](sprint_3_4.md) | Barrier + shuffle built-in functions | Done | `6fde908` | +9 = 198+12 GPU |
-| [3.5](sprint_3_5.md) | Reduction primitives (`block_reduce_sum/max`) | Done | `pending` | +2 GPU = 198+14 GPU |
+| [3.5](sprint_3_5.md) | Reduction primitives (`block_reduce_sum/max`) | Done | `24efd87` | +2 GPU = 198+14 GPU |
 | [3.6](sprint_3_6.md) | Softmax kernel | Planning | — | — |
 | [3.7](sprint_3_7.md) | PyTorch validation + accuracy suite | Planning | — | — |
 | [3.8](sprint_3_8.md) | Polish + coverage (65%) + docs | Planning | — | — |

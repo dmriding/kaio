@@ -1,6 +1,7 @@
 # Sprint 3.5 — Reduction Primitives (block_reduce_sum / block_reduce_max)
 
 **Status:** Complete
+**Commit:** `24efd87`
 **Date:** 2026-04-11
 **Depends on:** Sprint 3.4 (bar_sync, shfl_sync builtins)
 
