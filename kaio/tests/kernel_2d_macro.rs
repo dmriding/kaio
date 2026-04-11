@@ -1,13 +1,13 @@
 //! GPU tests for 2D block_size kernels.
 //!
 //! Validates that `#[gpu_kernel(block_size = (X, Y))]` with explicit
-//! `LaunchConfig` works end-to-end on real GPU hardware.
+//! `grid: (u32, u32, u32)` works end-to-end on real GPU hardware.
+//! Block dims are hardcoded from the attribute — callers only supply grid.
 
 use kaio::prelude::*;
-// 2D kernels accept grid: (u32, u32, u32) — block_dim is hardcoded from the attribute.
 
 /// Simple 2D kernel: each thread writes `row * cols + col` to output.
-/// Tests 2D thread indexing + explicit LaunchConfig.
+/// Tests 2D thread indexing + grid-tuple launch.
 #[gpu_kernel(block_size = (16, 16))]
 fn write_2d_indices(out: &mut [f32], rows: u32, cols: u32) {
     let tx = thread_idx_x();

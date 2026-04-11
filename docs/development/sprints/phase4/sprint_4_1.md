@@ -36,17 +36,14 @@ gained `block_size_x` and `block_size_y` fields for future tile dimension
 access in Sprint 4.3+.
 
 ### 2D Launch Wrapper — Done
-When `block_size_y` is `Some`, the generated `launch()` function takes an
-explicit `LaunchConfig` parameter instead of inferring grid from the last
-`u32` parameter. Users compute grid dimensions themselves:
+When `block_size_y` is `Some`, the generated `launch()` function takes a
+`grid: (u32, u32, u32)` parameter instead of inferring grid from the last
+`u32` parameter. Block dims are hardcoded from the attribute to prevent
+mismatches between declared and runtime block shapes:
 
 ```rust
-let cfg = LaunchConfig {
-    grid_dim: (cols.div_ceil(16), rows.div_ceil(16), 1),
-    block_dim: (16, 16, 1),
-    shared_mem_bytes: 0,
-};
-kernel::launch(&device, &mut out, rows, cols, cfg).unwrap();
+let grid = (cols.div_ceil(16), rows.div_ceil(16), 1);
+kernel::launch(&device, &mut out, rows, cols, grid).unwrap();
 ```
 
 1D kernels (`block_size = N`) are completely unchanged — grid is still

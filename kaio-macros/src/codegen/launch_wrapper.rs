@@ -16,8 +16,9 @@ use crate::kernel_ir::{KernelSignature, KernelType};
 /// Launch configuration depends on block dimensionality:
 /// - **1D** (`block_size = N`): uses the last `u32` scalar param for
 ///   `LaunchConfig::for_num_elems()`. Grid is inferred automatically.
-/// - **2D** (`block_size = (X, Y)`): the generated `launch()` takes an
-///   explicit `LaunchConfig` parameter. Users must compute grid dims.
+/// - **2D** (`block_size = (X, Y)`): the generated `launch()` takes a
+///   `grid: (u32, u32, u32)` parameter. Block dims are hardcoded from
+///   the attribute to prevent mismatches.
 pub fn generate_launch_fn(sig: &KernelSignature) -> syn::Result<TokenStream> {
     let kernel_name = &sig.name;
     let is_2d = sig.config.block_size_y.is_some();
