@@ -54,6 +54,10 @@ pub fn lower_builtin(
         "shfl_sync_up" => lower_shfl_sync(ctx, "up", arg_regs, arg_types, span),
         "shfl_sync_bfly" => lower_shfl_sync(ctx, "bfly", arg_regs, arg_types, span),
 
+        // --- Reduction builtins ---
+        "block_reduce_sum" => lower_block_reduce(ctx, "sum", arg_regs, arg_types, span),
+        "block_reduce_max" => lower_block_reduce(ctx, "max", arg_regs, arg_types, span),
+
         _ => Err(syn::Error::new(
             span,
             format!(
@@ -63,7 +67,8 @@ pub fn lower_builtin(
                  block_dim_x, block_dim_y, block_dim_z, \
                  grid_dim_x, grid_dim_y, grid_dim_z, \
                  sqrt, abs, min, max, exp, log, tanh, \
-                 bar_sync, shfl_sync_down, shfl_sync_up, shfl_sync_bfly"
+                 bar_sync, shfl_sync_down, shfl_sync_up, shfl_sync_bfly, \
+                 block_reduce_sum, block_reduce_max"
             ),
         )),
     }
@@ -390,6 +395,364 @@ fn lower_tanh(
     };
 
     Ok((dst, KernelType::F32, tokens))
+}
+
+/// Lower `block_reduce_sum(val)` or `block_reduce_max(val)`.
+///
+/// Multi-instruction expansion (~35 PTX instructions) implementing a standard
+/// CUDA block-level reduction with broadcast:
+/// 1. Warp-level tree reduction (5 rounds of shfl.sync.down + add/max)
+/// 2. Warp leaders write to auto-allocated shared memory
+/// 3. bar.sync
+/// 4. First warp reduces across warps
+/// 5. bar.sync + broadcast to ALL threads via shared[0]
+fn lower_block_reduce(
+    ctx: &mut LoweringContext,
+    mode: &str, // "sum" or "max"
+    arg_regs: &[Ident],
+    arg_types: &[KernelType],
+    span: Span,
+) -> syn::Result<(Ident, KernelType, TokenStream)> {
+    if arg_regs.len() != 1 {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "block_reduce_{mode}() expects 1 argument, got {}",
+                arg_regs.len()
+            ),
+        ));
+    }
+    check_f32(&arg_types[0], span)?;
+
+    let block_size = ctx.block_size.ok_or_else(|| {
+        syn::Error::new(
+            span,
+            "internal error: block_size not set in lowering context",
+        )
+    })?;
+    let num_warps = block_size / 32;
+
+    let val = &arg_regs[0];
+
+    // The arithmetic op for combining values: Add for sum, Max for max
+    let combine_op = match mode {
+        "sum" => quote! { ArithOp::Add },
+        "max" => quote! { ArithOp::Max },
+        _ => unreachable!(),
+    };
+
+    // Identity element: 0.0 for sum, -FLT_MAX for max
+    let identity = match mode {
+        "sum" => quote! { Operand::ImmF32(0.0f32) },
+        "max" => quote! { Operand::ImmF32(-3.402823e+38f32) },
+        _ => unreachable!(),
+    };
+
+    // --- Auto-allocate reduction shared memory (once per kernel) ---
+    let smem_tokens = if !ctx.reduce_smem_allocated {
+        let smem_size = num_warps * 4; // one f32 per warp
+        ctx.reduce_smem_allocated = true;
+        quote! {
+            kernel.add_shared_decl(SharedDecl {
+                name: "_kaio_reduce_smem".to_string(),
+                align: 4,
+                size_bytes: #smem_size,
+            });
+        }
+    } else {
+        TokenStream::new()
+    };
+
+    // --- Allocate all registers upfront ---
+    // Warp reduction accumulator (reused across rounds)
+    let acc = ctx.fresh_reg();
+    // Thread index
+    let tid = ctx.fresh_reg();
+    // Shuffle result (reused)
+    let shfl_tmp = ctx.fresh_reg();
+    // Warp ID and lane-0 check
+    let warp_id = ctx.fresh_reg();
+    let warp_id_x32 = ctx.fresh_reg();
+    let pred_lane0 = ctx.fresh_reg();
+    let warp_byte_off = ctx.fresh_reg();
+    // Cross-warp phase
+    let pred_first_warp = ctx.fresh_reg();
+    let pred_valid = ctx.fresh_reg();
+    let cross_val = ctx.fresh_reg();
+    let cross_shfl = ctx.fresh_reg();
+    let tid_byte_off = ctx.fresh_reg();
+    let pred_t0 = ctx.fresh_reg();
+    // Broadcast read (offset 0)
+    let zero_off = ctx.fresh_reg();
+    // Final result
+    let result = ctx.fresh_reg();
+
+    let write_done_label = ctx.fresh_label("REDUCE_WRITE_DONE");
+    let broadcast_label = ctx.fresh_label("REDUCE_BROADCAST");
+    let load_done_label = ctx.fresh_label("REDUCE_LOAD_DONE");
+    let t0_done_label = ctx.fresh_label("REDUCE_T0_DONE");
+
+    let num_warps_imm = num_warps;
+
+    let tokens = quote! {
+        #smem_tokens
+
+        // --- Phase 1: Warp-level tree reduction ---
+        // Copy input to accumulator
+        let #acc = alloc.alloc(PtxType::F32);
+        kernel.push(PtxInstruction::Mov {
+            dst: #acc,
+            src: Operand::Reg(#val),
+            ty: PtxType::F32,
+        });
+
+        // Get thread index
+        let #tid = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Mov {
+            dst: #tid,
+            src: Operand::SpecialReg(kaio::core::ir::SpecialReg::TidX),
+            ty: PtxType::U32,
+        });
+
+        let #shfl_tmp = alloc.alloc(PtxType::U32);
+
+        // 5 rounds: delta = 16, 8, 4, 2, 1
+        // Round 1: delta=16
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+            dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(16),
+            c: 31, mask: 0xFFFFFFFF_u32,
+        }));
+        kernel.push(PtxInstruction::Arith(#combine_op {
+            dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
+            ty: PtxType::F32,
+        }));
+        // Round 2: delta=8
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+            dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(8),
+            c: 31, mask: 0xFFFFFFFF_u32,
+        }));
+        kernel.push(PtxInstruction::Arith(#combine_op {
+            dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
+            ty: PtxType::F32,
+        }));
+        // Round 3: delta=4
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+            dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(4),
+            c: 31, mask: 0xFFFFFFFF_u32,
+        }));
+        kernel.push(PtxInstruction::Arith(#combine_op {
+            dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
+            ty: PtxType::F32,
+        }));
+        // Round 4: delta=2
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+            dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(2),
+            c: 31, mask: 0xFFFFFFFF_u32,
+        }));
+        kernel.push(PtxInstruction::Arith(#combine_op {
+            dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
+            ty: PtxType::F32,
+        }));
+        // Round 5: delta=1
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+            dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(1),
+            c: 31, mask: 0xFFFFFFFF_u32,
+        }));
+        kernel.push(PtxInstruction::Arith(#combine_op {
+            dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
+            ty: PtxType::F32,
+        }));
+
+        // --- Phase 2: Warp leaders write to shared memory ---
+        let #warp_id = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Div {
+            dst: #warp_id,
+            lhs: Operand::Reg(#tid),
+            rhs: Operand::ImmU32(32),
+            ty: PtxType::U32,
+        }));
+        // Lane-0 check: warp_id * 32 == tid
+        let #warp_id_x32 = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: #warp_id_x32,
+            lhs: Operand::Reg(#warp_id),
+            rhs: Operand::ImmU32(32),
+            ty: PtxType::U32,
+        }));
+        let #pred_lane0 = alloc.alloc(PtxType::Pred);
+        kernel.push(PtxInstruction::Control(ControlOp::SetP {
+            dst: #pred_lane0,
+            cmp_op: CmpOp::Eq,
+            lhs: Operand::Reg(#warp_id_x32),
+            rhs: Operand::Reg(#tid),
+            ty: PtxType::U32,
+        }));
+        // Byte offset for shared: warp_id * 4
+        let #warp_byte_off = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: #warp_byte_off,
+            lhs: Operand::Reg(#warp_id),
+            rhs: Operand::ImmU32(4),
+            ty: PtxType::U32,
+        }));
+        // Conditional store: only lane 0
+        kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+            pred: #pred_lane0,
+            target: #write_done_label.to_string(),
+            negate: true,
+        }));
+        kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+            addr: #warp_byte_off,
+            src: #acc,
+            ty: PtxType::F32,
+        }));
+        kernel.push(PtxInstruction::Label(#write_done_label.to_string()));
+
+        // --- Phase 3: bar.sync ---
+        kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+        // --- Phase 4: First warp cross-warp reduction ---
+        let #pred_first_warp = alloc.alloc(PtxType::Pred);
+        kernel.push(PtxInstruction::Control(ControlOp::SetP {
+            dst: #pred_first_warp,
+            cmp_op: CmpOp::Lt,
+            lhs: Operand::Reg(#tid),
+            rhs: Operand::ImmU32(32),
+            ty: PtxType::U32,
+        }));
+        kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+            pred: #pred_first_warp,
+            target: #broadcast_label.to_string(),
+            negate: true,
+        }));
+
+        // Load from shared or use identity
+        let #pred_valid = alloc.alloc(PtxType::Pred);
+        kernel.push(PtxInstruction::Control(ControlOp::SetP {
+            dst: #pred_valid,
+            cmp_op: CmpOp::Lt,
+            lhs: Operand::Reg(#tid),
+            rhs: Operand::ImmU32(#num_warps_imm),
+            ty: PtxType::U32,
+        }));
+        let #tid_byte_off = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: #tid_byte_off,
+            lhs: Operand::Reg(#tid),
+            rhs: Operand::ImmU32(4),
+            ty: PtxType::U32,
+        }));
+        // Default: identity value
+        let #cross_val = alloc.alloc(PtxType::F32);
+        kernel.push(PtxInstruction::Mov {
+            dst: #cross_val,
+            src: #identity,
+            ty: PtxType::F32,
+        });
+        // Conditional load overwrites identity for valid lanes
+        kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+            pred: #pred_valid,
+            target: #load_done_label.to_string(),
+            negate: true,
+        }));
+        kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+            dst: #cross_val,
+            addr: #tid_byte_off,
+            ty: PtxType::F32,
+        }));
+        kernel.push(PtxInstruction::Label(#load_done_label.to_string()));
+
+        // Warp reduction on cross_val (5 rounds)
+        let #cross_shfl = alloc.alloc(PtxType::U32);
+        // Round 1: delta=16
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+            dst: #cross_shfl, src: #cross_val, delta: Operand::ImmU32(16),
+            c: 31, mask: 0xFFFFFFFF_u32,
+        }));
+        kernel.push(PtxInstruction::Arith(#combine_op {
+            dst: #cross_val, lhs: Operand::Reg(#cross_val), rhs: Operand::Reg(#cross_shfl),
+            ty: PtxType::F32,
+        }));
+        // Round 2: delta=8
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+            dst: #cross_shfl, src: #cross_val, delta: Operand::ImmU32(8),
+            c: 31, mask: 0xFFFFFFFF_u32,
+        }));
+        kernel.push(PtxInstruction::Arith(#combine_op {
+            dst: #cross_val, lhs: Operand::Reg(#cross_val), rhs: Operand::Reg(#cross_shfl),
+            ty: PtxType::F32,
+        }));
+        // Round 3: delta=4
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+            dst: #cross_shfl, src: #cross_val, delta: Operand::ImmU32(4),
+            c: 31, mask: 0xFFFFFFFF_u32,
+        }));
+        kernel.push(PtxInstruction::Arith(#combine_op {
+            dst: #cross_val, lhs: Operand::Reg(#cross_val), rhs: Operand::Reg(#cross_shfl),
+            ty: PtxType::F32,
+        }));
+        // Round 4: delta=2
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+            dst: #cross_shfl, src: #cross_val, delta: Operand::ImmU32(2),
+            c: 31, mask: 0xFFFFFFFF_u32,
+        }));
+        kernel.push(PtxInstruction::Arith(#combine_op {
+            dst: #cross_val, lhs: Operand::Reg(#cross_val), rhs: Operand::Reg(#cross_shfl),
+            ty: PtxType::F32,
+        }));
+        // Round 5: delta=1
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+            dst: #cross_shfl, src: #cross_val, delta: Operand::ImmU32(1),
+            c: 31, mask: 0xFFFFFFFF_u32,
+        }));
+        kernel.push(PtxInstruction::Arith(#combine_op {
+            dst: #cross_val, lhs: Operand::Reg(#cross_val), rhs: Operand::Reg(#cross_shfl),
+            ty: PtxType::F32,
+        }));
+
+        // Thread 0 writes final result to shared[0]
+        let #pred_t0 = alloc.alloc(PtxType::Pred);
+        kernel.push(PtxInstruction::Control(ControlOp::SetP {
+            dst: #pred_t0,
+            cmp_op: CmpOp::Eq,
+            lhs: Operand::Reg(#tid),
+            rhs: Operand::ImmU32(0),
+            ty: PtxType::U32,
+        }));
+        kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+            pred: #pred_t0,
+            target: #t0_done_label.to_string(),
+            negate: true,
+        }));
+        kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+            addr: #tid_byte_off, // tid=0 → byte_off=0
+            src: #cross_val,
+            ty: PtxType::F32,
+        }));
+        kernel.push(PtxInstruction::Label(#t0_done_label.to_string()));
+
+        // REDUCE_BROADCAST label — threads that skipped cross-warp phase land here
+        kernel.push(PtxInstruction::Label(#broadcast_label.to_string()));
+
+        // --- Phase 5: bar.sync ---
+        kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+        // --- Phase 6: Broadcast — all threads read from shared[0] ---
+        let #zero_off = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Mov {
+            dst: #zero_off,
+            src: Operand::ImmU32(0),
+            ty: PtxType::U32,
+        });
+        let #result = alloc.alloc(PtxType::F32);
+        kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+            dst: #result,
+            addr: #zero_off,
+            ty: PtxType::F32,
+        }));
+    };
+
+    Ok((result, KernelType::F32, tokens))
 }
 
 /// Check that a type is f32 (required for approx math instructions).

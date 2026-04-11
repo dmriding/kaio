@@ -1,4 +1,4 @@
-error: unknown function `unknown_function` in GPU kernel. Available built-in functions: thread_idx_x, thread_idx_y, thread_idx_z, block_idx_x, block_idx_y, block_idx_z, block_dim_x, block_dim_y, block_dim_z, grid_dim_x, grid_dim_y, grid_dim_z, sqrt, abs, min, max, exp, log, tanh, bar_sync, shfl_sync_down, shfl_sync_up, shfl_sync_bfly
+error: unknown function `unknown_function` in GPU kernel. Available built-in functions: thread_idx_x, thread_idx_y, thread_idx_z, block_idx_x, block_idx_y, block_idx_z, block_dim_x, block_dim_y, block_dim_z, grid_dim_x, grid_dim_y, grid_dim_z, sqrt, abs, min, max, exp, log, tanh, bar_sync, shfl_sync_down, shfl_sync_up, shfl_sync_bfly, block_reduce_sum, block_reduce_max
  --> tests/compile_fail/cf04_unknown_call.rs:7:5
   |
 7 |     unknown_function(data, idx);

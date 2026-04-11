@@ -131,6 +131,22 @@ pub fn shfl_sync_bfly(_val: f32, _lane_mask: u32, _width: u32) -> f32 {
     panic!("shfl_sync_bfly() can only be called inside a #[gpu_kernel] function")
 }
 
+/// Compute the sum of `val` across all threads in the block.
+///
+/// Result is broadcast to ALL threads — every thread gets the total sum.
+/// Uses warp shuffle + shared memory internally.
+pub fn block_reduce_sum(_val: f32) -> f32 {
+    panic!("block_reduce_sum() can only be called inside a #[gpu_kernel] function")
+}
+
+/// Compute the max of `val` across all threads in the block.
+///
+/// Result is broadcast to ALL threads — every thread gets the maximum.
+/// Uses warp shuffle + shared memory internally.
+pub fn block_reduce_max(_val: f32) -> f32 {
+    panic!("block_reduce_max() can only be called inside a #[gpu_kernel] function")
+}
+
 /// Declare a shared memory buffer inside a `#[gpu_kernel]` function.
 ///
 /// ```ignore
