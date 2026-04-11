@@ -1,6 +1,7 @@
 # Sprint 3.6 — Softmax Kernel
 
 **Status:** Complete
+**Commit:** `b9c9473`
 **Date:** 2026-04-11
 **Depends on:** Sprint 3.5 (reductions)
 
