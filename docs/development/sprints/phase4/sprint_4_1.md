@@ -16,7 +16,7 @@ FMA instruction, 2D block size, and 2D launch configuration.
 ### FMA Instruction — Done
 Added `ArithOp::Fma { dst, a, b, c, ty }` to kaio-core. Emits
 `fma.rn.f32 dst, a, b, c;` — fused multiply-add with IEEE round-to-nearest.
-Float-only (F32, F64). Essential for matmul inner loop: `acc = fma(a, b, acc)`
+f32-only (f64 deferred). Essential for matmul inner loop: `acc = fma(a, b, acc)`
 is one instruction with single rounding, vs separate mul+add.
 
 Added `fma(a, b, c)` as a builtin function in kaio-macros and IDE stub
@@ -57,9 +57,9 @@ design. No new work needed.
 
 ## Key Decisions
 
-1. **Explicit LaunchConfig for 2D** — Users must compute grid dims.
-   Can't infer 2D grid from kernel params alone (grid depends on
-   matrix dimensions AND tile size — application logic).
+1. **Grid-tuple API for 2D** — Users supply `grid: (u32, u32, u32)`,
+   block dims are hardcoded from the attribute. Can't infer 2D grid
+   from kernel params alone (depends on matrix dims AND tile size).
 
 2. **block_size_x/y on LoweringContext** — Added now even though Sprint
    4.1 doesn't use them. Sprint 4.3 matmul will need individual dimensions
