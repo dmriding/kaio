@@ -63,28 +63,12 @@ Full PtxModule emission producing a complete `.ptx` file. Verify:
 Individual lowering functions tested with constructed KernelExpr/KernelStmt
 inputs, verifying the TokenStream contains expected IR builder calls.
 
-### 2b. Snapshot Tests (add in Sprint 2.6+)
+### 2b. Snapshot Tests (future)
 
-Use `cargo expand` or `macrotest` crate to capture the full macro expansion
-of each test kernel. Store as golden files in `tests/expand/`.
+Planned: `cargo expand` or `macrotest` to capture full macro expansions
+as golden files. Not yet implemented.
 
-```
-tests/expand/
-├── vector_add.expanded.rs     # expected expansion
-├── saxpy.expanded.rs
-├── fused_relu.expanded.rs
-└── fused_gelu.expanded.rs
-```
-
-When the macro changes, expansions are re-verified. Unexpected changes
-(e.g., wrong instruction order, missing cvta, wrong sizeof) are caught
-before they reach GPU execution.
-
-**Tool:** `macrotest` or `trybuild` with `.expanded.rs` support.
-Alternative: custom test that calls the proc macro function directly
-and compares the output TokenStream against a stored string.
-
-### 2c. Compile-Fail Tests (Sprint 2.7)
+### 2c. Compile-Fail Tests
 
 `trybuild` tests verifying that invalid kernel code produces clear
 compile-time errors. 10+ cases covering:
@@ -266,44 +250,47 @@ kaio-core/
 
 kaio-macros/
   src/**/*.rs                    # inline lowering unit tests
-  tests/
-    compile_fail/                # trybuild compile-fail tests
-    expand/                      # snapshot expansion tests (Sprint 2.6+)
 
 kaio-runtime/
   tests/
-    vector_add_e2e.rs            # Phase 1 E2E (existing)
+    vector_add_e2e.rs            # Phase 1 E2E (IR API → GPU)
 
 kaio/ (umbrella)
   tests/
-    gpu_kernels/
-      vector_add.rs              # macro-generated, GPU execution
-      saxpy.rs
-      fused_relu.rs
-      fused_gelu.rs
-    boundary.rs                  # edge case sizes (n=0, 1, 257, etc.)
-    math_accuracy.rs             # numerical accuracy for math builtins
-    property/                    # proptest-based random testing (post-Phase 2)
+    compile_fail.rs              # trybuild harness
+    compile_fail/                # 10 compile-fail test cases (CF1–CF10)
+    vector_add_macro.rs          # macro-generated E2E kernels
+    saxpy_macro.rs
+    fused_relu_macro.rs
+    fused_gelu_macro.rs
+    loops_macro.rs               # for/while loop GPU tests
+    shared_mem_macro.rs           # shared memory GPU tests
+    reduce_macro.rs              # block_reduce_sum/max GPU tests
+    softmax_macro.rs             # 10-test softmax accuracy suite
 ```
 
 ### Running Tests
 
 ```bash
-# All host-only tests (no GPU needed, fast)
+# All host-only tests (no GPU needed, fast) — 200+ tests
 cargo test --workspace
 
-# GPU tests (requires NVIDIA GPU)
+# GPU tests (requires NVIDIA GPU) — 24 tests
 cargo test --workspace -- --ignored
 
 # Single crate
 cargo test -p kaio-core
 cargo test -p kaio-macros
+cargo test -p kaio
 
 # Compile-fail tests only
-cargo test -p kaio-macros --test compile_fail
+cargo test -p kaio --test compile_fail
 
 # Coverage
 cargo llvm-cov --workspace --ignore-filename-regex "tests/"
+
+# Inspect generated PTX
+KAIO_DUMP_PTX=1 cargo test --workspace
 ```
 
 ---
@@ -314,8 +301,8 @@ cargo llvm-cov --workspace --ignore-filename-regex "tests/"
 |---------|-----------|------------|--------------|---------------|
 | Phase 1 | 60%       | 70%        | —            | 60%           |
 | Phase 2 | 65%       | 70%        | 65%          | 60%           |
+| Phase 3 | 65%       | 70%        | 65%          | 60%           |
 | Phase 5 | 70%       | 75%        | 70%          | 65%           |
-| Current | 82.8%     | —          | —            | —             |
 
 Coverage is a signal, not a goal. 100% coverage doesn't mean correct code.
 60% coverage with the right tests beats 90% coverage that only tests

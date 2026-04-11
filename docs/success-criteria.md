@@ -20,7 +20,7 @@ These gates apply to ALL phases. No phase is considered complete unless every ga
 |------|-------------|
 | **Windows** | All tests pass on Windows 10/11 with NVIDIA GPU |
 | **Linux** | All tests pass on Ubuntu 22.04+ with NVIDIA GPU |
-| **CI** | Automated test runs on both platforms (from Phase 5, manual before that) |
+| **CI** | Automated test runs on both platforms (GitHub Actions, added Phase 3) |
 
 ### Process
 
@@ -91,7 +91,7 @@ None. Phase 1 is about correctness, not performance. If `vector_add` runs and pr
 | CF7 | `block_size` not power of 2 | "`block_size` must be a power of 2" |
 | CF8 | `block_size` exceeds 1024 | "`block_size` cannot exceed 1024" |
 | CF9 | Kernel parameter uses lifetime | "lifetime parameters are not supported in GPU kernels" |
-| CF10 | Kernel uses `loop` | "`loop` is not supported — use `for` or `while` (available in Phase 3)" |
+| CF10 | Kernel uses `loop` | "`loop` is not supported in GPU kernels — use `for` or `while`" |
 
 ### Coverage Targets
 
@@ -217,12 +217,12 @@ These are v0.1 targets. Performance optimization continues post-release.
 
 | # | Item | Status |
 |---|------|--------|
-| P1 | Crate name `kaio` claimed on crates.io | ☐ |
-| P2 | License: MIT OR Apache-2.0 (dual license) | ☐ |
+| P1 | Crate name `kaio` claimed on crates.io | ✅ v0.0.1 |
+| P2 | License: MIT OR Apache-2.0 (dual license) | ✅ |
 | P3 | `Cargo.toml` metadata: description, repository, keywords, categories | ☐ |
-| P4 | `CHANGELOG.md` covers all phases | ☐ |
-| P5 | `CONTRIBUTING.md` exists with dev setup instructions | ☐ |
-| P6 | GitHub Actions CI: Windows + Linux matrix | ☐ |
+| P4 | `CHANGELOG.md` covers all phases | ☐ (through Phase 3) |
+| P5 | `CONTRIBUTING.md` exists with dev setup instructions | ✅ |
+| P6 | GitHub Actions CI: Windows + Linux matrix | ✅ |
 | P7 | All `#![deny(missing_docs)]` passes | ☐ |
 | P8 | r/rust post drafted and reviewed | ☐ |
 | P9 | Blog post (optional but recommended) | ☐ |

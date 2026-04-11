@@ -8,11 +8,11 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 
 ---
 
-## Phase 1: PTX Foundation
+## Phase 1: PTX Foundation ✅
 
 **Goal:** Emit valid, executable PTX from Rust code.
 
-**Duration:** 2 weeks
+**Status:** Complete
 
 **Deliverables:**
 - `kaio-core` crate with PTX IR types and instruction emission
@@ -46,11 +46,11 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 
 ---
 
-## Phase 2: Proc Macro DSL
+## Phase 2: Proc Macro DSL ✅
 
 **Goal:** Users write GPU kernels in Rust syntax using `#[gpu_kernel]`.
 
-**Duration:** 2-3 weeks
+**Status:** Complete
 
 **Deliverables:**
 - `kaio-macros` crate with `#[gpu_kernel]` attribute macro
@@ -84,42 +84,36 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 
 ---
 
-## Phase 3: Loops, Reductions & Softmax
+## Phase 3: Loops, Reductions & Softmax ✅
 
 **Goal:** Support loops in kernel DSL and implement the first block-level reduction operations.
 
-**Duration:** 2-3 weeks
+**Status:** Complete (commit `0691be8`, 2026-04-11)
 
 **Deliverables:**
 - `for` and `while` loop support in `#[gpu_kernel]`
-- Shared memory declaration and access (`__shared__` equivalent)
-- `bar.sync` (thread block synchronization)
-- Warp-level shuffle operations (`shfl.sync`)
+- Shared memory declaration and access (`shared_mem![T; N]`)
+- `bar_sync()` (thread block synchronization)
+- Warp-level shuffle operations (`shfl_sync_down/up/bfly`)
 - Reduction primitives: `block_reduce_sum`, `block_reduce_max`
 - Working kernel: `softmax` (row-wise, single block per row)
-- Softmax output validated against PyTorch reference within f32 tolerance
+- Softmax output validated within f32 tolerance against CPU reference
+- 200 host tests + 24 GPU tests across workspace
 
-**What Gets Built:**
-- Loop lowering: `for` → PTX branch + counter pattern
-- Shared memory: `ld.shared` / `st.shared` instruction emitters
-- Barrier: `bar.sync` instruction + automatic insertion at sync points
-- Shuffle: `shfl.sync.down`, `shfl.sync.up`, `shfl.sync.bfly` emitters
-- Reduction tree implementation using shared memory + warp shuffle
-- Softmax kernel: max reduction → subtract → exp → sum reduction → divide
+**Sprint Breakdown (actual):**
+| Sprint | Scope | Key Deliverable |
+|--------|-------|-----------------|
+| 3.1 | Loops + compound assignment | `for`/`while` lowering, `+=`/`-=`/`*=`/`/=` |
+| 3.2 | Shared memory + shuffle (kaio-core) | `LdShared`, `StShared`, `ShflSync*`, `BarSync` instructions |
+| 3.3 | Shared memory in macro DSL | `shared_mem![f32; 256]` syntax, 32-bit addressing |
+| 3.4 | Barrier + shuffle built-ins | `bar_sync()`, `shfl_sync_down/up/bfly()` in `#[gpu_kernel]` |
+| 3.5 | Reduction primitives | `block_reduce_sum`, `block_reduce_max` (~35 PTX instructions each) |
+| 3.6 | Softmax kernel | Row-wise numerically-stable softmax on RTX 4090 |
+| 3.7 | Accuracy validation suite | 10 GPU tests incl. edge cases, < 1e-5 error vs CPU reference |
+| 3.8 | Polish + coverage + docs | Cvt rounding fix, variable shadowing fix, `KAIO_SM_TARGET` config |
 
-**Forge Sprint Breakdown:**
-| Sprint | Scope | Agent Work |
-|--------|-------|------------|
-| 3.1 | Loop AST parsing + lowering | `for`/`while` → branch + counter PTX |
-| 3.2 | Shared memory instructions | `ld.shared`, `st.shared`, declaration in PTX |
-| 3.3 | Shared memory in macro DSL | `shared_mem![]` syntax, size calculation |
-| 3.4 | Barrier synchronization | `bar.sync` emission, auto-insertion |
-| 3.5 | Warp shuffle operations | `shfl.sync` variants |
-| 3.6 | Reduction primitives | `block_reduce_sum`, `block_reduce_max` |
-| 3.7 | Softmax kernel | Full implementation + validation |
-| 3.8 | Numerical accuracy testing | PyTorch reference comparison suite |
-
-**Key Risk:** Shared memory synchronization bugs. Mitigation: conservative `bar.sync` insertion (correctness over performance), race condition test suite.
+**Key Decisions:** Sprint logs with full reasoning traces in
+[docs/development/sprints/phase3/](development/sprints/phase3/).
 
 ---
 

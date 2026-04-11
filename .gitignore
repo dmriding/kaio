@@ -1,5 +1,20 @@
-triton/
-docs/CC_PROMPT_NAME_RESERVATION.md
+# Build artifacts
 /target
 *.o
+*.ptx
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Project-specific
+triton/
+docs/CC_PROMPT_NAME_RESERVATION.md
 synapse.toml

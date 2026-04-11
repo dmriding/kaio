@@ -1,6 +1,6 @@
 # KAIO — Rust-Native GPU Kernel Authoring Framework
 
-> πῦρ (pyr) — fire. The forge where GPU kernels are crafted.
+> καίω (kaíō) — to kindle, to ignite.
 
 ## What Is KAIO?
 
@@ -51,18 +51,17 @@ kaio/
 ├── kaio-core/        # PTX codegen + IR (Layer 1)
 ├── kaio-runtime/     # CUDA driver API bindings, kernel launch (Layer 2)
 ├── kaio-macros/      # #[gpu_kernel] proc macro (Layer 3)
-├── kaio-ops/         # Block-level operations library (Layer 4)
 ├── kaio/             # Umbrella crate re-exporting everything
-├── tests/             # Integration tests, golden-reference validation
-├── benches/           # Benchmarks against cuBLAS / known-good implementations
-└── examples/          # Standalone example kernels
+└── docs/             # Architecture docs, sprint logs, decision records
 ```
+
+`kaio-ops` (Layer 4) will be added in Phase 4.
 
 ## Target Hardware
 
 - **Primary:** NVIDIA GPUs, SM 7.0+ (Volta and newer)
 - **Development GPU:** RTX 4090 (SM 8.9, Ada Lovelace)
-- **PTX ISA Target:** 7.x+ (with forward compatibility)
+- **PTX ISA Target:** 8.7 (CUDA 12.8)
 - **Platforms:** Windows 10/11, Linux (Ubuntu 22.04+)
 
 ## Documentation Index
@@ -73,6 +72,8 @@ kaio/
 | [implementation.md](implementation.md) | Technical implementation details per layer |
 | [phases.md](phases.md) | Development phases, timelines, and deliverables |
 | [success-criteria.md](success-criteria.md) | Quality gates and success metrics per phase |
+| [testing-strategy.md](testing-strategy.md) | Testing philosophy, layers, and infrastructure |
+| [development/sprints/](development/sprints/) | Per-phase sprint logs with decision records |
 
 ## Key Dependencies
 
@@ -86,9 +87,9 @@ kaio/
 - **Owner:** Dave Riding / NetViper
 - **License:** MIT OR Apache-2.0 (dual-licensed for ecosystem adoption)
 - **Repository:** https://github.com/dmriding/kaio
-- **Crates.io:** `kaio` — name reserved at `v0.0.1` (publish pending Phase 1 completion)
+- **Crates.io:** `kaio` — name reserved at `v0.0.1` (publish planned for Phase 5)
 - **Rust Edition:** 2024
-- **Minimum Rust Version:** 1.94 (pinned to match the dev environment during Phase 1; may relax to 1.85, the edition 2024 floor, in later phases)
+- **Minimum Rust Version:** 1.94 (pinned via `rust-toolchain.toml`)
 
 ## Design Principles
 
