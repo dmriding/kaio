@@ -1,6 +1,7 @@
 # Sprint 3.7 — PyTorch Validation + Accuracy Suite
 
 **Status:** Complete
+**Commit:** `01f0610`
 **Date:** 2026-04-11
 **Depends on:** Sprint 3.6 (softmax kernel)
 
