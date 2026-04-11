@@ -40,3 +40,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: rustup show
       - run: cargo doc --no-deps --workspace
+        env:
+          RUSTDOCFLAGS: "-D warnings"

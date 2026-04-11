@@ -39,10 +39,10 @@ generic `compute_shared_address()` and reduction codegen in builtins.rs.
 Extract a shared helper to prevent drift as the pattern evolves.
 **Added:** Sprint 4.2 review | **Sprint:** when either path changes
 
-### Windows CI
-Docs and README claim Windows support. CI is Ubuntu-only. Add Windows
-to the GitHub Actions matrix before release.
-**Added:** Phase 3 housekeeping | **Sprint:** Phase 5
+### ~~Windows CI~~ RESOLVED (Sprint 5.6)
+GitHub Actions matrix now includes Ubuntu + Windows. Doc build job
+added with `RUSTDOCFLAGS="-D warnings"`.
+**Resolved:** Sprint 5.6
 
 ## Low Priority
 
