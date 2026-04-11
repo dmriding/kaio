@@ -134,6 +134,29 @@ fn row_softmax(input: &[f32], output: &mut [f32], row_len: u32) {
 }
 
 // ---------------------------------------------------------------------------
+// Kernel 3: Causal mask
+// ---------------------------------------------------------------------------
+// Sets S[i,j] = -FLT_MAX where j > i (future positions).
+// Softmax then zeros these positions: exp(-3.4e38 - max) ≈ 0.
+// Separate kernel for composability — unmasked attention unchanged.
+
+#[gpu_kernel(block_size = (16, 16))]
+fn apply_causal_mask(s: &mut [f32], seq_len: u32) {
+    let row = block_idx_y() * 16 + thread_idx_y();
+    let col = block_idx_x() * 16 + thread_idx_x();
+    if row < seq_len {
+        if col < seq_len {
+            if col > row {
+                // -FLT_MAX, not -inf: DSL has no f32::NEG_INFINITY.
+                // exp(-3.4e38 - max) ≈ 0 regardless of max, so softmax
+                // zeros these positions. Do not "fix" to -inf.
+                s[row * seq_len + col] = -3.402823e+38f32;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -199,6 +222,56 @@ pub fn attention(
 
     // Step 3: out = P * V — standard matmul
     // P is (seq_len × seq_len), V is (seq_len × d_k), out is (seq_len × d_k)
+    matmul(device, &probs, v, out, seq_len, d_k, seq_len)?;
+
+    Ok(())
+}
+
+/// Compute single-head scaled dot-product attention with causal mask.
+///
+/// out = softmax(causal_mask(Q * K^T / sqrt(d_k))) * V
+///
+/// Causal mask sets S[i,j] = -FLT_MAX where j > i, preventing
+/// attention to future positions. Standard for autoregressive models.
+///
+/// Same constraints as [`attention()`]: f32, row-major, d_v == d_k,
+/// O(seq_len^2) intermediate buffers.
+pub fn attention_causal(
+    device: &KaioDevice,
+    q: &GpuBuffer<f32>,
+    k: &GpuBuffer<f32>,
+    v: &GpuBuffer<f32>,
+    out: &mut GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+) -> Result<()> {
+    validate_attention_dims(q, k, v, out, seq_len, d_k)?;
+
+    let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
+
+    // Step 1: S = Q * K^T / sqrt(d_k)
+    let mut scores = device.alloc_zeros::<f32>((seq_len as usize) * (seq_len as usize))?;
+    let grid_qk = (seq_len.div_ceil(16), seq_len.div_ceil(16), 1);
+    qk_scaled_matmul::launch(
+        device,
+        q,
+        k,
+        &mut scores,
+        seq_len,
+        d_k,
+        inv_sqrt_dk,
+        grid_qk,
+    )?;
+
+    // Step 1.5: Apply causal mask — S[i,j] = -FLT_MAX where j > i
+    apply_causal_mask::launch(device, &mut scores, seq_len, grid_qk)?;
+
+    // Step 2: P = softmax(S) — row-wise, one block per row
+    let mut probs = device.alloc_zeros::<f32>((seq_len as usize) * (seq_len as usize))?;
+    let grid_sm = (seq_len, 1, 1);
+    row_softmax::launch(device, &scores, &mut probs, seq_len, grid_sm)?;
+
+    // Step 3: out = P * V — standard matmul
     matmul(device, &probs, v, out, seq_len, d_k, seq_len)?;
 
     Ok(())
