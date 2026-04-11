@@ -1,6 +1,7 @@
 # Sprint 3.8 — Polish + Coverage + Docs
 
 **Status:** Complete
+**Commit:** `0691be8`
 **Date:** 2026-04-11
 **Depends on:** All prior Phase 3 sprints
 

@@ -16,7 +16,7 @@ Master plan: [phase3_master_plan.md](phase3_master_plan.md)
 | [3.5](sprint_3_5.md) | Reduction primitives (`block_reduce_sum/max`) | Done | `24efd87` | +2 GPU = 198+14 GPU |
 | [3.6](sprint_3_6.md) | Softmax kernel | Done | `b9c9473` | +5 GPU = 198+19 GPU |
 | [3.7](sprint_3_7.md) | PyTorch validation + accuracy suite | Done | `01f0610` | +5 GPU = 198+24 GPU |
-| [3.8](sprint_3_8.md) | Polish + coverage + docs | Done | `pending` | +2 = 200+24 GPU |
+| [3.8](sprint_3_8.md) | Polish + coverage + docs | Done | `0691be8` | +2 = 200+24 GPU |
 
 ## Key References
 
