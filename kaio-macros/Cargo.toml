@@ -7,6 +7,8 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Proc macro crate for KAIO — provides #[gpu_kernel] attribute macro."
+keywords = ["gpu", "cuda", "ptx", "kernel", "macro"]
+categories = ["compilers", "development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true

@@ -1,0 +1,5 @@
+error: math function requires f32 argument, got u32
+  --> tests/compile_fail/cf12_fma_wrong_type.rs:11:20
+   |
+11 |         out[idx] = fma(a, b, c);
+   |                    ^^^

@@ -1,5 +1,6 @@
 // Generated launch functions for matmul have many parameters (device + kernel args + grid).
 #![allow(clippy::too_many_arguments)]
+#![warn(missing_docs)]
 
 //! Pre-built GPU operations for KAIO.
 //!

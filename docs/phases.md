@@ -117,41 +117,43 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 
 ---
 
-## Phase 4: Tiled MatMul & Block-Level API
+## Phase 4: Tiled MatMul & Block-Level API ✅
 
-**Goal:** Implement tiled matrix multiplication and formalize the block-level programming model.
+**Goal:** Implement tiled matrix multiplication through KAIO's `#[gpu_kernel]` macro
+and introduce `kaio-ops` as a host-side operations library.
 
-**Duration:** 3-4 weeks
+**Status:** Complete (v0.0.4, 2026-04-11)
 
 **Deliverables:**
-- `kaio-ops` crate with block-level abstractions
-- `block_load` / `block_store` — coalesced global ↔ shared memory transfers
-- `block_dot` — tiled matrix multiply via shared memory
-- Tiled matmul kernel benchmarked against cuBLAS
-- Performance within 60% of cuBLAS for large matrices (correctness is the priority)
-- Memory coalescing analysis at compile time (warn on uncoalesced patterns)
+- `kaio-ops` crate with `matmul()` host-side API
+- FMA instruction + 2D thread blocks + 2D grid launch model
+- Multi-allocation shared memory (named PTX symbols)
+- Naive tiled matmul (16x16, ~8% of cuBLAS) → register-tiled (64x64,
+  4x4 per thread, 31% of cuBLAS sgemm on RTX 4090)
+- Benchmark harness vs cuBLAS with documented methodology
+- PTX inspection tools: `KAIO_PTX_STATS`, `KAIO_PTX_ANNOTATE`
+- Performance guide (`docs/performance.md`)
+- 207 host tests + 41 GPU tests + 1 benchmark
 
-**What Gets Built:**
-- Block abstraction: `Block<T, const SIZE: usize>` type representing a tile in shared memory
-- Tiling logic: automatic decomposition of large operations into block-sized tiles
-- Double buffering: overlap computation with memory loads (pipeline optimization)
-- Memory coalescing checker: analyze access patterns at compile time
-- `block_dot` using the classic shared-memory tiled matmul algorithm
-- Benchmark harness comparing against cuBLAS `sgemm`
+**Sprint Breakdown (actual):**
+| Sprint | Scope | Key Deliverable |
+|--------|-------|-----------------|
+| 4.1 | FMA + 2D indices + 2D launch | `fma()`, `block_size = (X, Y)`, 2D grid |
+| 4.2 | Multi-allocation shared memory | Named-symbol addressing, launch fix |
+| 4.3 | Naive tiled matmul | 16x16 tiles, correctness baseline |
+| 4.4 | kaio-ops crate + host API | `matmul()` public API |
+| 4.5 | Benchmark harness + cuBLAS | Deterministic timing, TFLOPS comparison |
+| 4.6 | Register tiling optimization | 64x64, 4x4/thread, 31% cuBLAS |
+| 4.7 | PTX inspection + performance docs | Stats, annotations, performance guide |
+| 4.8 | Polish + integration tests + publish | CHANGELOG, README, version bump |
 
-**Forge Sprint Breakdown:**
-| Sprint | Scope | Agent Work |
-|--------|-------|------------|
-| 4.1 | Block type + block_load/block_store | Type design, coalesced load codegen |
-| 4.2 | Block arithmetic operations | Element-wise ops on Block types |
-| 4.3 | Tiled matmul — naive | Shared memory tiling, correctness first |
-| 4.4 | Tiled matmul — optimized | Double buffering, register tiling |
-| 4.5 | Memory coalescing analysis | Compile-time access pattern checker |
-| 4.6 | cuBLAS benchmark harness | Automated comparison, regression tracking |
-| 4.7 | Block-level API polish | Documentation, ergonomic refinements |
-| 4.8 | Integration tests + benchmarks | Full validation suite |
+**Key Decisions:** Sprint logs with full reasoning traces in
+[docs/development/sprints/phase4/](development/sprints/phase4/).
 
-**Key Risk:** Performance gap with cuBLAS. Mitigation: 60% target is realistic for a first implementation; optimization is iterative post-launch.
+**Performance:** 31% of cuBLAS at large sizes. Remaining gap requires
+vectorized loads (LDG.128) and double buffering — planned for Phase 5+.
+Coalescing analysis deferred to Phase 5+ when block_load/block_store
+abstractions provide analyzable access patterns.
 
 ---
 

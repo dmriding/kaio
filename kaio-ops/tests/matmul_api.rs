@@ -135,6 +135,34 @@ fn api_matmul_rejects_zero_m() {
 
 #[test]
 #[ignore] // requires NVIDIA GPU (buffer allocation needs a device)
+fn api_matmul_rejects_zero_n() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let a = device.alloc_zeros::<f32>(1).unwrap();
+    let b = device.alloc_zeros::<f32>(1).unwrap();
+    let mut c = device.alloc_zeros::<f32>(1).unwrap();
+    let err = matmul(&device, &a, &b, &mut c, 1, 0, 1).unwrap_err();
+    assert!(
+        err.to_string().contains("non-zero"),
+        "expected zero-dim error, got: {err}"
+    );
+}
+
+#[test]
+#[ignore] // requires NVIDIA GPU (buffer allocation needs a device)
+fn api_matmul_rejects_zero_k() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let a = device.alloc_zeros::<f32>(1).unwrap();
+    let b = device.alloc_zeros::<f32>(1).unwrap();
+    let mut c = device.alloc_zeros::<f32>(1).unwrap();
+    let err = matmul(&device, &a, &b, &mut c, 1, 1, 0).unwrap_err();
+    assert!(
+        err.to_string().contains("non-zero"),
+        "expected zero-dim error, got: {err}"
+    );
+}
+
+#[test]
+#[ignore] // requires NVIDIA GPU (buffer allocation needs a device)
 fn api_matmul_rejects_small_buffer() {
     let device = KaioDevice::new(0).expect("GPU required");
     let a = device.alloc_zeros::<f32>(4).unwrap(); // too small for 3×3

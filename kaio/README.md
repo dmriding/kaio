@@ -40,6 +40,9 @@ cached for the process lifetime.
 | Type casts | `x as f32` | ✅ |
 | Math builtins | `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max` | ✅ |
 | Thread indices | `thread_idx_x()`, `block_idx_x()`, `block_dim_x()` | ✅ |
+| FMA | `fma(a, b, c)` | ✅ |
+| 2D blocks | `block_size = (16, 16)`, `thread_idx_y()` | ✅ |
+| Tiled matmul | `kaio_ops::matmul()` (31% of cuBLAS) | ✅ |
 
 ## Architecture
 
@@ -49,12 +52,13 @@ cached for the process lifetime.
 | `kaio-macros` | `#[gpu_kernel]` proc macro |
 | `kaio-core` | PTX IR, instruction emitters, zero external dependencies |
 | `kaio-runtime` | CUDA driver wrapper via cudarc |
+| `kaio-ops` | Pre-built GPU operations (matmul, more planned) |
 
 ## Status
 
-**Phase 3 complete** — loops, shared memory, reductions, softmax.
-Phase 4 (tiled matmul, block-level API) is next. This is early
-development software. API will change.
+**Phase 4 complete** — tiled matmul (31% of cuBLAS sgemm on RTX 4090),
+`kaio-ops` crate, 2D thread blocks, FMA, PTX inspection tools.
+This is early development software. API will change.
 
 See the [repository](https://github.com/dmriding/kaio) for the full
 roadmap, CHANGELOG, and development logs.
