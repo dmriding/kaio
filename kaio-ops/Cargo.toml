@@ -1,0 +1,14 @@
+[package]
+name = "kaio-ops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pre-built GPU operations for KAIO. Matrix multiplication and more."
+keywords = ["gpu", "cuda", "matmul", "linear-algebra", "compute"]
+categories = ["hardware-support", "science"]
+
+[dependencies]
+kaio = { version = "0.0.3", path = "../kaio" }
