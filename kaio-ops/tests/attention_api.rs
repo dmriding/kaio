@@ -539,16 +539,7 @@ fn check_flash_vs_standard(seq_len: usize, d_k: usize, label: &str) {
 #[test]
 #[ignore]
 fn flash_attention_tiny() {
-    let seq_len = 4;
-    let d_k = 4;
-    let q: Vec<f32> = (0..seq_len * d_k).map(|i| (i % 7) as f32 * 0.1).collect();
-    let k: Vec<f32> = (0..seq_len * d_k)
-        .map(|i| ((i + 3) % 5) as f32 * 0.1)
-        .collect();
-    let v: Vec<f32> = (0..seq_len * d_k)
-        .map(|i| ((i + 1) % 11) as f32 * 0.1)
-        .collect();
-    check_attention(seq_len, d_k, &q, &k, &v, "flash_tiny");
+    check_flash_vs_standard(4, 4, "flash_tiny");
 }
 
 #[test]
@@ -701,4 +692,32 @@ fn flash_all_in_one_tile() {
 fn flash_last_tile_partial() {
     // seq_len = 257 = 256 + 1: tests final partial tile handling.
     check_flash_vs_standard(257, 32, "flash_partial_tile");
+}
+
+// --- FlashAttention validation tests ---
+
+#[test]
+#[ignore] // requires NVIDIA GPU
+fn flash_rejects_dk_over_256() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let buf = device.alloc_zeros::<f32>(512).unwrap();
+    let mut out = device.alloc_zeros::<f32>(512).unwrap();
+    let err = attention_flash(&device, &buf, &buf, &buf, &mut out, 1, 257).unwrap_err();
+    assert!(
+        err.to_string().contains("d_k <= 256"),
+        "expected d_k guard error, got: {err}"
+    );
+}
+
+#[test]
+#[ignore] // requires NVIDIA GPU
+fn flash_causal_rejects_dk_over_256() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let buf = device.alloc_zeros::<f32>(512).unwrap();
+    let mut out = device.alloc_zeros::<f32>(512).unwrap();
+    let err = attention_flash_causal(&device, &buf, &buf, &buf, &mut out, 1, 257).unwrap_err();
+    assert!(
+        err.to_string().contains("d_k <= 256"),
+        "expected d_k guard error, got: {err}"
+    );
 }
