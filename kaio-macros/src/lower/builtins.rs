@@ -57,9 +57,23 @@ pub fn lower_builtin(
         "shfl_sync_up" => lower_shfl_sync(ctx, "up", arg_regs, arg_types, span),
         "shfl_sync_bfly" => lower_shfl_sync(ctx, "bfly", arg_regs, arg_types, span),
 
-        // --- Reduction builtins ---
-        "block_reduce_sum" => lower_block_reduce(ctx, "sum", arg_regs, arg_types, span),
-        "block_reduce_max" => lower_block_reduce(ctx, "max", arg_regs, arg_types, span),
+        // --- Reduction builtins (1D only — uses TidX for thread identity) ---
+        "block_reduce_sum" | "block_reduce_max" => {
+            if ctx.block_size_y.is_some() {
+                return Err(syn::Error::new(
+                    span,
+                    "block_reduce_sum/max are not yet supported in 2D kernels \
+                     (block_size = (X, Y)). Reductions currently derive thread \
+                     identity from thread_idx_x only. Use 1D kernels for reductions.",
+                ));
+            }
+            let mode = if name == "block_reduce_sum" {
+                "sum"
+            } else {
+                "max"
+            };
+            lower_block_reduce(ctx, mode, arg_regs, arg_types, span)
+        }
 
         _ => Err(syn::Error::new(
             span,

@@ -14,8 +14,8 @@ use crate::kernel_ir::{KernelSignature, KernelType};
 /// - scalar → same type
 ///
 /// Launch configuration depends on block dimensionality:
-/// - **1D** (`block_size = N`): uses the last `u32` scalar param for
-///   `LaunchConfig::for_num_elems()`. Grid is inferred automatically.
+/// - **1D** (`block_size = N`): uses the last `u32` scalar param to
+///   compute grid size. Block dim is set to the declared block_size.
 /// - **2D** (`block_size = (X, Y)`): the generated `launch()` takes a
 ///   `grid: (u32, u32, u32)` parameter. Block dims are hardcoded from
 ///   the attribute to prevent mismatches.

@@ -20,8 +20,7 @@ use crate::lower::LoweringContext;
 pub fn generate_build_ptx(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Result<TokenStream> {
     let kernel_name = &sig.name;
     let mut ctx = LoweringContext::new();
-    let total_threads = sig.config.block_size
-        * sig.config.block_size_y.unwrap_or(1);
+    let total_threads = sig.config.block_size * sig.config.block_size_y.unwrap_or(1);
     ctx.block_size = Some(total_threads);
     if sig.config.block_size_y.is_some() {
         ctx.block_size_x = Some(sig.config.block_size);

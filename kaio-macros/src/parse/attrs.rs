@@ -36,10 +36,7 @@ impl Parse for GpuKernelAttrs {
                             syn::Error::new(span, "block_size X must be a positive integer")
                         })?;
                         let y_val: u32 = y_lit.base10_parse().map_err(|_| {
-                            syn::Error::new(
-                                y_lit.span(),
-                                "block_size Y must be a positive integer",
-                            )
+                            syn::Error::new(y_lit.span(), "block_size Y must be a positive integer")
                         })?;
                         block_size = Some((x_val, span));
                         block_size_y = Some((y_val, y_lit.span()));
@@ -94,7 +91,10 @@ pub fn parse_kernel_config(attr: TokenStream) -> syn::Result<KernelConfig> {
             ));
         }
         if block_size_y == 0 {
-            return Err(syn::Error::new(y_span, "block_size Y dimension must be > 0"));
+            return Err(syn::Error::new(
+                y_span,
+                "block_size Y dimension must be > 0",
+            ));
         }
         let total = block_size * block_size_y;
         if total > 1024 {
