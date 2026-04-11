@@ -183,7 +183,9 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 | FMA             | `fma(a, b, c)`                                             | Supported |
 | 2D blocks       | `block_size = (16, 16)`, `thread_idx_y()`                  | Supported |
 | Tiled matmul    | `kaio_ops::matmul()` ([31% of cuBLAS](docs/benchmarks.md)) | Supported |
-| Fused attention | FlashAttention-style                                       | Phase 5   |
+| Attention       | `kaio_ops::attention()`, `attention_causal()`              | Supported |
+| FlashAttention  | `kaio_ops::attention_flash()` — O(d_k) memory             | Supported |
+| Auto-tuner      | `kaio_ops::tune_matmul()`, `matmul_auto()`                | Supported |
 
 ## Limitations
 
@@ -199,8 +201,8 @@ KAIO is early-stage software. Being honest about what it can't do:
 - **No `&&` / `||` operators** — use nested `if` statements instead.
 - **No compound shared memory assignment** — `sdata[i] += val` is not
   supported; write `sdata[i] = sdata[i] + val`.
-- **Block reductions are 1D only** — `block_reduce_sum/max` are
-  rejected in 2D kernels (fix planned for Phase 5).
+- **FlashAttention d_k limit** — `attention_flash()` requires
+  d_k <= 256 (one thread per output dimension).
 - **No multi-GPU** — single device only.
 - **API will change** — this is pre-1.0 software.
 
@@ -295,7 +297,8 @@ for a complete end-to-end example.
 - [x] **Phase 3** — Loops, shared memory, reductions, softmax
 - [x] **Phase 4** — Tiled matmul (31% of cuBLAS), `kaio-ops` crate,
       2D blocks, FMA, PTX inspection tools
-- [ ] **Phase 5** — Fused attention, auto-tuning, crates.io v0.1.0
+- [x] **Phase 5** — Fused attention, FlashAttention, auto-tuning,
+  crates.io v0.1.0
 
 See [docs/phases.md](docs/phases.md) for detailed plans and
 [CHANGELOG.md](CHANGELOG.md) for per-sprint progress.

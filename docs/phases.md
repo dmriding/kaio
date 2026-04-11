@@ -168,7 +168,7 @@ abstractions provide analyzable access patterns.
 **Goal:** Implement fused multi-head attention, add it to `kaio-ops`,
 build an auto-tuning framework, and ship v0.1.0 to crates.io.
 
-**Status:** In Progress
+**Status:** Complete (v0.1.0, 2026-04-12)
 
 **Deliverables:**
 

@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
+## [0.1.0] — Phase 5: Fused Attention & Community Release
+
+### Added — Phase 5
+- **2D block reductions**: `block_reduce_sum/max` now work in 2D kernels
+  via linear thread identity (`tidx + tidy * block_dim_x`).
+- **Standard attention**: `attention()`, `attention_causal()` — single-head
+  scaled dot-product attention with optional causal masking. Three-kernel
+  decomposition (Q*K^T, softmax, P*V).
+- **FlashAttention**: `attention_flash()`, `attention_flash_causal()` —
+  O(d_k) memory per query, no materialized attention matrix. BLOCK_M=1
+  design with online softmax and running output rescaling.
+- **Auto-tuner**: `tune_matmul()`, `tune_attention()` benchmark kernel
+  variants and cache results as JSON. `matmul_auto()`, `attention_auto()`
+  dispatch to the best cached variant with deterministic fallback.
+- **Windows CI**: GitHub Actions matrix (Ubuntu + Windows). Doc build job.
+- **DSL friction report**: 5 documented friction points from attention
+  implementation (no `&&`/`||`, 1D grid inference, no `sqrt()`, no compound
+  shared assign, no `-inf` literal).
+- 24 attention GPU tests + 7 tuner tests.
+
+### Fixed — Phase 5
+- 2D block reductions: previously rejected at compile time, now work via
+  linear thread identity.
+
+### Changed — Phase 5
+- `kaio-ops` now depends on `serde` + `serde_json` (for tuner cache).
+
 ## [0.0.4] — Phase 4: Tiled MatMul & Block-Level API
 
 ### Added — Phase 4
