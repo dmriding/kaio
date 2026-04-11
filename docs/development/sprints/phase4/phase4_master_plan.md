@@ -103,7 +103,7 @@ Fifth crate to publish to crates.io.
 | [4.4](sprint_4_4.md) | kaio-ops crate + host-side matmul API | 4.3 |
 | [4.5](sprint_4_5.md) | Benchmark harness + cuBLAS baseline | 4.4 |
 | [4.6](sprint_4_6.md) | Register tiling + optimization | 4.5 |
-| [4.7](sprint_4_7.md) | Coalescing heuristics + PTX inspection | 4.6 |
+| [4.7](sprint_4_7.md) | PTX inspection + performance documentation | 4.6 |
 | [4.8](sprint_4_8.md) | Polish + integration tests + docs | All |
 
 ## Dependency Graph
@@ -113,14 +113,18 @@ Fifth crate to publish to crates.io.
                                                         ↓
                          4.4 (kaio-ops) → 4.5 (benchmarks) → 4.6 (register tiling)
                                                                     ↓
-                                                              4.7 (coalescing)
+                                                              4.7 (PTX inspection)
                                                                     ↓
                                                               4.8 (polish)
 ```
 
 All sprints are sequential. 4.1 and 4.2 are infrastructure, 4.3 is proof
-of concept, 4.4-4.5 are packaging and measurement, 4.6-4.7 are optimization,
-4.8 is polish.
+of concept, 4.4-4.5 are packaging and measurement, 4.6 is optimization,
+4.7 is developer tooling, 4.8 is polish.
+
+**Note:** Compile-time coalescing analysis (originally planned for 4.7)
+is deferred to Phase 5+ when `block_load`/`block_store` abstractions
+provide analyzable access patterns.
 
 ## Key Risks
 
@@ -145,5 +149,5 @@ Key review recommendations incorporated:
 - Block semantics definition (review 5.2) → simplified to shared_mem + loops
 - Library-first approach (review 5.3) → kaio-ops in Sprint 4.4
 - Benchmark methodology (review 5.5) → Sprint 4.5
-- Coalescing as heuristics (review 8.1) → Sprint 4.7
+- Coalescing as heuristics (review 8.1) → deferred to Phase 5+ (Sprint 4.7 rescoped to PTX inspection)
 - Naive before optimized (review 8.2) → Sprint 4.3 then 4.6

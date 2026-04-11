@@ -299,12 +299,26 @@ pub fn lower_stmts(ctx: &mut LoweringContext, stmts: &[KernelStmt]) -> syn::Resu
     Ok(combined)
 }
 
+/// Generate tokens that conditionally emit a PTX comment annotation.
+///
+/// The `_kaio_annotate` variable must be a bare identifier — it resolves
+/// at runtime in the generated `build_ptx()` function, not at proc macro
+/// expansion time. Same pattern as `kernel` and `alloc`.
+fn annotation_tokens(description: &str) -> TokenStream {
+    quote! {
+        if _kaio_annotate {
+            kernel.push(PtxInstruction::Comment(#description.to_string()));
+        }
+    }
+}
+
 /// Lower a single kernel statement to a `TokenStream`.
 #[allow(dead_code)] // Used in Sprint 2.6 codegen; tested here
 pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<TokenStream> {
     match stmt {
         // let x = expr; — lower value, register in locals
         KernelStmt::Let { name, value, .. } => {
+            let ann = annotation_tokens(&format!("let {name}"));
             let (reg, ty, expr_tokens) = lower_expr(ctx, value)?;
             // Allows variable shadowing (e.g., reusing `i` in multiple loops).
             // Each `let` allocates a fresh register — the old register just
@@ -330,7 +344,7 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
                 (reg, expr_tokens)
             };
             ctx.locals.insert(name.clone(), (final_reg, ty));
-            Ok(final_tokens)
+            Ok(quote! { #ann #final_tokens })
         }
 
         // if cond { then } [else { otherwise }]
@@ -340,6 +354,7 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             else_body,
             ..
         } => {
+            let ann = annotation_tokens("if ...");
             // 1. Lower condition to predicate register
             let (pred_reg, _pred_ty, cond_tokens) = lower_expr(ctx, condition)?;
 
@@ -388,6 +403,7 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             };
 
             Ok(quote! {
+                #ann
                 #cond_tokens
                 #branch_tokens
                 #then_tokens
@@ -396,10 +412,19 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             })
         }
 
-        // Bare expression statement
+        // Bare expression statement — only annotate bar_sync
         KernelStmt::Expr(expr, _span) => {
+            let ann = if let KernelExpr::BuiltinCall { name, .. } = expr {
+                if name == "bar_sync" {
+                    annotation_tokens("bar_sync()")
+                } else {
+                    TokenStream::new()
+                }
+            } else {
+                TokenStream::new()
+            };
             let (_reg, _ty, tokens) = lower_expr(ctx, expr)?;
-            Ok(tokens)
+            Ok(quote! { #ann #tokens })
         }
 
         // x = expr — lower value, emit Mov to existing register
@@ -430,13 +455,14 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             value,
             span,
         } => {
+            let ann = annotation_tokens(&format!("{array}[...] = ..."));
             // Check shared memory first — always mutable
             if let Some((elem_ty, _count)) = ctx.shared_arrays.get(array).cloned() {
                 let (idx_reg, _idx_ty, idx_tokens) = lower_expr(ctx, index)?;
                 let (val_reg, _val_ty, val_tokens) = lower_expr(ctx, value)?;
                 let store_tokens =
                     memory::lower_shared_index_write(ctx, array, &idx_reg, &val_reg, &elem_ty);
-                return Ok(quote! { #idx_tokens #val_tokens #store_tokens });
+                return Ok(quote! { #ann #idx_tokens #val_tokens #store_tokens });
             }
             // Global memory path
             let (array_reg, array_ty) = ctx.locals.get(array).cloned().ok_or_else(|| {
@@ -459,7 +485,7 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             let (val_reg, _val_ty, val_tokens) = lower_expr(ctx, value)?;
             let store_tokens =
                 memory::lower_index_write(ctx, array, &array_reg, &idx_reg, &val_reg, &elem_ty);
-            Ok(quote! { #idx_tokens #val_tokens #store_tokens })
+            Ok(quote! { #ann #idx_tokens #val_tokens #store_tokens })
         }
 
         // shared_mem![T; N] — declare shared memory buffer
@@ -469,6 +495,10 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             count,
             span,
         } => {
+            let ann = annotation_tokens(&format!(
+                "shared_mem {name}: [{}; {count}]",
+                elem_ty.display_name()
+            ));
             if ctx.shared_arrays.contains_key(name) {
                 return Err(syn::Error::new(
                     *span,
@@ -481,6 +511,7 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             let align = elem_ty.size_bytes() as u32;
             let ptx_name = name.clone();
             Ok(quote! {
+                #ann
                 kernel.add_shared_decl(SharedDecl {
                     name: #ptx_name.to_string(),
                     align: #align,
@@ -497,6 +528,7 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             body,
             span,
         } => {
+            let ann = annotation_tokens(&format!("for {var}"));
             // 1. Lower end first (its type drives the counter type)
             let (end_reg, end_ty, end_tokens) = lower_expr(ctx, end)?;
 
@@ -615,6 +647,7 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             }
 
             Ok(quote! {
+                #ann
                 #end_tokens
                 #start_tokens
                 #init_tokens
@@ -631,6 +664,7 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
         KernelStmt::While {
             condition, body, ..
         } => {
+            let ann = annotation_tokens("while ...");
             // 1. Generate labels
             let loop_start = ctx.fresh_label("LOOP_START");
             let loop_end = ctx.fresh_label("LOOP_END");
@@ -668,6 +702,7 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             };
 
             Ok(quote! {
+                #ann
                 #start_label_tokens
                 #cond_tokens
                 #branch_tokens

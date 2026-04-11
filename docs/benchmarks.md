@@ -81,3 +81,19 @@ Requires NVIDIA GPU and CUDA toolkit (for cuBLAS).
 - BM=BN=64, BK=16, TM=TN=4
 - Shared: tile_a 64×17 + tile_b 16×65 (bank conflict padding)
 - 256 threads, 16 accumulators per thread
+
+---
+
+## Performance Status
+
+**Current:** 31% of cuBLAS sgemm — BM=BN=64, BK=16, TM=TN=4, scalar loads
+
+**Planned next levers:**
+- Vectorized global loads (`LDG.128`) — 4× fewer load instructions
+- Double buffering — overlap computation with next tile load
+- Size-based dispatch — use naive kernel for small sizes where
+  64×64 tile overhead dominates
+
+These optimizations require DSL extensions (vectorized load intrinsics)
+and are planned for Phase 5+. See [performance.md](performance.md)
+for writing fast kernels with the current tooling.

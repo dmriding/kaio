@@ -74,6 +74,8 @@ pub fn generate_build_ptx(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Re
             };
             use kaio::core::types::PtxType;
 
+            let _kaio_annotate = std::env::var("KAIO_PTX_ANNOTATE").is_ok();
+
             let mut alloc = RegisterAllocator::new();
             let mut kernel = PtxKernel::new(#kernel_name);
 
@@ -82,6 +84,20 @@ pub fn generate_build_ptx(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Re
 
             kernel.push(PtxInstruction::Control(ControlOp::Ret));
             kernel.set_registers(alloc.into_allocated());
+
+            if std::env::var("KAIO_PTX_STATS").is_ok() {
+                let _s = kernel.stats();
+                eprintln!("KAIO stats: kernel '{}' (PTX structure, not runtime profile)", #kernel_name);
+                eprintln!("  Instructions: {} total", _s.total_instructions);
+                eprintln!("  Arithmetic:   {} fma, {} other", _s.fma, _s.arith_other);
+                eprintln!("  Memory:       {} ld.global, {} st.global, {} ld.shared, {} st.shared",
+                    _s.ld_global, _s.st_global, _s.ld_shared, _s.st_shared);
+                eprintln!("  Control:      {} bar.sync, {} branches, {} setp, {} mov, {} cvt",
+                    _s.bar_sync, _s.branches, _s.setp, _s.mov, _s.cvt);
+                eprintln!("  Registers:    {} r32, {} r64, {} f32, {} f64, {} pred  (PTX-level, not final HW allocation)",
+                    _s.registers_r, _s.registers_rd, _s.registers_f, _s.registers_fd, _s.registers_p);
+                eprintln!("  Shared mem:   {} bytes", _s.shared_bytes);
+            }
 
             let sm_target = std::env::var("KAIO_SM_TARGET")
                 .unwrap_or_else(|_| "sm_70".to_string());

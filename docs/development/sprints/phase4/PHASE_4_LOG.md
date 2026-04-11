@@ -15,7 +15,7 @@ Master plan: [phase4_master_plan.md](phase4_master_plan.md)
 | [4.4](sprint_4_4.md) | kaio-ops crate + host-side API | Done | (pending) | +2 host, +5 GPU = 205+41 |
 | [4.5](sprint_4_5.md) | Benchmark harness + cuBLAS baseline | Done | (pending) | +1 bench = 205+41+1 |
 | [4.6](sprint_4_6.md) | Register tiling + optimization | Done | (pending) | 31% cuBLAS, 3.8× speedup |
-| [4.7](sprint_4_7.md) | Coalescing heuristics + inspection | Planned | — | — |
+| [4.7](sprint_4_7.md) | PTX inspection + performance docs | Done | (pending) | +4 host = 207+41 |
 | [4.8](sprint_4_8.md) | Polish + integration tests + docs | Planned | — | — |
 
 ## Key References
@@ -35,7 +35,7 @@ Master plan: [phase4_master_plan.md](phase4_master_plan.md)
                                                         ↓
                          4.4 (kaio-ops) → 4.5 (benchmarks) → 4.6 (register tiling)
                                                                     ↓
-                                                              4.7 (coalescing)
+                                                              4.7 (PTX inspection)
                                                                     ↓
                                                               4.8 (polish)
 ```
