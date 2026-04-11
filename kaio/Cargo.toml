@@ -19,9 +19,9 @@ include = [
 ]
 
 [dependencies]
-kaio-core = { version = "0.0.2", path = "../kaio-core" }
-kaio-runtime = { version = "0.0.2", path = "../kaio-runtime" }
-kaio-macros = { version = "0.0.2", path = "../kaio-macros" }
+kaio-core = { version = "0.0.3", path = "../kaio-core" }
+kaio-runtime = { version = "0.0.3", path = "../kaio-runtime" }
+kaio-macros = { version = "0.0.3", path = "../kaio-macros" }
 
 [dev-dependencies]
 trybuild = "1"
