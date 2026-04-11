@@ -102,6 +102,14 @@ pub fn tanh(_x: f32) -> f32 {
     panic!("tanh() can only be called inside a #[gpu_kernel] function")
 }
 
+/// Fused multiply-add: `a * b + c` in one operation.
+///
+/// Uses hardware FMA (`fma.rn.f32`) for better precision and performance
+/// than separate multiply + add. Essential for matmul inner loops.
+pub fn fma(_a: f32, _b: f32, _c: f32) -> f32 {
+    panic!("fma() can only be called inside a #[gpu_kernel] function")
+}
+
 /// Synchronize all threads in the block at a barrier.
 ///
 /// All threads must reach this point before any can proceed.

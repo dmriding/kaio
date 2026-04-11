@@ -48,6 +48,9 @@ pub fn lower_builtin(
         "log" => lower_log(ctx, arg_regs, arg_types, span),
         "tanh" => lower_tanh(ctx, arg_regs, arg_types, span),
 
+        // --- Fused multiply-add ---
+        "fma" => lower_fma(ctx, arg_regs, arg_types, span),
+
         // --- Synchronization builtins ---
         "bar_sync" => lower_bar_sync(ctx, arg_regs, span),
         "shfl_sync_down" => lower_shfl_sync(ctx, "down", arg_regs, arg_types, span),
@@ -66,7 +69,7 @@ pub fn lower_builtin(
                  block_idx_x, block_idx_y, block_idx_z, \
                  block_dim_x, block_dim_y, block_dim_z, \
                  grid_dim_x, grid_dim_y, grid_dim_z, \
-                 sqrt, abs, min, max, exp, log, tanh, \
+                 sqrt, abs, min, max, exp, log, tanh, fma, \
                  bar_sync, shfl_sync_down, shfl_sync_up, shfl_sync_bfly, \
                  block_reduce_sum, block_reduce_max"
             ),
@@ -199,6 +202,40 @@ fn lower_binary_math(
     };
 
     Ok((dst, ty.clone(), tokens))
+}
+
+/// Lower `fma(a, b, c)` → `fma.rn.f32 dst, a, b, c` (single instruction).
+fn lower_fma(
+    ctx: &mut LoweringContext,
+    arg_regs: &[Ident],
+    arg_types: &[KernelType],
+    span: Span,
+) -> syn::Result<(Ident, KernelType, TokenStream)> {
+    if arg_regs.len() != 3 {
+        return Err(syn::Error::new(
+            span,
+            format!("fma() takes exactly 3 arguments, got {}", arg_regs.len()),
+        ));
+    }
+    check_f32(&arg_types[0], span)?;
+
+    let a = &arg_regs[0];
+    let b = &arg_regs[1];
+    let c = &arg_regs[2];
+    let dst = ctx.fresh_reg();
+
+    let tokens = quote! {
+        let #dst = alloc.alloc(PtxType::F32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Fma {
+            dst: #dst,
+            a: Operand::Reg(#a),
+            b: Operand::Reg(#b),
+            c: Operand::Reg(#c),
+            ty: PtxType::F32,
+        }));
+    };
+
+    Ok((dst, KernelType::F32, tokens))
 }
 
 /// Lower `exp(x)` = `2^(x * log2(e))` → mul + ex2 (2 instructions).

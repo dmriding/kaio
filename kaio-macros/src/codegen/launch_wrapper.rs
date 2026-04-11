@@ -13,12 +13,14 @@ use crate::kernel_ir::{KernelSignature, KernelType};
 /// - `&mut [T]` → `&mut GpuBuffer<T>`
 /// - scalar → same type
 ///
-/// Uses the last `u32` scalar param for `LaunchConfig::for_num_elems()`.
-///
-/// **Known limitation (Phase 2):** The last u32 parameter is assumed to be
-/// the element count. Custom grid config support is deferred to Phase 3.
+/// Launch configuration depends on block dimensionality:
+/// - **1D** (`block_size = N`): uses the last `u32` scalar param for
+///   `LaunchConfig::for_num_elems()`. Grid is inferred automatically.
+/// - **2D** (`block_size = (X, Y)`): the generated `launch()` takes an
+///   explicit `LaunchConfig` parameter. Users must compute grid dims.
 pub fn generate_launch_fn(sig: &KernelSignature) -> syn::Result<TokenStream> {
     let kernel_name = &sig.name;
+    let is_2d = sig.config.block_size_y.is_some();
 
     // Build launch function params and .arg() calls
     let mut launch_params: Vec<TokenStream> = Vec::new();
@@ -45,21 +47,30 @@ pub fn generate_launch_fn(sig: &KernelSignature) -> syn::Result<TokenStream> {
                 let rust_ty = rust_type_tokens(scalar_ty);
                 launch_params.push(quote! { #name: #rust_ty });
                 arg_calls.push(quote! { .arg(&#name) });
-                // Track last u32 for grid config
-                if *scalar_ty == KernelType::U32 {
+                // Track last u32 for 1D grid config
+                if !is_2d && *scalar_ty == KernelType::U32 {
                     elem_count_ident = Some(name.clone());
                 }
             }
         }
     }
 
-    let n_ident = elem_count_ident.ok_or_else(|| {
-        syn::Error::new(
-            sig.name_span,
-            "GPU kernel must have at least one `u32` parameter for element count \
-             (used by LaunchConfig::for_num_elems)",
-        )
-    })?;
+    let launch_config_expr = if is_2d {
+        // 2D: add explicit LaunchConfig parameter
+        launch_params.push(quote! { cfg: kaio::runtime::LaunchConfig });
+        quote! { cfg }
+    } else {
+        // 1D: infer grid from last u32 (existing behavior)
+        let n_ident = elem_count_ident.ok_or_else(|| {
+            syn::Error::new(
+                sig.name_span,
+                "GPU kernel must have at least one `u32` parameter for element count \
+                 (used by LaunchConfig::for_num_elems). For 2D kernels, use \
+                 `block_size = (X, Y)` which accepts an explicit LaunchConfig instead.",
+            )
+        })?;
+        quote! { kaio::runtime::LaunchConfig::for_num_elems(#n_ident) }
+    };
 
     Ok(quote! {
         /// Launch this GPU kernel on the given device.
@@ -69,7 +80,7 @@ pub fn generate_launch_fn(sig: &KernelSignature) -> syn::Result<TokenStream> {
             let ptx = PTX_CACHE.get_or_init(build_ptx);
             let module = device.load_ptx(ptx)?;
             let func = module.function(#kernel_name)?;
-            let cfg = kaio::runtime::LaunchConfig::for_num_elems(#n_ident);
+            let cfg = #launch_config_expr;
 
             // SAFETY: kernel signature matches params (enforced by macro codegen),
             // buffers are valid device pointers (enforced by GpuBuffer construction),

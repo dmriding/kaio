@@ -167,6 +167,7 @@ mod tests {
     fn dummy_config() -> KernelConfig {
         KernelConfig {
             block_size: 256,
+            block_size_y: None,
             block_size_span: proc_macro2::Span::call_site(),
         }
     }

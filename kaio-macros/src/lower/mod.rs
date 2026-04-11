@@ -36,15 +36,21 @@ pub struct LoweringContext {
     /// Declared shared memory buffers.
     /// Key: buffer name, Value: (element type, element count).
     pub shared_arrays: HashMap<String, (KernelType, usize)>,
-    /// Block size from `#[gpu_kernel(block_size = N)]`. Set by codegen before
-    /// body lowering. Needed by reductions to compute `num_warps = block_size / 32`.
+    /// Total block size (total threads per block). Set by codegen before
+    /// body lowering. For 1D this is `block_size`, for 2D it is `x * y`.
+    /// Needed by reductions to compute `num_warps = block_size / 32`.
     pub block_size: Option<u32>,
+    /// Block size X dimension. `Some` for 2D kernels, `None` for 1D.
+    /// Preserved so Sprint 4.3+ tile logic can access individual dimensions.
+    pub block_size_x: Option<u32>,
+    /// Block size Y dimension. `Some` for 2D kernels, `None` for 1D.
+    pub block_size_y: Option<u32>,
     /// Whether reduction shared memory (`_kaio_reduce_smem`) has been allocated.
     /// Reused across multiple `block_reduce_*` calls in the same kernel.
     pub reduce_smem_allocated: bool,
 }
 
-#[allow(dead_code)] // Methods used in lower/arith.rs + Sprint 2.6 codegen
+#[allow(dead_code)]
 impl LoweringContext {
     /// Create a new lowering context.
     pub fn new() -> Self {
@@ -55,6 +61,8 @@ impl LoweringContext {
             global_addrs: HashMap::new(),
             shared_arrays: HashMap::new(),
             block_size: None,
+            block_size_x: None,
+            block_size_y: None,
             reduce_smem_allocated: false,
         }
     }

@@ -77,6 +77,25 @@ pub enum ArithOp {
         /// Product bit selection mode.
         mode: MadMode,
     },
+    /// Fused multiply-add: `fma.rn{ty} dst, a, b, c;`
+    ///
+    /// Computes `dst = (a * b) + c` with a single rounding step (IEEE
+    /// round-to-nearest). Float-only (F32, F64). More precise and faster
+    /// than separate mul + add — essential for matmul inner loops.
+    ///
+    /// Example: `fma.rn.f32 %f0, %f1, %f2, %f3;`
+    Fma {
+        /// Destination register.
+        dst: Register,
+        /// First multiplicand.
+        a: Operand,
+        /// Second multiplicand.
+        b: Operand,
+        /// Addend.
+        c: Operand,
+        /// PTX type suffix (F32 or F64).
+        ty: PtxType,
+    },
     /// Widening multiply: `mul.wide{src_ty} dst, lhs, rhs;`
     ///
     /// Multiplies two N-bit values and produces a 2N-bit result.
@@ -258,6 +277,10 @@ impl Emit for ArithOp {
                 let mnemonic = format!("mad.{}{}", mode.ptx_str(), ty.ptx_suffix());
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, a, b, c])
             }
+            ArithOp::Fma { dst, a, b, c, ty } => {
+                let mnemonic = format!("fma.rn{}", ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, a, b, c])
+            }
             ArithOp::MulWide {
                 dst,
                 lhs,
@@ -387,6 +410,21 @@ mod tests {
         };
         op.emit(&mut w).unwrap();
         assert_eq!(w.finish(), "    mad.lo.s32 %r1, %r3, %r4, %r5;\n");
+    }
+
+    #[test]
+    fn emit_fma_f32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Fma {
+            dst: reg(RegKind::F, 0, PtxType::F32),
+            a: Operand::Reg(reg(RegKind::F, 1, PtxType::F32)),
+            b: Operand::Reg(reg(RegKind::F, 2, PtxType::F32)),
+            c: Operand::Reg(reg(RegKind::F, 3, PtxType::F32)),
+            ty: PtxType::F32,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    fma.rn.f32 %f0, %f1, %f2, %f3;\n");
     }
 
     #[test]
