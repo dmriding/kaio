@@ -17,6 +17,7 @@ Master plan: [phase4_master_plan.md](phase4_master_plan.md)
 | [4.6](sprint_4_6.md) | Register tiling + optimization | Done | (pending) | 31% cuBLAS, 3.8× speedup |
 | [4.7](sprint_4_7.md) | PTX inspection + performance docs | Done | (pending) | +4 host = 207+41 |
 | [4.8](sprint_4_8.md) | Polish + integration tests + publish | Done | (pending) | +2 GPU, +2 CF = 207+43 |
+| [4.9](sprint_4_9.md) | Adoption polish — examples + README | Done | (pending) | no new tests (examples are binaries) |
 
 ## Key References
 
@@ -38,6 +39,8 @@ Master plan: [phase4_master_plan.md](phase4_master_plan.md)
                                                               4.7 (PTX inspection)
                                                                     ↓
                                                               4.8 (polish)
+                                                                    ↓
+                                                              4.9 (adoption)
 ```
 
 All sprints are sequential.

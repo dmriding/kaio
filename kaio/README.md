@@ -2,10 +2,8 @@
 
 **Rust-native GPU kernel authoring framework.**
 
-KAIO (καίω — to kindle, to ignite) lets developers write GPU compute
-kernels in Rust and lower them to PTX for execution on NVIDIA GPUs.
-A Rust alternative to OpenAI's Triton — Windows + Linux, automatic PTX
-generation, Rust type safety, no CUDA C++ toolchain required.
+Write GPU compute kernels in Rust, compile to PTX, run on NVIDIA GPUs.
+No CUDA C++, no Python, no CUDA toolkit required. Windows + Linux.
 
 ## Quick Start
 
@@ -19,30 +17,53 @@ fn saxpy(x: &[f32], y: &mut [f32], alpha: f32, n: u32) {
         y[idx] = alpha * x[idx] + y[idx];
     }
 }
+
+fn main() -> Result<()> {
+    let device = KaioDevice::new(0)?;
+    let n = 1024u32;
+
+    let x = device.alloc_from(&vec![1.0f32; n as usize])?;
+    let mut y = device.alloc_from(&vec![2.0f32; n as usize])?;
+
+    saxpy::launch(&device, &x, &mut y, 2.5f32, n)?;
+
+    let result = y.to_host(&device)?;
+    println!("result: {:?}", &result[..8]);
+    // prints: result: [4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5]
+    Ok(())
+}
 ```
 
-The `#[gpu_kernel]` macro lowers `saxpy` to PTX and generates a typed
-`saxpy::launch()` function. PTX is generated once at first call and
-cached for the process lifetime.
+Requires an NVIDIA GPU with driver installed. No CUDA toolkit needed.
+
+## When to Use KAIO
+
+KAIO is not a replacement for ML frameworks like Candle or Burn.
+It is the layer you use when you need more control than they provide.
+
+- Write custom GPU kernels your framework doesn't support
+- Control GPU memory explicitly — deterministic VRAM, buffer reuse
+- Ship GPU binaries without Python or Triton in your dependency chain
+- Run on Windows (Triton is Linux-only)
+- Prototype GPU code in Rust without learning CUDA C++
 
 ## Features
 
 | Feature | Syntax | Status |
 |---------|--------|--------|
-| Arithmetic | `+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `*=`, `/=` | ✅ |
-| Comparisons | `<`, `<=`, `>`, `>=`, `==`, `!=` | ✅ |
-| Control flow | `if`/`else`, `for`, `while` | ✅ |
-| Array access | `a[idx]` (global memory) | ✅ |
-| Shared memory | `shared_mem![f32; 256]` | ✅ |
-| Synchronization | `bar_sync()` | ✅ |
-| Warp shuffle | `shfl_sync_down/up/bfly()` | ✅ |
-| Reductions | `block_reduce_sum()`, `block_reduce_max()` | ✅ |
-| Type casts | `x as f32` | ✅ |
-| Math builtins | `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max` | ✅ |
-| Thread indices | `thread_idx_x()`, `block_idx_x()`, `block_dim_x()` | ✅ |
-| FMA | `fma(a, b, c)` | ✅ |
-| 2D blocks | `block_size = (16, 16)`, `thread_idx_y()` | ✅ |
-| Tiled matmul | `kaio_ops::matmul()` (31% of cuBLAS) | ✅ |
+| Arithmetic | `+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `*=`, `/=` | Supported |
+| Comparisons | `<`, `<=`, `>`, `>=`, `==`, `!=` | Supported |
+| Control flow | `if`/`else`, `for`, `while` | Supported |
+| Array access | `a[idx]` (global memory) | Supported |
+| Shared memory | `shared_mem![f32; 256]` | Supported |
+| Synchronization | `bar_sync()` | Supported |
+| Warp shuffle | `shfl_sync_down/up/bfly()` | Supported |
+| Reductions | `block_reduce_sum()`, `block_reduce_max()` | Supported |
+| Type casts | `x as f32` | Supported |
+| Math builtins | `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max` | Supported |
+| FMA | `fma(a, b, c)` | Supported |
+| 2D blocks | `block_size = (16, 16)`, `thread_idx_y()` | Supported |
+| Tiled matmul | `kaio_ops::matmul()` (31% of cuBLAS) | Supported |
 
 ## Architecture
 
@@ -54,14 +75,23 @@ cached for the process lifetime.
 | `kaio-runtime` | CUDA driver wrapper via cudarc |
 | `kaio-ops` | Pre-built GPU operations (matmul, more planned) |
 
+## Limitations
+
+- NVIDIA only (SM 7.0+) — no AMD, no Intel
+- Not cuBLAS-level performance (matmul reaches 31%)
+- DSL subset of Rust — no closures, traits, generics, or `&&`/`||`
+- Block reductions are 1D only
+- No autograd, no multi-GPU
+- Pre-1.0 — API will change
+
 ## Status
 
 **Phase 4 complete** — tiled matmul (31% of cuBLAS sgemm on RTX 4090),
 `kaio-ops` crate, 2D thread blocks, FMA, PTX inspection tools.
-This is early development software. API will change.
 
-See the [repository](https://github.com/dmriding/kaio) for the full
-roadmap, CHANGELOG, and development logs.
+See the [repository](https://github.com/dmriding/kaio) for full
+documentation, runnable examples, copy-paste patterns, and development
+logs.
 
 ## License
 
