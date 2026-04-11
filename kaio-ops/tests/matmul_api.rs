@@ -136,11 +136,7 @@ fn api_matmul_rejects_zero_m() {
 #[test]
 #[ignore] // requires NVIDIA GPU (buffer allocation needs a device)
 fn api_matmul_rejects_small_buffer() {
-    let device = KaioDevice::new(0);
-    if device.is_err() {
-        return;
-    }
-    let device = device.unwrap();
+    let device = KaioDevice::new(0).expect("GPU required");
     let a = device.alloc_zeros::<f32>(4).unwrap(); // too small for 3×3
     let b = device.alloc_zeros::<f32>(9).unwrap();
     let mut c = device.alloc_zeros::<f32>(9).unwrap();

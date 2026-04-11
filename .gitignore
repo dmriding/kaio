@@ -18,6 +18,6 @@ Thumbs.db
 # Project-specific
 triton/
 docs/CC_PROMPT_NAME_RESERVATION.md
-docs/development/review1/
 synapse.toml
+docs/development/sprints/phase3/reviews
 docs/development/sprints/phase4/reviews
