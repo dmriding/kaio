@@ -1,4 +1,4 @@
-//! Standard (materialized) single-head attention.
+//! Single-head attention: standard (materialized) and FlashAttention.
 //!
 //! Computes: out = softmax(Q * K^T / sqrt(d_k)) * V
 //!
@@ -274,6 +274,239 @@ pub fn attention_causal(
     // Step 3: out = P * V — standard matmul
     matmul(device, &probs, v, out, seq_len, d_k, seq_len)?;
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// FlashAttention kernels (Sprint 5.4)
+// ---------------------------------------------------------------------------
+// BLOCK_M = 1: one query position per block, 256 threads.
+// No materialized attention matrix — O(d_k + 256) memory per block.
+// Online softmax: running (m, l, O) updated per K/V tile.
+//
+// Assumption: every query row has at least one valid key (causal
+// self-attention guarantees the diagonal). If all keys are masked,
+// l = 0 and output is undefined (divide by zero).
+
+#[allow(clippy::too_many_arguments)]
+#[gpu_kernel(block_size = (256, 1))]
+fn flash_attn_kernel(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    out: &mut [f32],
+    seq_len: u32,
+    d_k: u32,
+    inv_sqrt_dk: f32,
+) {
+    let tid = thread_idx_x();
+    let q_row = block_idx_x();
+    let q_base = q_row * d_k;
+
+    let tile = shared_mem![f32; 256];
+
+    // Per-thread output accumulator (tid < d_k handles output dim tid)
+    let mut o_acc = 0.0f32;
+
+    // Running softmax state (block-wide, per-thread register copies)
+    let mut m = -3.402823e+38f32;
+    let mut l = 0.0f32;
+
+    let mut kv_start = 0u32;
+    while kv_start < seq_len {
+        // Phase 1: Each thread computes one attention score
+        let j = kv_start + tid;
+        let mut score = -3.402823e+38f32;
+        if j < seq_len {
+            score = 0.0f32;
+            let mut d = 0u32;
+            while d < d_k {
+                score = fma(q[q_base + d], k[j * d_k + d], score);
+                d += 1;
+            }
+            score = score * inv_sqrt_dk;
+        }
+        tile[tid] = score;
+        bar_sync(); // all scores written before reduction
+
+        // Phase 2: Online softmax update
+        let tile_max = block_reduce_max(tile[tid]);
+        let mut m_new = m;
+        if tile_max > m {
+            m_new = tile_max;
+        }
+        let old_scale = exp(m - m_new);
+        tile[tid] = exp(tile[tid] - m_new);
+        bar_sync(); // exp_scores written before sum + V phase
+        let tile_sum = block_reduce_sum(tile[tid]);
+
+        // Rescale existing accumulator
+        // INVARIANT: m, l, o_acc stay in the same scaling frame.
+        // After tile t: m_t = max(scores 0..t), l_t = sum exp(s - m_t),
+        // o_acc = sum exp(s - m_t) * V[s, tid] for tid < d_k.
+        if tid < d_k {
+            o_acc = o_acc * old_scale;
+        }
+        l = old_scale * l + tile_sum;
+        m = m_new;
+
+        // Phase 3: Accumulate P * V (first d_k threads)
+        if tid < d_k {
+            let mut jj = 0u32;
+            while jj < 256 {
+                if kv_start + jj < seq_len {
+                    let v_val = v[(kv_start + jj) * d_k + tid];
+                    o_acc = fma(tile[jj], v_val, o_acc);
+                }
+                jj += 1;
+            }
+        }
+        bar_sync(); // sync before next tile overwrites shared
+
+        kv_start += 256;
+    }
+
+    // Final normalization
+    if tid < d_k {
+        out[q_row * d_k + tid] = o_acc / l;
+    }
+}
+
+// Causal variant: masks future positions (j > q_row) with -FLT_MAX.
+#[allow(clippy::too_many_arguments)]
+#[gpu_kernel(block_size = (256, 1))]
+fn flash_attn_causal_kernel(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    out: &mut [f32],
+    seq_len: u32,
+    d_k: u32,
+    inv_sqrt_dk: f32,
+) {
+    let tid = thread_idx_x();
+    let q_row = block_idx_x();
+    let q_base = q_row * d_k;
+
+    let tile = shared_mem![f32; 256];
+
+    let mut o_acc = 0.0f32;
+    let mut m = -3.402823e+38f32;
+    let mut l = 0.0f32;
+
+    let mut kv_start = 0u32;
+    while kv_start < seq_len {
+        let j = kv_start + tid;
+        let mut score = -3.402823e+38f32;
+        if j < seq_len {
+            if j <= q_row {
+                // Only attend to positions <= q_row (causal)
+                score = 0.0f32;
+                let mut d = 0u32;
+                while d < d_k {
+                    score = fma(q[q_base + d], k[j * d_k + d], score);
+                    d += 1;
+                }
+                score = score * inv_sqrt_dk;
+            }
+        }
+        tile[tid] = score;
+        bar_sync();
+
+        let tile_max = block_reduce_max(tile[tid]);
+        let mut m_new = m;
+        if tile_max > m {
+            m_new = tile_max;
+        }
+        let old_scale = exp(m - m_new);
+        tile[tid] = exp(tile[tid] - m_new);
+        bar_sync();
+        let tile_sum = block_reduce_sum(tile[tid]);
+
+        if tid < d_k {
+            o_acc = o_acc * old_scale;
+        }
+        l = old_scale * l + tile_sum;
+        m = m_new;
+
+        if tid < d_k {
+            let mut jj = 0u32;
+            while jj < 256 {
+                if kv_start + jj < seq_len {
+                    if kv_start + jj <= q_row {
+                        let v_val = v[(kv_start + jj) * d_k + tid];
+                        o_acc = fma(tile[jj], v_val, o_acc);
+                    }
+                }
+                jj += 1;
+            }
+        }
+        bar_sync();
+
+        kv_start += 256;
+    }
+
+    if tid < d_k {
+        out[q_row * d_k + tid] = o_acc / l;
+    }
+}
+
+/// FlashAttention: single-head attention without materializing the
+/// O(seq_len^2) attention matrix. O(d_k) memory per query position.
+///
+/// Same output as [`attention()`] within floating-point tolerance.
+/// Different reduction order means results are numerically close,
+/// not bitwise identical.
+///
+/// # Constraints
+///
+/// - d_k must be <= 256 (one thread per output dimension)
+/// - d_v == d_k
+/// - f32 only, row-major, contiguous
+pub fn attention_flash(
+    device: &KaioDevice,
+    q: &GpuBuffer<f32>,
+    k: &GpuBuffer<f32>,
+    v: &GpuBuffer<f32>,
+    out: &mut GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+) -> Result<()> {
+    validate_attention_dims(q, k, v, out, seq_len, d_k)?;
+    validate_flash_dk(d_k)?;
+
+    let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
+    let grid = (seq_len, 1, 1); // one block per query position
+    flash_attn_kernel::launch(device, q, k, v, out, seq_len, d_k, inv_sqrt_dk, grid)?;
+    Ok(())
+}
+
+/// FlashAttention with causal mask. See [`attention_flash()`] and
+/// [`attention_causal()`] for details.
+pub fn attention_flash_causal(
+    device: &KaioDevice,
+    q: &GpuBuffer<f32>,
+    k: &GpuBuffer<f32>,
+    v: &GpuBuffer<f32>,
+    out: &mut GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+) -> Result<()> {
+    validate_attention_dims(q, k, v, out, seq_len, d_k)?;
+    validate_flash_dk(d_k)?;
+
+    let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
+    let grid = (seq_len, 1, 1);
+    flash_attn_causal_kernel::launch(device, q, k, v, out, seq_len, d_k, inv_sqrt_dk, grid)?;
+    Ok(())
+}
+
+fn validate_flash_dk(d_k: u32) -> Result<()> {
+    if d_k > 256 {
+        return Err(KaioError::InvalidConfig(format!(
+            "FlashAttention requires d_k <= 256 (one thread per output dim), got {d_k}"
+        )));
+    }
     Ok(())
 }
 

@@ -23,7 +23,7 @@
 mod attention_kernel;
 mod matmul_kernel;
 
-pub use attention_kernel::{attention, attention_causal};
+pub use attention_kernel::{attention, attention_causal, attention_flash, attention_flash_causal};
 pub use matmul_kernel::matmul;
 
 // Expose naive kernel for benchmarking (not public API)

@@ -1,12 +1,13 @@
-//! Tests for kaio_ops::attention() — standard single-head attention.
+//! Tests for kaio_ops attention — standard and FlashAttention.
 //!
-//! Sprint 5.2: correctness baseline for FlashAttention.
-//! All tests compare GPU output against CPU reference.
+//! Sprint 5.2: standard attention correctness baseline.
+//! Sprint 5.3: causal masking.
+//! Sprint 5.4: FlashAttention (online softmax + tiled attention).
 
 #![allow(clippy::too_many_arguments)]
 
 use kaio::prelude::*;
-use kaio_ops::{attention, attention_causal};
+use kaio_ops::{attention, attention_causal, attention_flash, attention_flash_causal};
 
 // --- CPU reference ---
 
@@ -463,4 +464,241 @@ fn causal_mask_direct() {
             "row {i} weights sum to {row_sum}, expected 1.0"
         );
     }
+}
+
+// --- FlashAttention tests (Sprint 5.4) ---
+
+/// Compare flash attention output against standard attention output.
+fn check_flash_vs_standard(seq_len: usize, d_k: usize, label: &str) {
+    let device = KaioDevice::new(0).expect("GPU required");
+
+    let q_data: Vec<f32> = (0..seq_len * d_k)
+        .map(|i| ((i % 17) as f32 - 8.0) * 0.1)
+        .collect();
+    let k_data: Vec<f32> = (0..seq_len * d_k)
+        .map(|i| ((i % 13) as f32 - 6.0) * 0.1)
+        .collect();
+    let v_data: Vec<f32> = (0..seq_len * d_k)
+        .map(|i| ((i % 19) as f32 - 9.0) * 0.1)
+        .collect();
+
+    let q = device.alloc_from(&q_data).unwrap();
+    let k = device.alloc_from(&k_data).unwrap();
+    let v = device.alloc_from(&v_data).unwrap();
+
+    // Standard attention (reference)
+    let mut out_std = device.alloc_zeros::<f32>(seq_len * d_k).unwrap();
+    attention(
+        &device,
+        &q,
+        &k,
+        &v,
+        &mut out_std,
+        seq_len as u32,
+        d_k as u32,
+    )
+    .unwrap();
+    let result_std = out_std.to_host(&device).unwrap();
+
+    // FlashAttention
+    let mut out_flash = device.alloc_zeros::<f32>(seq_len * d_k).unwrap();
+    attention_flash(
+        &device,
+        &q,
+        &k,
+        &v,
+        &mut out_flash,
+        seq_len as u32,
+        d_k as u32,
+    )
+    .unwrap();
+    let result_flash = out_flash.to_host(&device).unwrap();
+
+    let mut max_abs = 0.0f32;
+    for idx in 0..seq_len * d_k {
+        let abs_err = (result_flash[idx] - result_std[idx]).abs();
+        let rel_err = if result_std[idx].abs() > 1e-6 {
+            abs_err / result_std[idx].abs()
+        } else {
+            abs_err
+        };
+        if abs_err > max_abs {
+            max_abs = abs_err;
+        }
+        assert!(
+            abs_err < 1e-2 || rel_err < 1e-1,
+            "{label}: flash vs standard mismatch at {idx}: \
+             flash={}, std={}, abs={abs_err:.2e}, rel={rel_err:.2e}",
+            result_flash[idx],
+            result_std[idx]
+        );
+    }
+    eprintln!("{label} ({seq_len}×{d_k}): flash_vs_std max_abs={max_abs:.2e}");
+}
+
+#[test]
+#[ignore]
+fn flash_attention_tiny() {
+    let seq_len = 4;
+    let d_k = 4;
+    let q: Vec<f32> = (0..seq_len * d_k).map(|i| (i % 7) as f32 * 0.1).collect();
+    let k: Vec<f32> = (0..seq_len * d_k)
+        .map(|i| ((i + 3) % 5) as f32 * 0.1)
+        .collect();
+    let v: Vec<f32> = (0..seq_len * d_k)
+        .map(|i| ((i + 1) % 11) as f32 * 0.1)
+        .collect();
+    check_attention(seq_len, d_k, &q, &k, &v, "flash_tiny");
+}
+
+#[test]
+#[ignore]
+fn flash_attention_16x16() {
+    check_flash_vs_standard(16, 16, "flash_16x16");
+}
+
+#[test]
+#[ignore]
+fn flash_attention_non_aligned() {
+    check_flash_vs_standard(17, 19, "flash_non_aligned");
+}
+
+#[test]
+#[ignore]
+fn flash_attention_medium() {
+    check_flash_vs_standard(64, 64, "flash_medium");
+}
+
+#[test]
+#[ignore]
+fn flash_matches_standard() {
+    // The most important test: validates flash output against the
+    // known-correct standard attention from Sprint 5.2.
+    check_flash_vs_standard(32, 32, "flash_matches_standard");
+}
+
+#[test]
+#[ignore]
+fn flash_attention_causal_medium() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let seq_len = 64usize;
+    let d_k = 64usize;
+
+    let q_data: Vec<f32> = (0..seq_len * d_k)
+        .map(|i| ((i % 17) as f32 - 8.0) * 0.1)
+        .collect();
+    let k_data: Vec<f32> = (0..seq_len * d_k)
+        .map(|i| ((i % 13) as f32 - 6.0) * 0.1)
+        .collect();
+    let v_data: Vec<f32> = (0..seq_len * d_k)
+        .map(|i| ((i % 19) as f32 - 9.0) * 0.1)
+        .collect();
+
+    let q = device.alloc_from(&q_data).unwrap();
+    let k = device.alloc_from(&k_data).unwrap();
+    let v = device.alloc_from(&v_data).unwrap();
+
+    // Standard causal (reference)
+    let mut out_std = device.alloc_zeros::<f32>(seq_len * d_k).unwrap();
+    attention_causal(
+        &device,
+        &q,
+        &k,
+        &v,
+        &mut out_std,
+        seq_len as u32,
+        d_k as u32,
+    )
+    .unwrap();
+    let result_std = out_std.to_host(&device).unwrap();
+
+    // Flash causal
+    let mut out_flash = device.alloc_zeros::<f32>(seq_len * d_k).unwrap();
+    attention_flash_causal(
+        &device,
+        &q,
+        &k,
+        &v,
+        &mut out_flash,
+        seq_len as u32,
+        d_k as u32,
+    )
+    .unwrap();
+    let result_flash = out_flash.to_host(&device).unwrap();
+
+    let mut max_abs = 0.0f32;
+    for idx in 0..seq_len * d_k {
+        let abs_err = (result_flash[idx] - result_std[idx]).abs();
+        if abs_err > max_abs {
+            max_abs = abs_err;
+        }
+        assert!(
+            abs_err < 1e-2,
+            "flash_causal vs standard at {idx}: flash={}, std={}, abs={abs_err:.2e}",
+            result_flash[idx],
+            result_std[idx]
+        );
+    }
+    eprintln!("flash_causal_medium (64×64): max_abs={max_abs:.2e}");
+}
+
+#[test]
+#[ignore]
+fn flash_causal_first_rows() {
+    // Verify rows 0, 1, 2 specifically in causal mode.
+    // Row 0 attends only to position 0 (output = V[0]).
+    // Catches masked-tile / tiny-valid-set bugs.
+    let device = KaioDevice::new(0).expect("GPU required");
+    let seq_len = 8usize;
+    let d_k = 4usize;
+    let q: Vec<f32> = (0..seq_len * d_k).map(|i| (i as f32) * 0.1).collect();
+    let k: Vec<f32> = (0..seq_len * d_k).map(|i| (i as f32) * 0.1).collect();
+    let v: Vec<f32> = (0..seq_len * d_k).map(|i| (i as f32) * 0.1).collect();
+
+    let q_buf = device.alloc_from(&q).unwrap();
+    let k_buf = device.alloc_from(&k).unwrap();
+    let v_buf = device.alloc_from(&v).unwrap();
+    let mut out = device.alloc_zeros::<f32>(seq_len * d_k).unwrap();
+
+    attention_flash_causal(
+        &device,
+        &q_buf,
+        &k_buf,
+        &v_buf,
+        &mut out,
+        seq_len as u32,
+        d_k as u32,
+    )
+    .unwrap();
+
+    let result = out.to_host(&device).unwrap();
+
+    // Row 0: only attends to pos 0 → output = V[0,:]
+    for d in 0..d_k {
+        let got = result[d];
+        let exp = v[d];
+        assert!(
+            (got - exp).abs() < 1e-3,
+            "row 0 col {d}: got {got}, expected {exp}"
+        );
+    }
+
+    // No NaN in first 3 rows
+    for (i, &val) in result.iter().enumerate().take(3 * d_k) {
+        assert!(!val.is_nan(), "NaN at index {i}");
+    }
+}
+
+#[test]
+#[ignore]
+fn flash_all_in_one_tile() {
+    // seq_len < 256: single-tile degenerate case.
+    check_flash_vs_standard(8, 8, "flash_one_tile");
+}
+
+#[test]
+#[ignore]
+fn flash_last_tile_partial() {
+    // seq_len = 257 = 256 + 1: tests final partial tile handling.
+    check_flash_vs_standard(257, 32, "flash_partial_tile");
 }
