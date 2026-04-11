@@ -2,7 +2,6 @@
 
 **Status:** Planning
 **Depends on:** Phase 5 complete (v0.1.0, commit `bbc1c4d`)
-**Reviewed by:** Opus 4.6, Codex 5.4
 
 ## Goal
 
