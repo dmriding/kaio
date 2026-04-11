@@ -218,15 +218,12 @@ fn lower_exp(
     let scaled = ctx.fresh_reg();
     let dst = ctx.fresh_reg();
 
-    // LOG2_E = 1.442695 (f32)
-    let log2e: f32 = std::f32::consts::LOG2_E;
-
     let tokens = quote! {
         // exp(x) = 2^(x * log2(e))
         let #log2e_reg = alloc.alloc(PtxType::F32);
         kernel.push(PtxInstruction::Mov {
             dst: #log2e_reg,
-            src: Operand::ImmF32(#log2e),
+            src: Operand::ImmF32(std::f32::consts::LOG2_E),
             ty: PtxType::F32,
         });
         let #scaled = alloc.alloc(PtxType::F32);
@@ -323,8 +320,6 @@ fn lower_tanh(
     let denominator = ctx.fresh_reg();
     let dst = ctx.fresh_reg();
 
-    let log2e: f32 = std::f32::consts::LOG2_E;
-
     let tokens = quote! {
         // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
 
@@ -347,7 +342,7 @@ fn lower_tanh(
         let #log2e_reg = alloc.alloc(PtxType::F32);
         kernel.push(PtxInstruction::Mov {
             dst: #log2e_reg,
-            src: Operand::ImmF32(#log2e),
+            src: Operand::ImmF32(std::f32::consts::LOG2_E),
             ty: PtxType::F32,
         });
         let #scaled = alloc.alloc(PtxType::F32);

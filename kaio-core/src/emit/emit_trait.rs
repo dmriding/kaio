@@ -297,13 +297,13 @@ mod tests {
 
     #[test]
     fn emit_module_header() {
-        let module = PtxModule::new("sm_89");
+        let module = PtxModule::new("sm_70");
         let mut w = PtxWriter::new();
         // Emit just the header (module with no kernels)
         module.emit(&mut w).unwrap();
         assert_eq!(
             w.finish(),
-            ".version 8.7\n.target sm_89\n.address_size 64\n"
+            ".version 8.7\n.target sm_70\n.address_size 64\n"
         );
     }
 

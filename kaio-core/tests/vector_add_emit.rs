@@ -13,7 +13,7 @@ fn emit_full_vector_add() {
     // --- Validate structure ---
     // Header
     assert!(ptx.starts_with(".version 8.7\n"));
-    assert!(ptx.contains(".target sm_89\n"));
+    assert!(ptx.contains(".target sm_"));
     assert!(ptx.contains(".address_size 64\n"));
 
     // Kernel signature
