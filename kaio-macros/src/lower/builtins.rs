@@ -498,6 +498,8 @@ fn lower_block_reduce(
     };
 
     // --- Allocate all registers upfront ---
+    // Shared memory base address for _kaio_reduce_smem
+    let smem_base = ctx.fresh_reg();
     // Warp reduction accumulator (reused across rounds)
     let acc = ctx.fresh_reg();
     // Thread index
@@ -509,16 +511,17 @@ fn lower_block_reduce(
     let warp_id_x32 = ctx.fresh_reg();
     let pred_lane0 = ctx.fresh_reg();
     let warp_byte_off = ctx.fresh_reg();
+    let warp_addr = ctx.fresh_reg();
     // Cross-warp phase
     let pred_first_warp = ctx.fresh_reg();
     let pred_valid = ctx.fresh_reg();
     let cross_val = ctx.fresh_reg();
     let cross_shfl = ctx.fresh_reg();
     let tid_byte_off = ctx.fresh_reg();
+    let tid_addr = ctx.fresh_reg();
     let pred_t0 = ctx.fresh_reg();
-    // Broadcast read (offset 0)
-    let zero_off = ctx.fresh_reg();
-    // Final result
+    // Broadcast
+    let broadcast_addr = ctx.fresh_reg();
     let result = ctx.fresh_reg();
 
     let write_done_label = ctx.fresh_label("REDUCE_WRITE_DONE");
@@ -530,6 +533,14 @@ fn lower_block_reduce(
 
     let tokens = quote! {
         #smem_tokens
+
+        // Load base address of reduction shared memory (named-symbol addressing)
+        let #smem_base = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Mov {
+            dst: #smem_base,
+            src: Operand::SharedAddr("_kaio_reduce_smem".to_string()),
+            ty: PtxType::U32,
+        });
 
         // --- Phase 1: Warp-level tree reduction ---
         // Copy input to accumulator
@@ -629,6 +640,14 @@ fn lower_block_reduce(
             rhs: Operand::ImmU32(4),
             ty: PtxType::U32,
         }));
+        // Compute warp's shared address: base + warp_id * 4
+        let #warp_addr = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: #warp_addr,
+            lhs: Operand::Reg(#smem_base),
+            rhs: Operand::Reg(#warp_byte_off),
+            ty: PtxType::U32,
+        }));
         // Conditional store: only lane 0
         kernel.push(PtxInstruction::Control(ControlOp::BraPred {
             pred: #pred_lane0,
@@ -636,7 +655,7 @@ fn lower_block_reduce(
             negate: true,
         }));
         kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
-            addr: #warp_byte_off,
+            addr: #warp_addr,
             src: #acc,
             ty: PtxType::F32,
         }));
@@ -676,6 +695,14 @@ fn lower_block_reduce(
             rhs: Operand::ImmU32(4),
             ty: PtxType::U32,
         }));
+        // Compute tid's shared address: base + tid * 4
+        let #tid_addr = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: #tid_addr,
+            lhs: Operand::Reg(#smem_base),
+            rhs: Operand::Reg(#tid_byte_off),
+            ty: PtxType::U32,
+        }));
         // Default: identity value
         let #cross_val = alloc.alloc(PtxType::F32);
         kernel.push(PtxInstruction::Mov {
@@ -691,7 +718,7 @@ fn lower_block_reduce(
         }));
         kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
             dst: #cross_val,
-            addr: #tid_byte_off,
+            addr: #tid_addr,
             ty: PtxType::F32,
         }));
         kernel.push(PtxInstruction::Label(#load_done_label.to_string()));
@@ -759,7 +786,7 @@ fn lower_block_reduce(
             negate: true,
         }));
         kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
-            addr: #tid_byte_off, // tid=0 → byte_off=0
+            addr: #tid_addr, // tid=0 → base + 0
             src: #cross_val,
             ty: PtxType::F32,
         }));
@@ -772,16 +799,17 @@ fn lower_block_reduce(
         kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
 
         // --- Phase 6: Broadcast — all threads read from shared[0] ---
-        let #zero_off = alloc.alloc(PtxType::U32);
+        // smem_base already points to _kaio_reduce_smem offset 0
+        let #broadcast_addr = alloc.alloc(PtxType::U32);
         kernel.push(PtxInstruction::Mov {
-            dst: #zero_off,
-            src: Operand::ImmU32(0),
+            dst: #broadcast_addr,
+            src: Operand::Reg(#smem_base),
             ty: PtxType::U32,
         });
         let #result = alloc.alloc(PtxType::F32);
         kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
             dst: #result,
-            addr: #zero_off,
+            addr: #broadcast_addr,
             ty: PtxType::F32,
         }));
     };

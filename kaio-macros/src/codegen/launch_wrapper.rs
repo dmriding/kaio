@@ -79,7 +79,16 @@ pub fn generate_launch_fn(sig: &KernelSignature) -> syn::Result<TokenStream> {
                  `block_size = (X, Y)` which accepts an explicit LaunchConfig instead.",
             )
         })?;
-        quote! { kaio::runtime::LaunchConfig::for_num_elems(#n_ident) }
+        {
+            let bs = sig.config.block_size;
+            quote! {
+                kaio::runtime::LaunchConfig {
+                    grid_dim: (#n_ident.div_ceil(#bs), 1, 1),
+                    block_dim: (#bs, 1, 1),
+                    shared_mem_bytes: 0,
+                }
+            }
+        }
     };
 
     Ok(quote! {

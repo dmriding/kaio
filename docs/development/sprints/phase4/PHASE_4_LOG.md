@@ -10,7 +10,7 @@ Master plan: [phase4_master_plan.md](phase4_master_plan.md)
 | Sprint | Scope | Status | Commit | Tests |
 |---|---|---|---|---|
 | [4.1](sprint_4_1.md) | FMA + 2D indices + 2D launch model | Done | (pending) | +5 host, +3 GPU = 203+27 |
-| [4.2](sprint_4_2.md) | Multi-allocation shared memory | Planned | — | — |
+| [4.2](sprint_4_2.md) | Multi-allocation shared memory | Done | (pending) | +3 GPU = 203+30 |
 | [4.3](sprint_4_3.md) | Naive tiled matmul kernel | Planned | — | — |
 | [4.4](sprint_4_4.md) | kaio-ops crate + host-side API | Planned | — | — |
 | [4.5](sprint_4_5.md) | Benchmark harness + cuBLAS baseline | Planned | — | — |
