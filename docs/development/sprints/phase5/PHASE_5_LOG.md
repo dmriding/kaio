@@ -9,7 +9,7 @@ Master plan: [phase5_master_plan.md](phase5_master_plan.md)
 
 | Sprint | Scope | Status | Commit | Tests |
 |---|---|---|---|---|
-| [5.1](sprint_5_1.md) | 2D reductions + DSL fixes | Pending | — | — |
+| [5.1](sprint_5_1.md) | 2D reductions + DSL fixes | Done | (pending) | +4 GPU tests |
 | [5.2](sprint_5_2.md) | Standard attention — forward pass | Pending | — | — |
 | [5.3](sprint_5_3.md) | Masking + validation | Pending | — | — |
 | [5.4](sprint_5_4.md) | FlashAttention — online softmax (stretch) | Pending | — | — |

@@ -57,16 +57,9 @@ pub fn lower_builtin(
         "shfl_sync_up" => lower_shfl_sync(ctx, "up", arg_regs, arg_types, span),
         "shfl_sync_bfly" => lower_shfl_sync(ctx, "bfly", arg_regs, arg_types, span),
 
-        // --- Reduction builtins (1D only — uses TidX for thread identity) ---
+        // --- Reduction builtins (1D and 2D) ---
+        // 2D kernels use linearized tid = tidx + tidy * block_dim_x
         "block_reduce_sum" | "block_reduce_max" => {
-            if ctx.block_size_y.is_some() {
-                return Err(syn::Error::new(
-                    span,
-                    "block_reduce_sum/max are not yet supported in 2D kernels \
-                     (block_size = (X, Y)). Reductions currently derive thread \
-                     identity from thread_idx_x only. Use 1D kernels for reductions.",
-                ));
-            }
             let mode = if name == "block_reduce_sum" {
                 "sum"
             } else {
@@ -545,6 +538,51 @@ fn lower_block_reduce(
 
     let num_warps_imm = num_warps;
 
+    // Build tid computation: linear tid for 2D, raw TidX for 1D.
+    // Row-major linearization: linear_tid = tidx + tidy * block_dim_x.
+    let tid_tokens = if let Some(bdx) = ctx.block_size_x {
+        let tidx_tmp = ctx.fresh_reg();
+        let tidy_tmp = ctx.fresh_reg();
+        let tidy_x_bdimx = ctx.fresh_reg();
+        quote! {
+            let #tid = alloc.alloc(PtxType::U32);
+            let #tidx_tmp = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Mov {
+                dst: #tidx_tmp,
+                src: Operand::SpecialReg(kaio::core::ir::SpecialReg::TidX),
+                ty: PtxType::U32,
+            });
+            let #tidy_tmp = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Mov {
+                dst: #tidy_tmp,
+                src: Operand::SpecialReg(kaio::core::ir::SpecialReg::TidY),
+                ty: PtxType::U32,
+            });
+            let #tidy_x_bdimx = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+                dst: #tidy_x_bdimx,
+                lhs: Operand::Reg(#tidy_tmp),
+                rhs: Operand::ImmU32(#bdx),
+                ty: PtxType::U32,
+            }));
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: #tid,
+                lhs: Operand::Reg(#tidx_tmp),
+                rhs: Operand::Reg(#tidy_x_bdimx),
+                ty: PtxType::U32,
+            }));
+        }
+    } else {
+        quote! {
+            let #tid = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Mov {
+                dst: #tid,
+                src: Operand::SpecialReg(kaio::core::ir::SpecialReg::TidX),
+                ty: PtxType::U32,
+            });
+        }
+    };
+
     let tokens = quote! {
         #smem_tokens
 
@@ -565,13 +603,8 @@ fn lower_block_reduce(
             ty: PtxType::F32,
         });
 
-        // Get thread index
-        let #tid = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Mov {
-            dst: #tid,
-            src: Operand::SpecialReg(kaio::core::ir::SpecialReg::TidX),
-            ty: PtxType::U32,
-        });
+        // Get thread index (linear tid for 2D, raw TidX for 1D)
+        #tid_tokens
 
         let #shfl_tmp = alloc.alloc(PtxType::U32);
 
