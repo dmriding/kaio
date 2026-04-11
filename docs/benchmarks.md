@@ -57,25 +57,27 @@ Requires NVIDIA GPU and CUDA toolkit (for cuBLAS).
 
 ---
 
-## Results — Phase 4 Baseline (Naive 16×16 Tiled MatMul)
+## Results — Phase 4 Optimized (Register-Tiled MatMul)
 
-**Date:** 2026-04-11 | **GPU:** RTX 4090 | **KAIO kernel:** naive 16×16 tiled, FMA inner loop
+**Date:** 2026-04-11 | **GPU:** RTX 4090 | **Kernels:** naive 16×16 + optimized 64×64 (4×4 reg tiling)
 
-| Size | KAIO (ms) | KAIO (TFLOPS) | cuBLAS (ms) | cuBLAS (TFLOPS) | Ratio |
-|------|-----------|--------------|-------------|----------------|-------|
-| 256×256×256 | 0.20 | 0.16 | 0.02 | 1.72 | 9.6% |
-| 512×512×512 | 0.29 | 0.92 | 0.02 | 10.78 | 8.5% |
-| 1024×1024×1024 | 0.71 | 3.02 | 0.06 | 37.15 | 8.1% |
-| 1024×2048×512 | 0.70 | 3.08 | 0.06 | 35.73 | 8.6% |
-| 2048×2048×2048 | 4.26 | 4.04 | 0.32 | 52.93 | 7.6% |
-| 4096×4096×4096 | 29.84 | 4.61 | 2.39 | 57.40 | 8.0% |
+| Size | Naive (TFLOPS) | Optimized (TFLOPS) | cuBLAS (TFLOPS) | vs cuBLAS | Speedup |
+|------|---------------|-------------------|----------------|-----------|---------|
+| 256² | 0.18 | 0.14 | 1.71 | 8.3% | 0.8× |
+| 512² | 1.06 | 1.00 | 10.96 | 9.1% | 0.9× |
+| 1024² | 3.10 | 5.96 | 37.61 | 15.8% | 1.9× |
+| 1024×2048×512 | 3.08 | 6.11 | 35.97 | 17.0% | 2.0× |
+| 2048² | 4.04 | 13.32 | 43.14 | 30.9% | 3.3× |
+| 4096² | 4.53 | 17.44 | 56.00 | 31.2% | 3.8× |
 
-**Analysis:** The naive tiled kernel achieves ~8% of cuBLAS across all
-sizes. This is expected for a correctness-first implementation without
-register tiling, bank conflict avoidance, or vectorized loads.
+**Analysis:**
+- Register tiling gives **3.3-3.8× speedup** over naive at large sizes
+- Optimized kernel peaks at **17.44 TFLOPS** (31.2% of cuBLAS at 4096²)
+- Small sizes (256-512) see no benefit — 64×64 tile overhead dominates
+- Gap to 60% likely requires vectorized loads (LDG.128) and/or larger
+  register tiles (8×8 per thread)
 
-Peak KAIO throughput: 4.61 TFLOPS at 4096².
-Peak cuBLAS throughput: 57.40 TFLOPS at 4096².
-
-**Next:** Sprint 4.6 (register tiling + optimization) targets ≥60% of
-cuBLAS at 2048×2048.
+**Kernel design parameters (optimized):**
+- BM=BN=64, BK=16, TM=TN=4
+- Shared: tile_a 64×17 + tile_b 16×65 (bank conflict padding)
+- 256 threads, 16 accumulators per thread

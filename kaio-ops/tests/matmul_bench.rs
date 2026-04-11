@@ -16,7 +16,7 @@
 use std::time::Instant;
 
 use kaio::prelude::*;
-use kaio_ops::matmul;
+use kaio_ops::{matmul, matmul_naive};
 
 // --- Deterministic random data ---
 
@@ -79,6 +79,35 @@ fn bench_kaio(
 
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     times[iters / 2] // median
+}
+
+fn bench_kaio_naive(
+    device: &KaioDevice,
+    a: &GpuBuffer<f32>,
+    b: &GpuBuffer<f32>,
+    c: &mut GpuBuffer<f32>,
+    m: u32,
+    n: u32,
+    k: u32,
+    warmup: usize,
+    iters: usize,
+) -> f64 {
+    for _ in 0..warmup {
+        matmul_naive(device, a, b, c, m, n, k).unwrap();
+    }
+    device.stream().synchronize().unwrap();
+
+    let mut times = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        device.stream().synchronize().unwrap();
+        let start = Instant::now();
+        matmul_naive(device, a, b, c, m, n, k).unwrap();
+        device.stream().synchronize().unwrap();
+        times.push(start.elapsed().as_secs_f64());
+    }
+
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    times[iters / 2]
 }
 
 // --- cuBLAS benchmark ---
@@ -218,10 +247,18 @@ fn benchmark_matmul() {
 
     eprintln!();
     eprintln!(
-        "{:<20} {:>12} {:>12} {:>12} {:>12} {:>8}",
-        "Size", "KAIO ms", "KAIO TFLOPS", "cuBLAS ms", "cuBLAS TFLOPS", "Ratio"
+        "{:<18} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
+        "Size",
+        "Naive ms",
+        "Naive TF",
+        "Opt ms",
+        "Opt TF",
+        "cuBLAS ms",
+        "cuBLAS TF",
+        "vs cuB",
+        "Speedup"
     );
-    eprintln!("{}", "-".repeat(80));
+    eprintln!("{}", "-".repeat(106));
 
     for &(m, n, k) in &sizes {
         let a_data = deterministic_data(m * k, 42);
@@ -229,19 +266,23 @@ fn benchmark_matmul() {
 
         let a = device.alloc_from(&a_data).unwrap();
         let b = device.alloc_from(&b_data).unwrap();
-        let mut c_kaio = device.alloc_zeros::<f32>(m * n).unwrap();
+        let mut c_naive = device.alloc_zeros::<f32>(m * n).unwrap();
+        let mut c_opt = device.alloc_zeros::<f32>(m * n).unwrap();
         let mut c_cublas = device.alloc_zeros::<f32>(m * n).unwrap();
 
-        let kaio_s = bench_kaio(
+        let naive_s = bench_kaio_naive(
             &device,
             &a,
             &b,
-            &mut c_kaio,
+            &mut c_naive,
             m as u32,
             n as u32,
             k as u32,
             5,
             20,
+        );
+        let opt_s = bench_kaio(
+            &device, &a, &b, &mut c_opt, m as u32, n as u32, k as u32, 5, 20,
         );
         let cublas_s = bench_cublas(
             &device,
@@ -255,23 +296,28 @@ fn benchmark_matmul() {
             20,
         );
 
-        let kaio_tflops = tflops(m, n, k, kaio_s);
-        let cublas_tflops = tflops(m, n, k, cublas_s);
-        let ratio = kaio_tflops / cublas_tflops * 100.0;
+        let naive_tf = tflops(m, n, k, naive_s);
+        let opt_tf = tflops(m, n, k, opt_s);
+        let cublas_tf = tflops(m, n, k, cublas_s);
+        let ratio = opt_tf / cublas_tf * 100.0;
+        let speedup = opt_tf / naive_tf;
 
         let label = format!("{m}×{n}×{k}");
 
         eprintln!(
-            "{:<20} {:>10.2}ms {:>10.2} {:>10.2}ms {:>10.2} {:>7.1}%",
+            "{:<18} {:>8.2}ms {:>8.2} {:>8.2}ms {:>8.2} {:>8.2}ms {:>8.2} {:>7.1}% {:>6.1}×",
             label,
-            kaio_s * 1000.0,
-            kaio_tflops,
+            naive_s * 1000.0,
+            naive_tf,
+            opt_s * 1000.0,
+            opt_tf,
             cublas_s * 1000.0,
-            cublas_tflops,
+            cublas_tf,
             ratio,
+            speedup,
         );
     }
 
     eprintln!();
-    eprintln!("Note: KAIO uses naive 16×16 tiled matmul. Optimization is Sprint 4.6.");
+    eprintln!("Naive = 16×16 tile, 1 output/thread | Opt = 64×64 tile, 4×4 reg tiling");
 }

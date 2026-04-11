@@ -22,3 +22,7 @@
 mod matmul_kernel;
 
 pub use matmul_kernel::matmul;
+
+// Expose naive kernel for benchmarking (not public API)
+#[doc(hidden)]
+pub use matmul_kernel::matmul_naive;
