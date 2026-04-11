@@ -126,6 +126,12 @@ fn run_matmul_test(m: usize, n: usize, k: usize, label: &str) {
             idx / n,
             idx % n,
         );
+        assert!(
+            rel_err < 1e-4,
+            "{label}: rel error {rel_err} at [{}, {}] (got {got}, expected {exp})",
+            idx / n,
+            idx % n,
+        );
     }
 
     eprintln!("{label} ({m}x{k} × {k}x{n}): max_abs={max_abs:.2e}, max_rel={max_rel:.2e}");
