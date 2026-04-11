@@ -293,12 +293,17 @@ for a complete end-to-end example.
 
 - [x] **Phase 1** — PTX codegen + runtime (IR -> PTX -> GPU execution)
 - [x] **Phase 2** — `#[gpu_kernel]` proc macro (arithmetic, control
-      flow, memory access, math builtins)
+  flow, memory access, math builtins)
 - [x] **Phase 3** — Loops, shared memory, reductions, softmax
 - [x] **Phase 4** — Tiled matmul (31% of cuBLAS), `kaio-ops` crate,
-      2D blocks, FMA, PTX inspection tools
+  2D blocks, FMA, PTX inspection tools
 - [x] **Phase 5** — Fused attention, FlashAttention, auto-tuning,
   crates.io v0.1.0
+- [ ] **Phase 6** — Tensor cores (`mma.sync` fp16/bf16), async copies
+  (`cp.async`), 60-70% cuBLAS target
+- [ ] **Phase 7** — Quantized kernels (INT8/INT4), training integration
+  (`kaio-candle` bridge)
+- [ ] **Phase 8** — PyO3 bindings (Python access to kaio-ops)
 
 See [docs/phases.md](docs/phases.md) for detailed plans and
 [CHANGELOG.md](CHANGELOG.md) for per-sprint progress.
