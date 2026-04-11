@@ -20,7 +20,7 @@ These gates apply to ALL phases. No phase is considered complete unless every ga
 |------|-------------|
 | **Windows** | All tests pass on Windows 10/11 with NVIDIA GPU |
 | **Linux** | All tests pass on Ubuntu 22.04+ with NVIDIA GPU |
-| **CI** | Automated test runs on both platforms (GitHub Actions, added Phase 3) |
+| **CI** | Automated test runs (GitHub Actions, Ubuntu-only for now; Windows planned for release) |
 
 ### Process
 
@@ -222,7 +222,7 @@ These are v0.1 targets. Performance optimization continues post-release.
 | P3 | `Cargo.toml` metadata: description, repository, keywords, categories | ☐ |
 | P4 | `CHANGELOG.md` covers all phases | ☐ (through Phase 3) |
 | P5 | `CONTRIBUTING.md` exists with dev setup instructions | ✅ |
-| P6 | GitHub Actions CI: Windows + Linux matrix | ✅ |
+| P6 | GitHub Actions CI: Windows + Linux matrix | ☐ (Ubuntu-only currently) |
 | P7 | All `#![deny(missing_docs)]` passes | ☐ |
 | P8 | r/rust post drafted and reviewed | ☐ |
 | P9 | Blog post (optional but recommended) | ☐ |
