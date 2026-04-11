@@ -231,7 +231,7 @@ pub fn attention(
 ///
 /// out = softmax(causal_mask(Q * K^T / sqrt(d_k))) * V
 ///
-/// Causal mask sets S[i,j] = -FLT_MAX where j > i, preventing
+/// Causal mask sets S\[i,j\] = -FLT_MAX where j > i, preventing
 /// attention to future positions. Standard for autoregressive models.
 ///
 /// Same constraints as [`attention()`]: f32, row-major, d_v == d_k,

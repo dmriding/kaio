@@ -14,7 +14,7 @@ Master plan: [phase5_master_plan.md](phase5_master_plan.md)
 | [5.3](sprint_5_3.md) | Masking + validation | Done | (pending) | +6 GPU tests |
 | [5.4](sprint_5_4.md) | FlashAttention — online softmax | Done | (pending) | +9 GPU tests |
 | [5.5](sprint_5_5.md) | Auto-tuner | Done | (pending) | +7 tests (1 host + 6 GPU) |
-| [5.6](sprint_5_6.md) | CI/CD + platform | Pending | — | — |
+| [5.6](sprint_5_6.md) | CI/CD + platform | Done | (pending) | Windows matrix + doc job |
 | [5.7](sprint_5_7.md) | v0.1.0 prep | Pending | — | — |
 | [5.8](sprint_5_8.md) | Community launch | Pending | — | — |
 
