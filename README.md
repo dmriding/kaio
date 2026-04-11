@@ -72,14 +72,14 @@ Use KAIO when you need to:
 - **Prototype GPU code fast** in a language you already know (Rust)
   without learning CUDA C++
 
-| | KAIO | cudarc | Candle / Burn | Raw CUDA |
-|---|---|---|---|---|
-| Write kernels in Rust | Yes | No (load PTX) | No | No |
-| Automatic PTX generation | Yes | No | N/A | No |
-| Windows support | Yes | Yes | Partial | Yes |
-| No CUDA toolkit needed | Yes | Yes | Varies | No |
-| Type-safe kernel signatures | Yes | No | N/A | No |
-| ML framework integration | Standalone | Standalone | Built-in | Manual |
+|                             | KAIO       | cudarc        | Candle / Burn | Raw CUDA |
+| --------------------------- | ---------- | ------------- | ------------- | -------- |
+| Write kernels in Rust       | Yes        | No (load PTX) | No            | No       |
+| Automatic PTX generation    | Yes        | No            | N/A           | No       |
+| Windows support             | Yes        | Yes           | Partial       | Yes      |
+| No CUDA toolkit needed      | Yes        | Yes           | Varies        | No       |
+| Type-safe kernel signatures | Yes        | No            | N/A           | No       |
+| ML framework integration    | Standalone | Standalone    | Built-in      | Manual   |
 
 ## The Problem
 
@@ -116,18 +116,19 @@ JIT-compiles at runtime — but it works, and Rust has no equivalent.
 
 Clone the repo and run:
 
-| Example | Description | Command |
-|---------|-------------|---------|
-| **vector_add** | Start here — minimal GPU kernel | `cargo run --example vector_add -p kaio` |
-| saxpy | Scalar parameter passing | `cargo run --example saxpy -p kaio` |
-| reduction | Shared memory + block reduction | `cargo run --example reduction -p kaio` |
-| matmul | Matrix multiply via kaio-ops API | `cargo run --example matmul -p kaio-ops` |
+| Example        | Description                      | Command                                  |
+| -------------- | -------------------------------- | ---------------------------------------- |
+| **vector_add** | Start here — minimal GPU kernel  | `cargo run --example vector_add -p kaio` |
+| saxpy          | Scalar parameter passing         | `cargo run --example saxpy -p kaio`      |
+| reduction      | Shared memory + block reduction  | `cargo run --example reduction -p kaio`  |
+| matmul         | Matrix multiply via kaio-ops API | `cargo run --example matmul -p kaio-ops` |
 
 ## Patterns
 
 Copy these skeletons, fill in your logic.
 
 **Bounds-checked element-wise:**
+
 ```rust
 #[gpu_kernel(block_size = 256)]
 fn my_kernel(input: &[f32], output: &mut [f32], n: u32) {
@@ -139,6 +140,7 @@ fn my_kernel(input: &[f32], output: &mut [f32], n: u32) {
 ```
 
 **Shared memory tiling:**
+
 ```rust
 #[gpu_kernel(block_size = 256)]
 fn tiled(data: &[f32], out: &mut [f32], n: u32) {
@@ -152,6 +154,7 @@ fn tiled(data: &[f32], out: &mut [f32], n: u32) {
 ```
 
 **Block reduction:**
+
 ```rust
 #[gpu_kernel(block_size = 256)]
 fn reduce(input: &[f32], out: &mut [f32], n: u32) {
@@ -164,23 +167,23 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 
 ## Supported Kernel Features
 
-| Feature | Syntax | Status |
-|---------|--------|--------|
-| Arithmetic | `+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `*=`, `/=` | Supported |
-| Comparisons | `<`, `<=`, `>`, `>=`, `==`, `!=` | Supported |
-| Control flow | `if`/`else`, `for`, `while` | Supported |
-| Array access | `a[idx]` (global memory) | Supported |
-| Shared memory | `shared_mem![f32; 256]` | Supported |
-| Synchronization | `bar_sync()` | Supported |
-| Warp shuffle | `shfl_sync_down/up/bfly()` | Supported |
-| Reductions | `block_reduce_sum()`, `block_reduce_max()` | Supported |
-| Type casts | `x as f32` | Supported |
-| Math builtins | `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max` | Supported |
-| Thread indices | `thread_idx_x()`, `block_idx_x()`, `block_dim_x()` | Supported |
-| FMA | `fma(a, b, c)` | Supported |
-| 2D blocks | `block_size = (16, 16)`, `thread_idx_y()` | Supported |
-| Tiled matmul | `kaio_ops::matmul()` ([31% of cuBLAS](docs/benchmarks.md)) | Supported |
-| Fused attention | FlashAttention-style | Phase 5 |
+| Feature         | Syntax                                                     | Status    |
+| --------------- | ---------------------------------------------------------- | --------- |
+| Arithmetic      | `+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `*=`, `/=`            | Supported |
+| Comparisons     | `<`, `<=`, `>`, `>=`, `==`, `!=`                           | Supported |
+| Control flow    | `if`/`else`, `for`, `while`                                | Supported |
+| Array access    | `a[idx]` (global memory)                                   | Supported |
+| Shared memory   | `shared_mem![f32; 256]`                                    | Supported |
+| Synchronization | `bar_sync()`                                               | Supported |
+| Warp shuffle    | `shfl_sync_down/up/bfly()`                                 | Supported |
+| Reductions      | `block_reduce_sum()`, `block_reduce_max()`                 | Supported |
+| Type casts      | `x as f32`                                                 | Supported |
+| Math builtins   | `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max`          | Supported |
+| Thread indices  | `thread_idx_x()`, `block_idx_x()`, `block_dim_x()`         | Supported |
+| FMA             | `fma(a, b, c)`                                             | Supported |
+| 2D blocks       | `block_size = (16, 16)`, `thread_idx_y()`                  | Supported |
+| Tiled matmul    | `kaio_ops::matmul()` ([31% of cuBLAS](docs/benchmarks.md)) | Supported |
+| Fused attention | FlashAttention-style                                       | Phase 5   |
 
 ## Limitations
 
@@ -217,13 +220,13 @@ KAIO is structured in four layers:
 +-------------------------------------------+
 ```
 
-| Crate | Description |
-|-------|-------------|
-| `kaio` | Umbrella crate — re-exports everything via `prelude` |
-| `kaio-macros` | `#[gpu_kernel]` proc macro |
-| `kaio-core` | PTX IR, instruction emitters, zero external dependencies |
+| Crate          | Description                                                             |
+| -------------- | ----------------------------------------------------------------------- |
+| `kaio`         | Umbrella crate — re-exports everything via `prelude`                    |
+| `kaio-macros`  | `#[gpu_kernel]` proc macro                                              |
+| `kaio-core`    | PTX IR, instruction emitters, zero external dependencies                |
 | `kaio-runtime` | CUDA driver wrapper via [cudarc](https://github.com/coreylowman/cudarc) |
-| `kaio-ops` | Pre-built GPU operations (matmul, more planned) |
+| `kaio-ops`     | Pre-built GPU operations (matmul, more planned)                         |
 
 ## Target Hardware
 
@@ -288,16 +291,16 @@ for a complete end-to-end example.
 
 - [x] **Phase 1** — PTX codegen + runtime (IR -> PTX -> GPU execution)
 - [x] **Phase 2** — `#[gpu_kernel]` proc macro (arithmetic, control
-  flow, memory access, math builtins)
+      flow, memory access, math builtins)
 - [x] **Phase 3** — Loops, shared memory, reductions, softmax
 - [x] **Phase 4** — Tiled matmul (31% of cuBLAS), `kaio-ops` crate,
-  2D blocks, FMA, PTX inspection tools
+      2D blocks, FMA, PTX inspection tools
 - [ ] **Phase 5** — Fused attention, auto-tuning, crates.io v0.1.0
 
 See [docs/phases.md](docs/phases.md) for detailed plans and
 [CHANGELOG.md](CHANGELOG.md) for per-sprint progress.
 
-## Gotchas
+## Common Pitfalls
 
 - **Always bounds-check array writes.** `if idx < n` before every
   global memory access — out-of-bounds GPU writes corrupt memory
