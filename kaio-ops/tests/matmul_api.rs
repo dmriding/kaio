@@ -117,15 +117,12 @@ fn api_matmul_non_aligned() {
     run_matmul_test(17, 33, 19, "non_aligned");
 }
 
-// --- Validation tests (no GPU needed) ---
+// --- Validation tests (need GPU for buffer allocation, not for the check itself) ---
 
 #[test]
+#[ignore] // requires NVIDIA GPU (buffer allocation needs a device)
 fn api_matmul_rejects_zero_m() {
-    let device = KaioDevice::new(0);
-    if device.is_err() {
-        return; // skip if no GPU — validation is host-side but needs device for buffers
-    }
-    let device = device.unwrap();
+    let device = KaioDevice::new(0).expect("GPU required");
     let a = device.alloc_zeros::<f32>(1).unwrap();
     let b = device.alloc_zeros::<f32>(1).unwrap();
     let mut c = device.alloc_zeros::<f32>(1).unwrap();
@@ -137,6 +134,7 @@ fn api_matmul_rejects_zero_m() {
 }
 
 #[test]
+#[ignore] // requires NVIDIA GPU (buffer allocation needs a device)
 fn api_matmul_rejects_small_buffer() {
     let device = KaioDevice::new(0);
     if device.is_err() {

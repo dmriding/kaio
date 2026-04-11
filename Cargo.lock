@@ -75,6 +75,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaio-ops"
+version = "0.0.3"
+dependencies = [
+ "kaio",
+]
+
+[[package]]
 name = "kaio-runtime"
 version = "0.0.3"
 dependencies = [
