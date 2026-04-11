@@ -15,7 +15,7 @@ Master plan: [phase3_master_plan.md](phase3_master_plan.md)
 | [3.4](sprint_3_4.md) | Barrier + shuffle built-in functions | Done | `6fde908` | +9 = 198+12 GPU |
 | [3.5](sprint_3_5.md) | Reduction primitives (`block_reduce_sum/max`) | Done | `24efd87` | +2 GPU = 198+14 GPU |
 | [3.6](sprint_3_6.md) | Softmax kernel | Done | `b9c9473` | +5 GPU = 198+19 GPU |
-| [3.7](sprint_3_7.md) | PyTorch validation + accuracy suite | Planning | — | — |
+| [3.7](sprint_3_7.md) | PyTorch validation + accuracy suite | Done | `pending` | +5 GPU = 198+24 GPU |
 | [3.8](sprint_3_8.md) | Polish + coverage (65%) + docs | Planning | — | — |
 
 ## Key References

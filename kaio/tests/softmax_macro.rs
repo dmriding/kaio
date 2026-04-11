@@ -194,3 +194,144 @@ fn softmax_sums_to_one() {
         "softmax output should sum to 1.0, got {sum}"
     );
 }
+
+// --- Sprint 3.7: Accuracy suite at varying numerical complexity ---
+
+#[test]
+#[ignore] // requires NVIDIA GPU
+fn softmax_accuracy_small_range() {
+    let device = KaioDevice::new(0).expect("GPU required");
+
+    // Small values: [0.0, 0.1, 0.2, ..., 12.7]
+    let row_len = 128u32;
+    let input_host: Vec<f32> = (0..row_len).map(|i| i as f32 * 0.1).collect();
+    let expected = cpu_softmax(&input_host);
+
+    let input = device.alloc_from(&input_host).expect("alloc input");
+    let mut output = device
+        .alloc_zeros::<f32>(row_len as usize)
+        .expect("alloc output");
+
+    softmax_row::launch(&device, &input, &mut output, row_len).expect("launch failed");
+
+    let result = output.to_host(&device).expect("to_host");
+    let err = max_abs_error(&result, &expected);
+    assert!(
+        err < 1e-5,
+        "softmax_accuracy_small_range: max abs error {err} exceeds 1e-5"
+    );
+}
+
+#[test]
+#[ignore] // requires NVIDIA GPU
+fn softmax_accuracy_medium_range() {
+    let device = KaioDevice::new(0).expect("GPU required");
+
+    // Medium range spanning [-50, 50], full block_size utilization
+    let row_len = 256u32;
+    let input_host: Vec<f32> = (0..row_len)
+        .map(|i| (i as f32) * (100.0 / 256.0) - 50.0)
+        .collect();
+    let expected = cpu_softmax(&input_host);
+
+    let input = device.alloc_from(&input_host).expect("alloc input");
+    let mut output = device
+        .alloc_zeros::<f32>(row_len as usize)
+        .expect("alloc output");
+
+    softmax_row::launch(&device, &input, &mut output, row_len).expect("launch failed");
+
+    let result = output.to_host(&device).expect("to_host");
+    let err = max_abs_error(&result, &expected);
+    assert!(
+        err < 1e-5,
+        "softmax_accuracy_medium_range: max abs error {err} exceeds 1e-5"
+    );
+}
+
+#[test]
+#[ignore] // requires NVIDIA GPU
+fn softmax_accuracy_large_range() {
+    let device = KaioDevice::new(0).expect("GPU required");
+
+    // Large values: [900.0, 900.1, ..., 912.7] — tests exp stability
+    let row_len = 128u32;
+    let input_host: Vec<f32> = (0..row_len).map(|i| 900.0 + i as f32 * 0.1).collect();
+    let expected = cpu_softmax(&input_host);
+
+    let input = device.alloc_from(&input_host).expect("alloc input");
+    let mut output = device
+        .alloc_zeros::<f32>(row_len as usize)
+        .expect("alloc output");
+
+    softmax_row::launch(&device, &input, &mut output, row_len).expect("launch failed");
+
+    let result = output.to_host(&device).expect("to_host");
+    let err = max_abs_error(&result, &expected);
+    assert!(
+        err < 1e-4,
+        "softmax_accuracy_large_range: max abs error {err} exceeds 1e-4"
+    );
+}
+
+#[test]
+#[ignore] // requires NVIDIA GPU
+fn softmax_negative_values() {
+    let device = KaioDevice::new(0).expect("GPU required");
+
+    // All negative: [-12.8, -12.7, ..., -0.1]
+    let row_len = 128u32;
+    let input_host: Vec<f32> = (0..row_len)
+        .map(|i| -((row_len - i) as f32) * 0.1)
+        .collect();
+    let expected = cpu_softmax(&input_host);
+
+    let input = device.alloc_from(&input_host).expect("alloc input");
+    let mut output = device
+        .alloc_zeros::<f32>(row_len as usize)
+        .expect("alloc output");
+
+    softmax_row::launch(&device, &input, &mut output, row_len).expect("launch failed");
+
+    let result = output.to_host(&device).expect("to_host");
+    let err = max_abs_error(&result, &expected);
+    assert!(
+        err < 1e-5,
+        "softmax_negative_values: max abs error {err} exceeds 1e-5"
+    );
+
+    // Should still be valid probabilities
+    for (i, &val) in result.iter().enumerate() {
+        assert!(
+            val > 0.0 && val < 1.0,
+            "element {i} = {val}, not a valid probability"
+        );
+    }
+}
+
+#[test]
+#[ignore] // requires NVIDIA GPU
+fn softmax_mixed_sign() {
+    let device = KaioDevice::new(0).expect("GPU required");
+
+    // Alternating: [-5.0, 5.0, -5.0, 5.0, ...]
+    let row_len = 128u32;
+    let input_host: Vec<f32> = (0..row_len)
+        .map(|i| if i % 2 == 0 { -5.0f32 } else { 5.0f32 })
+        .collect();
+    let expected = cpu_softmax(&input_host);
+
+    let input = device.alloc_from(&input_host).expect("alloc input");
+    let mut output = device
+        .alloc_zeros::<f32>(row_len as usize)
+        .expect("alloc output");
+
+    softmax_row::launch(&device, &input, &mut output, row_len).expect("launch failed");
+
+    let result = output.to_host(&device).expect("to_host");
+    let err = max_abs_error(&result, &expected);
+    assert!(
+        err < 1e-5,
+        "softmax_mixed_sign: max abs error {err} exceeds 1e-5"
+    );
+}
