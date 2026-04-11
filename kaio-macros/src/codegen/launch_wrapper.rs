@@ -75,8 +75,8 @@ pub fn generate_launch_fn(sig: &KernelSignature) -> syn::Result<TokenStream> {
             syn::Error::new(
                 sig.name_span,
                 "GPU kernel must have at least one `u32` parameter for element count \
-                 (used by LaunchConfig::for_num_elems). For 2D kernels, use \
-                 `block_size = (X, Y)` which accepts an explicit LaunchConfig instead.",
+                 (used to compute grid size). For 2D kernels, use \
+                 `block_size = (X, Y)` which accepts a `grid: (u32, u32, u32)` parameter.",
             )
         })?;
         {
