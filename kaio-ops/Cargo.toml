@@ -12,3 +12,6 @@ categories = ["hardware-support", "science"]
 
 [dependencies]
 kaio = { version = "0.0.3", path = "../kaio" }
+
+[dev-dependencies]
+cudarc = { version = "0.19", default-features = false, features = ["driver", "std", "dynamic-loading", "cuda-12080", "cublas"] }
