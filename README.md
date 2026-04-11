@@ -97,9 +97,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The `#[gpu_kernel]` macro compiles `saxpy` to PTX at build time and
-generates a typed `saxpy::launch()` function with correct argument
-marshaling. No unsafe in user code.
+The `#[gpu_kernel]` macro lowers `saxpy` to PTX and generates a typed
+`saxpy::launch()` function with correct argument marshaling. PTX is
+generated once at first call and cached. No unsafe in user code.
 
 ## Supported Kernel Features
 
@@ -127,7 +127,7 @@ KAIO is structured in four layers:
 ┌─────────────────────────────────────────┐
 │  Layer 4: Block-Level Operations        │  tiled matmul, fused attention
 ├─────────────────────────────────────────┤
-│  Layer 3: #[gpu_kernel] Proc Macro      │  Rust syntax → PTX at build time
+│  Layer 3: #[gpu_kernel] Proc Macro      │  Rust syntax → PTX automatically
 ├─────────────────────────────────────────┤
 │  Layer 2: Runtime (kaio-runtime)        │  device memory, kernel launch
 ├─────────────────────────────────────────┤

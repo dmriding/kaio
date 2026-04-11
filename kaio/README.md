@@ -2,122 +2,63 @@
 
 **Rust-native GPU kernel authoring framework.**
 
-KAIO (πῦρ — fire) lets developers write GPU compute kernels in Rust and
-compile them to PTX for execution on NVIDIA GPUs. It is a Rust alternative
-to OpenAI's Triton, targeting Windows and Linux from day one, with
-compile-time PTX emission and Rust's type-safety guarantees.
+KAIO (καίω — to kindle, to ignite) lets developers write GPU compute
+kernels in Rust and lower them to PTX for execution on NVIDIA GPUs.
+A Rust alternative to OpenAI's Triton — Windows + Linux, automatic PTX
+generation, Rust type safety, no CUDA C++ toolchain required.
 
-## Why KAIO?
+## Quick Start
 
-- **Cross-platform from day one.** Windows and Linux. `cargo build` just works.
-- **Compile-time PTX emission.** Kernels compile during `cargo build` via proc macros. Zero cold-start.
-- **Rust type safety.** Catch out-of-bounds indexing, dtype mismatches, and synchronization errors at compile time.
-- **Embeddable anywhere.** Use from Rust natively, from C/C++ via FFI, from Python via PyO3.
+```rust
+use kaio::prelude::*;
+
+#[gpu_kernel(block_size = 256)]
+fn saxpy(x: &[f32], y: &mut [f32], alpha: f32, n: u32) {
+    let idx = thread_idx_x() + block_idx_x() * block_dim_x();
+    if idx < n {
+        y[idx] = alpha * x[idx] + y[idx];
+    }
+}
+```
+
+The `#[gpu_kernel]` macro lowers `saxpy` to PTX and generates a typed
+`saxpy::launch()` function. PTX is generated once at first call and
+cached for the process lifetime.
+
+## Features
+
+| Feature | Syntax | Status |
+|---------|--------|--------|
+| Arithmetic | `+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `*=`, `/=` | ✅ |
+| Comparisons | `<`, `<=`, `>`, `>=`, `==`, `!=` | ✅ |
+| Control flow | `if`/`else`, `for`, `while` | ✅ |
+| Array access | `a[idx]` (global memory) | ✅ |
+| Shared memory | `shared_mem![f32; 256]` | ✅ |
+| Synchronization | `bar_sync()` | ✅ |
+| Warp shuffle | `shfl_sync_down/up/bfly()` | ✅ |
+| Reductions | `block_reduce_sum()`, `block_reduce_max()` | ✅ |
+| Type casts | `x as f32` | ✅ |
+| Math builtins | `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max` | ✅ |
+| Thread indices | `thread_idx_x()`, `block_idx_x()`, `block_dim_x()` | ✅ |
 
 ## Architecture
 
-KAIO is structured in four layers:
-
-```
-Layer 4: Block-Level Operations        (tiled matmul, fused attention)
-Layer 3: Proc Macro DSL                (#[gpu_kernel], user-facing API)
-Layer 2: Runtime                       (kernel launch, memory mgmt via cudarc)
-Layer 1: PTX Codegen                   (instruction emission, IR)
-```
-
-## Crate Structure
-
 | Crate | Description |
 |-------|-------------|
-| `kaio` | Umbrella crate — re-exports `kaio-core` and `kaio-runtime` |
-| `kaio-core` | PTX IR types, instruction emitters, PtxWriter |
-| `kaio-runtime` | CUDA driver API wrapper, kernel launch, device memory |
+| `kaio` | Umbrella crate — re-exports everything via `prelude` |
+| `kaio-macros` | `#[gpu_kernel]` proc macro |
+| `kaio-core` | PTX IR, instruction emitters, zero external dependencies |
+| `kaio-runtime` | CUDA driver wrapper via cudarc |
 
-## Current Status
+## Status
 
-**Phase 1 — PTX Foundation — complete.** The IR and runtime layers can
-construct, emit, load, and execute GPU kernels. The `vector_add` kernel
-runs on real hardware (RTX 4090, verified on both single-block and
-multi-block launches).
+**Phase 3 complete** — loops, shared memory, reductions, softmax.
+Phase 4 (tiled matmul, block-level API) is next. This is early
+development software. API will change.
 
-**Phase 2 — Proc Macro DSL** is next: `#[gpu_kernel]` attribute macro
-that transforms Rust function syntax into PTX. See
-[docs/phases.md](docs/phases.md) for the full roadmap.
-
-### Phase 1 Example (IR API)
-
-```rust
-use kaio_core::emit::{Emit, PtxWriter};
-use kaio_core::instr::{ArithOp, MadMode, special};
-use kaio_core::instr::control::{CmpOp, ControlOp};
-use kaio_core::instr::memory::MemoryOp;
-use kaio_core::ir::*;
-use kaio_core::types::PtxType;
-
-// Build a vector_add kernel via the IR API
-let mut alloc = RegisterAllocator::new();
-let mut kernel = PtxKernel::new("vector_add");
-kernel.add_param(PtxParam::pointer("a_ptr", PtxType::F32));
-kernel.add_param(PtxParam::pointer("b_ptr", PtxType::F32));
-kernel.add_param(PtxParam::pointer("c_ptr", PtxType::F32));
-kernel.add_param(PtxParam::scalar("n", PtxType::U32));
-
-// ... (build instructions using alloc + kernel.push()) ...
-
-// Emit to PTX text
-let mut module = PtxModule::new("sm_89");
-module.add_kernel(kernel);
-let mut w = PtxWriter::new();
-module.emit(&mut w).unwrap();
-let ptx_text = w.finish();
-
-// Load and run on GPU
-use kaio_runtime::{KaioDevice, LaunchConfig};
-let device = KaioDevice::new(0)?;
-let module = device.load_ptx(&ptx_text)?;
-let func = module.function("vector_add")?;
-// ... allocate buffers, launch kernel, read results ...
-```
-
-See [kaio-runtime/tests/vector_add_e2e.rs](kaio-runtime/tests/vector_add_e2e.rs)
-for the complete working example.
-
-## Target Hardware
-
-- **Primary:** NVIDIA GPUs, SM 7.0+ (Volta and newer)
-- **Development GPU:** RTX 4090 (SM 8.9, Ada Lovelace)
-- **Platforms:** Windows 10/11, Linux (Ubuntu 22.04+)
-
-## Building
-
-```sh
-# Requires Rust 1.94+ (pinned via rust-toolchain.toml)
-cargo build --workspace
-cargo test --workspace           # host-only tests (no GPU required)
-cargo test -p kaio-runtime -- --ignored   # GPU tests (requires NVIDIA GPU)
-```
-
-## Development
-
-Sprint-by-sprint progress with full architectural decision records:
-- [Phase 1 Sprint Log](docs/development/PHASE_1_LOG.md)
-- [Sprint docs with reasoning traces](docs/development/sprints/)
-- [CHANGELOG](CHANGELOG.md)
+See the [repository](https://github.com/dmriding/kaio) for the full
+roadmap, CHANGELOG, and development logs.
 
 ## License
 
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or
-  <http://opensource.org/licenses/MIT>)
-
-at your option.
-
-## Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in the work by you, as defined in the Apache-2.0
-license, shall be dual licensed as above, without any additional terms or
-conditions.
+Licensed under either of Apache-2.0 or MIT at your option.
