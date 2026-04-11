@@ -90,7 +90,13 @@ pub fn generate_build_ptx(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Re
             #shared_mem_diagnostic
 
             if std::env::var("KAIO_DUMP_PTX").is_ok() {
-                eprintln!("=== KAIO PTX: {} ===\n{}", #kernel_name, ptx);
+                let dump_dir = std::env::var("OUT_DIR")
+                    .unwrap_or_else(|_| ".".to_string());
+                let dump_path = format!("{}/{}.ptx", dump_dir, #kernel_name);
+                match std::fs::write(&dump_path, &ptx) {
+                    Ok(()) => eprintln!("KAIO: wrote {}", dump_path),
+                    Err(e) => eprintln!("KAIO: failed to write {}: {}", dump_path, e),
+                }
             }
 
             ptx

@@ -164,7 +164,8 @@ pub fn build_vector_add_ptx() -> String {
 
     kernel.set_registers(alloc.into_allocated());
 
-    let mut module = PtxModule::new("sm_89");
+    let mut module =
+        PtxModule::new(&std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_70".to_string()));
     module.add_kernel(kernel);
 
     let mut w = PtxWriter::new();
@@ -244,7 +245,8 @@ pub fn build_shared_mem_ptx() -> String {
 
     kernel.set_registers(alloc.into_allocated());
 
-    let mut module = PtxModule::new("sm_89");
+    let mut module =
+        PtxModule::new(&std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_70".to_string()));
     module.add_kernel(kernel);
 
     let mut w = PtxWriter::new();

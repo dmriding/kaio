@@ -10,8 +10,8 @@
 
 KAIO (from the Greek καίω — _to kindle, to ignite_) lets you write GPU
 compute kernels in Rust and compile them to PTX for execution on NVIDIA
-GPUs. Cross-platform (Windows + Linux), compile-time PTX emission, and
-Rust's type safety — no CUDA C++, no Python, no runtime JIT.
+GPUs. Cross-platform (Windows + Linux), automatic PTX generation, and
+Rust's type safety — no CUDA C++, no Python, no CUDA toolkit required.
 
 ## The Problem
 
@@ -50,11 +50,11 @@ Write a GPU kernel in Rust. `cargo build`. It runs on your GPU. That's it.
 ## Why KAIO?
 
 - **No CUDA C++.** Write kernels in Rust syntax you already know.
-- **No Python.** No Triton, no conda environments, no JIT warm-up.
+- **No Python.** No Triton, no conda environments, no Python runtime.
 - **Windows + Linux.** Triton is Linux-only. KAIO works everywhere
   `cargo build` works.
-- **Compile-time PTX.** Kernels compile during `cargo build` via proc
-  macros. Zero cold-start latency.
+- **Automatic PTX.** The `#[gpu_kernel]` macro lowers your Rust code to
+  PTX. Generated once at first call, cached for the process lifetime.
 - **Type safe.** Catch dtype mismatches, undefined variables, and
   invalid kernel signatures at compile time — not as silent GPU
   corruption at runtime.

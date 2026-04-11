@@ -9,6 +9,7 @@
 *.swp
 *.swo
 *~
+.codex
 
 # OS
 Thumbs.db
@@ -17,4 +18,5 @@ Thumbs.db
 # Project-specific
 triton/
 docs/CC_PROMPT_NAME_RESERVATION.md
+docs/development/review1/
 synapse.toml

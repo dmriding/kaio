@@ -723,9 +723,9 @@ mod tests {
         }
 
         // Suffixed f64
-        match parse_single_expr(quote! { 3.14f64 }) {
+        match parse_single_expr(quote! { 2.75f64 }) {
             KernelExpr::LitFloat(val, ty, _) => {
-                assert!((val - 3.14).abs() < 0.001);
+                assert!((val - 2.75).abs() < 0.001);
                 assert_eq!(ty, KernelType::F64);
             }
             _ => panic!("expected LitFloat"),

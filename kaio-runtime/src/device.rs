@@ -166,12 +166,17 @@ mod tests {
     #[ignore]
     fn device_info_compute_capability() {
         let info = device().info().expect("info() failed");
-        // RTX 4090 = SM 8.9
-        assert_eq!(
-            info.compute_capability,
-            (8, 9),
-            "expected SM 8.9 for RTX 4090, got {:?}",
-            info.compute_capability
+        // Any SM 7.0+ GPU should work (Volta and newer)
+        let (major, _minor) = info.compute_capability;
+        assert!(
+            major >= 7,
+            "expected SM 7.0+ GPU, got SM {}.{}",
+            info.compute_capability.0,
+            info.compute_capability.1,
+        );
+        eprintln!(
+            "GPU compute capability: SM {}.{}",
+            info.compute_capability.0, info.compute_capability.1
         );
     }
 

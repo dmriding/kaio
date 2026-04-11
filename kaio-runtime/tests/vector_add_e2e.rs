@@ -170,7 +170,8 @@ fn build_vector_add_ptx() -> String {
 
     kernel.set_registers(alloc.into_allocated());
 
-    let mut module = PtxModule::new("sm_89");
+    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_70".to_string());
+    let mut module = PtxModule::new(&sm);
     module.add_kernel(kernel);
 
     let mut w = PtxWriter::new();
