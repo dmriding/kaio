@@ -218,6 +218,8 @@ fn lower_fma(
         ));
     }
     check_f32(&arg_types[0], span)?;
+    check_f32(&arg_types[1], span)?;
+    check_f32(&arg_types[2], span)?;
 
     let a = &arg_regs[0];
     let b = &arg_regs[1];

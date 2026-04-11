@@ -56,9 +56,18 @@ pub fn generate_launch_fn(sig: &KernelSignature) -> syn::Result<TokenStream> {
     }
 
     let launch_config_expr = if is_2d {
-        // 2D: add explicit LaunchConfig parameter
-        launch_params.push(quote! { cfg: kaio::runtime::LaunchConfig });
-        quote! { cfg }
+        // 2D: accept grid dims, hardcode block dims from attribute.
+        // This prevents mismatches between declared block_size and runtime config.
+        let bx = sig.config.block_size;
+        let by = sig.config.block_size_y.unwrap(); // safe: is_2d checked
+        launch_params.push(quote! { grid: (u32, u32, u32) });
+        quote! {
+            kaio::runtime::LaunchConfig {
+                grid_dim: grid,
+                block_dim: (#bx, #by, 1),
+                shared_mem_bytes: 0,
+            }
+        }
     } else {
         // 1D: infer grid from last u32 (existing behavior)
         let n_ident = elem_count_ident.ok_or_else(|| {

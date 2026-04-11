@@ -4,7 +4,7 @@
 //! `LaunchConfig` works end-to-end on real GPU hardware.
 
 use kaio::prelude::*;
-use kaio::runtime::LaunchConfig;
+// 2D kernels accept grid: (u32, u32, u32) — block_dim is hardcoded from the attribute.
 
 /// Simple 2D kernel: each thread writes `row * cols + col` to output.
 /// Tests 2D thread indexing + explicit LaunchConfig.
@@ -40,13 +40,8 @@ fn kernel_2d_write_indices() {
 
     let mut out = device.alloc_zeros::<f32>(n).unwrap();
 
-    let cfg = LaunchConfig {
-        grid_dim: (cols.div_ceil(16), rows.div_ceil(16), 1),
-        block_dim: (16, 16, 1),
-        shared_mem_bytes: 0,
-    };
-
-    write_2d_indices::launch(&device, &mut out, rows, cols, cfg).unwrap();
+    let grid = (cols.div_ceil(16), rows.div_ceil(16), 1);
+    write_2d_indices::launch(&device, &mut out, rows, cols, grid).unwrap();
 
     let result = out.to_host(&device).unwrap();
     for r in 0..rows {
@@ -73,13 +68,8 @@ fn kernel_2d_non_aligned_dims() {
 
     let mut out = device.alloc_zeros::<f32>(n).unwrap();
 
-    let cfg = LaunchConfig {
-        grid_dim: (cols.div_ceil(16), rows.div_ceil(16), 1),
-        block_dim: (16, 16, 1),
-        shared_mem_bytes: 0,
-    };
-
-    write_2d_indices::launch(&device, &mut out, rows, cols, cfg).unwrap();
+    let grid = (cols.div_ceil(16), rows.div_ceil(16), 1);
+    write_2d_indices::launch(&device, &mut out, rows, cols, grid).unwrap();
 
     let result = out.to_host(&device).unwrap();
     for r in 0..rows {

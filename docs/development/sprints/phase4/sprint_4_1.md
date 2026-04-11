@@ -68,8 +68,9 @@ design. No new work needed.
    4.1 doesn't use them. Sprint 4.3 matmul will need individual dimensions
    for tile size calculations. Avoids a refactor.
 
-3. **FMA always uses .rn rounding** — IEEE round-to-nearest. No mode
-   parameter (unlike Mad which has .lo/.hi/.wide). FMA is float-only.
+3. **FMA is f32-only for now** — uses `.rn` rounding (IEEE round-to-nearest).
+   No mode parameter (unlike Mad which has .lo/.hi/.wide). All three
+   arguments are validated as f32. f64 support deferred.
 
 ## Tests Added
 
