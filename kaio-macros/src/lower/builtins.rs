@@ -877,7 +877,7 @@ fn lower_shfl_sync(
 mod tests {
     use super::*;
 
-    fn f32_arg(ctx: &mut LoweringContext) -> (Vec<Ident>, Vec<KernelType>) {
+    fn f32_arg(_ctx: &mut LoweringContext) -> (Vec<Ident>, Vec<KernelType>) {
         let reg = Ident::new("_kaio_r0", Span::call_site());
         (vec![reg], vec![KernelType::F32])
     }
