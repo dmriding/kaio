@@ -296,16 +296,11 @@ pub fn lower_stmts(ctx: &mut LoweringContext, stmts: &[KernelStmt]) -> syn::Resu
 pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<TokenStream> {
     match stmt {
         // let x = expr; — lower value, register in locals
-        KernelStmt::Let {
-            name, value, span, ..
-        } => {
+        KernelStmt::Let { name, value, .. } => {
             let (reg, ty, expr_tokens) = lower_expr(ctx, value)?;
-            if ctx.locals.contains_key(name) {
-                return Err(syn::Error::new(
-                    *span,
-                    format!("variable `{name}` already defined in this kernel"),
-                ));
-            }
+            // Allows variable shadowing (e.g., reusing `i` in multiple loops).
+            // Each `let` allocates a fresh register — the old register just
+            // becomes unreferenced in subsequent code.
             // If the value expression reuses an existing register (e.g.,
             // `let i = tid` where tid is a Var lookup with empty tokens),
             // allocate a fresh register and copy the value. This prevents

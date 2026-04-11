@@ -8,7 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Phase 2 Complete
+## [Unreleased] — Phase 3 Complete
+
+### Added — Phase 3: Loops, Reductions & Softmax
+- **`for`/`while` loop support** in `#[gpu_kernel]`: `for i in start..end`
+  with unsuffixed literal coercion (`0..n` where `n: u32`), `while condition`,
+  compound assignment (`+=`, `-=`, `*=`, `/=`), loop variable scoping.
+- **Shared memory** (`shared_mem![T; N]`): declare block-scoped SRAM buffers
+  in kernel code, accessed via `sdata[idx]` with automatic `ld.shared`/
+  `st.shared` dispatch. 32-bit addressing distinct from 64-bit global memory.
+- **Barrier synchronization** (`bar_sync()`): `bar.sync 0` for block-level
+  thread synchronization.
+- **Warp shuffle** (`shfl_sync_down/up/bfly(val, delta, width)`): warp-level
+  data exchange via `shfl.sync.{down,up,bfly}.b32`. Full-warp (width=32) only.
+- **Block-level reductions** (`block_reduce_sum(val)`, `block_reduce_max(val)`):
+  ~35-instruction expansion using warp shuffle tree + shared memory cross-warp
+  reduction + broadcast to all threads. Auto-allocated `_kaio_reduce_smem`.
+- **Softmax kernel** validated on RTX 4090: row-wise numerically-stable softmax
+  using while loops, `block_reduce_max`, `block_reduce_sum`, `exp()`. 10 GPU
+  tests including accuracy suite (< 1e-5 error vs CPU reference), edge cases
+  (all-zeros, uniform, large values, negative, mixed-sign).
+- **`Operand::SharedAddr`** in kaio-core for loading named shared allocation
+  base addresses.
+- **`SharedDecl`** struct + `PtxKernel::shared_decls` for shared memory
+  declarations in PTX kernel preamble.
+- **6 new kaio-core instruction variants**: `LdShared`, `StShared` (MemoryOp),
+  `BarSync`, `ShflSyncDown`, `ShflSyncUp`, `ShflSyncBfly` (ControlOp).
+- `KAIO_SM_TARGET` environment variable: set PTX target (default `sm_70`
+  for maximum GPU compatibility, override with e.g. `KAIO_SM_TARGET=sm_89`).
+- 200 host tests + 24 GPU tests across workspace.
+
+### Fixed — Phase 3
+- **Cvt rounding modifier**: `cvt.f32.u32` now correctly emits `cvt.rn.f32.u32`
+  (round to nearest for int→float), `cvt.rzi.u32.f32` (round toward zero for
+  float→int, matching Rust `as` semantics). Previously rejected by ptxas.
+- **Let-binding register aliasing**: `let mut i = tid` now copies to a fresh
+  register instead of aliasing. Prevents mutation of source variable when the
+  new binding is reassigned (e.g., `i += stride` no longer corrupts `tid`).
+- **Variable shadowing**: `let mut i = tid;` can now be used multiple times in
+  the same kernel (e.g., once per while loop). Previously errored with
+  "variable already defined".
+
+### Changed — Phase 3
+- SM target default changed from hardcoded `sm_89` to configurable via
+  `KAIO_SM_TARGET` env var (default `sm_70`).
 
 ### Added — Phase 2: Proc Macro DSL
 - **`#[gpu_kernel]` proc macro** (`kaio-macros`): full pipeline from Rust function

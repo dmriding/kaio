@@ -12,6 +12,7 @@ use std::fmt;
 
 use super::writer::PtxWriter;
 use crate::ir::{PtxInstruction, PtxKernel, PtxModule, Register};
+use crate::types::PtxType;
 
 /// Trait for emitting PTX text from an IR node.
 ///
@@ -142,7 +143,28 @@ impl Emit for PtxInstruction {
                 dst_ty,
                 src_ty,
             } => {
-                let mnemonic = format!("cvt{}{}", dst_ty.ptx_suffix(), src_ty.ptx_suffix());
+                // PTX requires rounding modifiers for conversions involving floats.
+                let rounding = match (dst_ty, src_ty) {
+                    // int → float: round to nearest even
+                    (
+                        PtxType::F32 | PtxType::F64,
+                        PtxType::S32 | PtxType::U32 | PtxType::S64 | PtxType::U64,
+                    ) => ".rn",
+                    // float → int: round toward zero (matches Rust `as` semantics)
+                    (
+                        PtxType::S32 | PtxType::U32 | PtxType::S64 | PtxType::U64,
+                        PtxType::F32 | PtxType::F64,
+                    ) => ".rzi",
+                    // float → float: round to nearest (e.g., f64 → f32)
+                    (PtxType::F32, PtxType::F64) | (PtxType::F64, PtxType::F32) => ".rn",
+                    // int → int or same type: no rounding modifier
+                    _ => "",
+                };
+                let mnemonic = format!(
+                    "cvt{rounding}{}{}",
+                    dst_ty.ptx_suffix(),
+                    src_ty.ptx_suffix()
+                );
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, src])
             }
             Self::Label(name) => {
@@ -222,7 +244,36 @@ mod tests {
             src_ty: PtxType::S32,
         };
         instr.emit(&mut w).unwrap();
-        assert_eq!(w.finish(), "    cvt.f32.s32 %f0, %r0;\n");
+        assert_eq!(w.finish(), "    cvt.rn.f32.s32 %f0, %r0;\n");
+    }
+
+    #[test]
+    fn emit_cvt_float_to_int() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let instr = PtxInstruction::Cvt {
+            dst: reg(RegKind::R, 0, PtxType::U32),
+            src: reg(RegKind::F, 0, PtxType::F32),
+            dst_ty: PtxType::U32,
+            src_ty: PtxType::F32,
+        };
+        instr.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    cvt.rzi.u32.f32 %r0, %f0;\n");
+    }
+
+    #[test]
+    fn emit_cvt_int_to_int() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let instr = PtxInstruction::Cvt {
+            dst: reg(RegKind::R, 0, PtxType::S32),
+            src: reg(RegKind::R, 1, PtxType::U32),
+            dst_ty: PtxType::S32,
+            src_ty: PtxType::U32,
+        };
+        instr.emit(&mut w).unwrap();
+        // No rounding modifier for int → int
+        assert_eq!(w.finish(), "    cvt.s32.u32 %r0, %r1;\n");
     }
 
     #[test]
