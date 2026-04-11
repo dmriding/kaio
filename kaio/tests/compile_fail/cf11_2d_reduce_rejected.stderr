@@ -1,5 +1,0 @@
-error: block_reduce_sum/max are not yet supported in 2D kernels (block_size = (X, Y)). Reductions currently derive thread identity from thread_idx_x only. Use 1D kernels for reductions.
-  --> tests/compile_fail/cf11_2d_reduce_rejected.rs:11:19
-   |
-11 |         let sum = block_reduce_sum(val);
-   |                   ^^^^^^^^^^^^^^^^

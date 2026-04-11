@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Pre-built GPU operations for KAIO. Matrix multiplication and more."
+description = "Pre-built GPU operations for KAIO. Matrix multiplication, attention, auto-tuning."
 keywords = ["gpu", "cuda", "matmul", "linear-algebra", "compute"]
 categories = ["hardware-support", "science"]
 readme = "README.md"
@@ -17,7 +17,9 @@ include = [
 ]
 
 [dependencies]
-kaio = { version = "0.0.4", path = "../kaio" }
+kaio = { version = "0.1.0", path = "../kaio" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 cudarc = { version = "0.19", default-features = false, features = ["driver", "std", "dynamic-loading", "cuda-12080", "cublas"] }

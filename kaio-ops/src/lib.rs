@@ -20,9 +20,16 @@
 //! matmul(&device, &a, &b, &mut c, m, n, k)?;
 //! ```
 
+mod attention_kernel;
 mod matmul_kernel;
+mod tuner;
 
+pub use attention_kernel::{attention, attention_causal, attention_flash, attention_flash_causal};
 pub use matmul_kernel::matmul;
+pub use tuner::{
+    attention_auto, attention_auto_causal, matmul_auto, tune_attention, tune_attention_causal,
+    tune_matmul,
+};
 
 // Expose naive kernel for benchmarking (not public API)
 #[doc(hidden)]

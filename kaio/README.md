@@ -64,6 +64,9 @@ It is the layer you use when you need more control than they provide.
 | FMA | `fma(a, b, c)` | Supported |
 | 2D blocks | `block_size = (16, 16)`, `thread_idx_y()` | Supported |
 | Tiled matmul | `kaio_ops::matmul()` (31% of cuBLAS) | Supported |
+| Attention | `kaio_ops::attention()`, `attention_causal()` | Supported |
+| FlashAttention | `kaio_ops::attention_flash()` — O(d_k) memory | Supported |
+| Auto-tuner | `kaio_ops::tune_matmul()`, `matmul_auto()` | Supported |
 
 ## Architecture
 
@@ -73,21 +76,21 @@ It is the layer you use when you need more control than they provide.
 | `kaio-macros` | `#[gpu_kernel]` proc macro |
 | `kaio-core` | PTX IR, instruction emitters, zero external dependencies |
 | `kaio-runtime` | CUDA driver wrapper via cudarc |
-| `kaio-ops` | Pre-built GPU operations (matmul, more planned) |
+| `kaio-ops` | Pre-built GPU operations (matmul, attention, auto-tuner) |
 
 ## Limitations
 
 - NVIDIA only (SM 7.0+) — no AMD, no Intel
 - Not cuBLAS-level performance (matmul reaches 31%)
 - DSL subset of Rust — no closures, traits, generics, or `&&`/`||`
-- Block reductions are 1D only
+- FlashAttention requires d_k <= 256
 - No autograd, no multi-GPU
-- Pre-1.0 — API will change
+- API may change
 
 ## Status
 
-**Phase 4 complete** — tiled matmul (31% of cuBLAS sgemm on RTX 4090),
-`kaio-ops` crate, 2D thread blocks, FMA, PTX inspection tools.
+**Phase 5 complete** — attention (standard + FlashAttention), causal
+masking, auto-tuner, Windows CI. v0.1.0.
 
 See the [repository](https://github.com/dmriding/kaio) for full
 documentation, runnable examples, copy-paste patterns, and development

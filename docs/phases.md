@@ -15,6 +15,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 **Status:** Complete
 
 **Deliverables:**
+
 - `kaio-core` crate with PTX IR types and instruction emission
 - `kaio-runtime` crate with basic device management and kernel launch
 - One working end-to-end kernel: `vector_add`
@@ -22,6 +23,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 - Kernel executes on a real GPU and produces correct output
 
 **What Gets Built:**
+
 - PTX IR structs: `PtxModule`, `PtxKernel`, `PtxInstruction`, `PtxRegister`, `PtxParam`
 - Instruction emitters for Priority 1 (arithmetic) and Priority 2 (memory) instructions
 - Special register access (`%tid.x`, `%ctaid.x`, `%ntid.x`)
@@ -53,6 +55,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 **Status:** Complete
 
 **Deliverables:**
+
 - `kaio-macros` crate with `#[gpu_kernel]` attribute macro
 - Macro parses a subset of Rust (arithmetic, comparisons, `if/else`, `let`, array indexing)
 - Macro emits PTX via `kaio-core` at compile time
@@ -61,6 +64,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 - Compile-fail tests for invalid kernel signatures (via `trybuild`)
 
 **What Gets Built:**
+
 - `syn`-based parser for the supported Rust subset
 - AST → KAIO IR lowering
 - Type inference and validation within kernel bodies
@@ -91,6 +95,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 **Status:** Complete (commit `0691be8`, 2026-04-11)
 
 **Deliverables:**
+
 - `for` and `while` loop support in `#[gpu_kernel]`
 - Shared memory declaration and access (`shared_mem![T; N]`)
 - `bar_sync()` (thread block synchronization)
@@ -125,6 +130,7 @@ and introduce `kaio-ops` as a host-side operations library.
 **Status:** Complete (v0.0.4, 2026-04-11)
 
 **Deliverables:**
+
 - `kaio-ops` crate with `matmul()` host-side API
 - FMA instruction + 2D thread blocks + 2D grid launch model
 - Multi-allocation shared memory (named PTX symbols)
@@ -159,50 +165,87 @@ abstractions provide analyzable access patterns.
 
 ## Phase 5: Fused Attention & Community Release
 
-**Goal:** Implement fused multi-head attention and publish KAIO to crates.io.
+**Goal:** Implement fused multi-head attention, add it to `kaio-ops`,
+build an auto-tuning framework, and ship v0.1.0 to crates.io.
 
-**Duration:** 3-4 weeks
+**Status:** Complete (v0.1.0, 2026-04-12)
 
 **Deliverables:**
-- Fused multi-head attention kernel (FlashAttention-style)
-- Attention kernel validated against PyTorch `F.scaled_dot_product_attention`
-- Auto-tuning: grid search over block sizes and tiling configurations
-- `kaio` published to crates.io as v0.1.0
-- Documentation: README, API docs, tutorial kernels, architecture guide
+
+- 2D block reduction support (hard gate — resolved Sprint 5.1)
+- Standard attention: Q×K^T → scale → mask → softmax → ×V
+- FlashAttention-style online softmax (stretch goal)
+- `kaio_ops::attention()` validated against CPU reference
+- Auto-tuner: block/tile size grid search with JSON cache
+- CI pipeline: Windows + Linux matrix
+- v0.1.0 published to crates.io
 - Blog post / r/rust announcement
 
-**What Gets Built:**
-- Fused attention: Q×K^T → scale → mask → softmax → ×V in one kernel
-- Online softmax (numerically stable, no full materialization of attention matrix)
-- Auto-tuner: compile multiple kernel variants, benchmark, select best
-- `cargo doc` documentation for all public APIs
-- Tutorial examples: vector_add, saxpy, gelu, softmax, matmul, attention
-- CI pipeline: Windows + Linux, test + clippy + fmt
-
-**Forge Sprint Breakdown:**
-| Sprint | Scope | Agent Work |
-|--------|-------|------------|
-| 5.1 | Fused attention — forward pass | Q×K^T → scale → softmax → ×V |
-| 5.2 | Online softmax implementation | Numerically stable streaming softmax |
-| 5.3 | Masking support | Causal mask, padding mask |
-| 5.4 | Auto-tuner framework | Config grid, benchmark runner, selection |
-| 5.5 | Documentation | API docs, README, tutorials |
-| 5.6 | CI/CD pipeline | GitHub Actions: Windows + Linux matrix |
-| 5.7 | Crates.io publication prep | Metadata, license, dry-run publish |
+**Sprint Breakdown (actual):**
+| Sprint | Scope | Key Deliverable |
+|--------|-------|-----------------|
+| 5.1 | 2D reductions (hard gate) | Linear tid for 2D blocks, unblocks attention |
+| 5.2 | Standard attention — forward pass | Q×K^T → scale → softmax → ×V, single-head |
+| 5.3 | Masking + validation | Causal mask, CPU reference validation, DSL friction report |
+| 5.4 | FlashAttention — online softmax (stretch) | Tiled attention, O(n) memory |
+| 5.5 | Auto-tuner | Block/tile size grid search, benchmark runner |
+| 5.6 | CI/CD + platform | Windows CI, Linux verification |
+| 5.7 | v0.1.0 prep | API stability review, cargo doc, publish |
 | 5.8 | Community launch | Blog post, r/rust, benchmarks |
 
-**Key Risk:** FlashAttention is algorithmically complex. Mitigation: start with standard attention (materialize full attention matrix), optimize to FlashAttention incrementally.
+**Key Decisions:** Standard attention first (5.2-5.3), FlashAttention
+second (5.4) — same pattern as naive → optimized matmul in Phase 4.
+FlashAttention is a stretch goal; Phase 5 ships with standard attention
+if FlashAttention is not stable. Sprint logs in
+[docs/development/sprints/phase5/](development/sprints/phase5/).
+
+**Key Risk:** FlashAttention (online softmax with running correction,
+tiled Q/K/V, output rescaling) is the hardest sprint in the project.
+Mitigation: standard attention baseline validates correctness before
+optimization; 5.4 is internally split into online softmax in isolation,
+then full tiled attention.
 
 ---
 
-## Post-v0.1 Roadmap (Not Scoped Yet)
+## Post-v0.1 Roadmap
 
-These are future directions, not commitments:
+These are future directions, not commitments. Ordered by expected
+impact.
 
-- **Backward pass / autodiff:** Enable training, not just inference
-- **Quantized kernels:** INT8/INT4 for efficient inference
-- **Multi-GPU:** Kernel launch across multiple devices
-- **AMD ROCm support:** Emit GCN/CDNA ISA instead of PTX
-- **PyO3 bindings:** Use KAIO kernels from Python
-- **Tensor core ops:** `mma` instructions for fp16/bf16 matmul
-- **Async memory copies:** `cp.async` for Ampere+ architectures
+### Phase 6 — Tensor Cores + Async Copies
+
+The single biggest performance unlock. Replace scalar FMA with
+`mma.sync` instructions for fp16/bf16 matrix operations — realistically
+gets matmul from 31% to 60-70% of cuBLAS. Paired with `cp.async` for
+Ampere+ double buffering (load next tile while computing current). The
+tiled matmul and attention infrastructure from Phases 4-5 is the
+foundation; this swaps the inner loop.
+
+### Phase 7 — Quantized Kernels + Training Integration
+
+Two items that serve different audiences but similar complexity.
+**Quantized kernels:** INT8/INT4 dequantize-matmul for efficient
+inference — the operation every local LLM runner needs, currently
+locked behind CUDA C++ in GGUF/GPTQ/AWQ. Depends on tensor cores.
+**Training integration:** Hand-written backward kernels for attention
+and matmul, plus a `kaio-candle` bridge crate implementing candle's
+`CustomOp` trait. Not autodiff — KAIO provides the kernel, the
+framework provides the graph. This is how Triton is actually used:
+you write forward and backward kernels, register them with
+`torch.autograd.Function`, and the framework handles the rest.
+
+### Phase 8 — PyO3 Bindings
+
+Thin Python wrapper around `kaio-ops` functions. If KAIO has
+tensor-core matmul and fused attention that works on Windows, Python
+users gain access to GPU kernels without Triton's Linux-only
+constraint. Low implementation effort (PyO3 is straightforward),
+high reach.
+
+### Unscoped — Community-Driven
+
+- **Multi-GPU:** Kernel launch across multiple devices. Requires
+  NCCL-style communication primitives. Deferred until there's demand.
+- **AMD ROCm:** HIP compatibility path rather than a native GCN/CDNA
+  emitter. The tooling gap is large and the Windows story is
+  nonexistent. Community contributions welcome.

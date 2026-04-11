@@ -1,6 +1,6 @@
 # Phase 4 Master Plan — Tiled MatMul & Block-Level API
 
-**Status:** In Progress
+**Status:** Complete (v0.0.4, 2026-04-11)
 **Depends on:** Phase 3 complete (commit `0691be8`)
 **Reviewed by:** Codex 5.4 (readiness review), Claude Opus 4.6
 
@@ -26,7 +26,7 @@ matmul(&device, &a, &b, &mut c, m, n, k)?;
 
 ## Key Architectural Decisions
 
-### 1. Launch Model: Explicit LaunchConfig for 2D Kernels
+### 1. Launch Model: Grid Tuple for 2D Kernels
 
 The current launch wrapper infers grid size from the last `u32` parameter
 via `LaunchConfig::for_num_elems()`. This is fundamentally incompatible
@@ -34,18 +34,17 @@ with 2D matmul where grid shape depends on `(M, N, tile_size)`.
 
 **Decision:** Keep 1D behavior for `block_size = N` (backward compatible).
 Add `block_size = (X, Y)` tuple syntax for 2D kernels. 2D kernels generate
-`launch()` that takes an explicit `LaunchConfig` parameter.
+`launch()` that takes an explicit `grid: (u32, u32, u32)` tuple parameter.
 
 ```rust
 #[gpu_kernel(block_size = 256)]        // 1D: existing, grid inferred
-#[gpu_kernel(block_size = (16, 16))]   // 2D: new, explicit LaunchConfig
+#[gpu_kernel(block_size = (16, 16))]   // 2D: caller passes grid tuple
 ```
 
-**Why not option A (infer 2D grid from params)?** Grid dimensions depend
-on tile size AND matrix dimensions — application logic the macro can't know.
-
-**Why not option B (1D with div/mod decomposition)?** Produces suboptimal
-PTX and fights the natural 2D indexing model.
+**Note:** The original plan proposed an explicit `LaunchConfig` struct
+parameter. During implementation, this was simplified to a plain
+`(u32, u32, u32)` grid tuple appended to the `launch()` signature.
+This is simpler and matches CUDA's grid-launch model more directly.
 
 ### 2. FMA Instruction
 
@@ -86,12 +85,16 @@ Fifth crate to publish to crates.io.
 
 ### 6. Performance Target
 
-- **Target:** ≥60% of cuBLAS `cublasSgemm` at 2048×2048 f32
+- **Original target:** ≥60% of cuBLAS `cublasSgemm` at 2048×2048 f32
+- **Actual result:** 31% of cuBLAS at 4096×4096 (17.44 TFLOPS vs
+  56.00 TFLOPS on RTX 4090). Documented honestly in `docs/benchmarks.md`.
 - **Metric:** TFLOPS = 2 × M × N × K / median_time / 1e12
 - **Methodology:** 5 warm-up launches, 20 timed, report median
 - **Timing:** Kernel execution only (no alloc/transfer)
-- **Expectation:** Naive matmul (Sprint 4.3) ≈ 10-20% of cuBLAS.
-  Register tiling (Sprint 4.6) is where 60%+ comes from.
+- **What shipped:** Naive matmul (Sprint 4.3) ≈ 8% of cuBLAS.
+  Register-tiled (Sprint 4.6, 64×64 tiles, 4×4 per thread) reached
+  31%. Remaining gap requires vectorized loads (LDG.128) and double
+  buffering — deferred to Phase 6.
 
 ## Sprint Plan
 
@@ -104,7 +107,8 @@ Fifth crate to publish to crates.io.
 | [4.5](sprint_4_5.md) | Benchmark harness + cuBLAS baseline | 4.4 |
 | [4.6](sprint_4_6.md) | Register tiling + optimization | 4.5 |
 | [4.7](sprint_4_7.md) | PTX inspection + performance documentation | 4.6 |
-| [4.8](sprint_4_8.md) | Polish + integration tests + docs | All |
+| [4.8](sprint_4_8.md) | Polish + integration tests + publish | All |
+| [4.9](sprint_4_9.md) | Adoption polish — examples + README | 4.8 |
 
 ## Dependency Graph
 
@@ -116,11 +120,14 @@ Fifth crate to publish to crates.io.
                                                               4.7 (PTX inspection)
                                                                     ↓
                                                               4.8 (polish)
+                                                                    ↓
+                                                              4.9 (adoption)
 ```
 
 All sprints are sequential. 4.1 and 4.2 are infrastructure, 4.3 is proof
 of concept, 4.4-4.5 are packaging and measurement, 4.6 is optimization,
-4.7 is developer tooling, 4.8 is polish.
+4.7 is developer tooling, 4.8 is polish, 4.9 is adoption (examples,
+README, patterns).
 
 **Note:** Compile-time coalescing analysis (originally planned for 4.7)
 is deferred to Phase 5+ when `block_load`/`block_store` abstractions

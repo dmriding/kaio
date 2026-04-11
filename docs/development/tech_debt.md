@@ -5,13 +5,11 @@ addressed before v0.1.0 release. Organized by priority.
 
 ## High Priority (before Phase 5)
 
-### block_reduce_* 2D support
-Reductions derive thread identity from `TidX` only. In 2D kernels
-(`block_size = (X, Y)`), multiple rows alias the same warp slots.
-Currently rejected at compile time for 2D kernels (Sprint 4.2 review).
-Fix: use linear tid = `thread_idx_x + block_dim_x * thread_idx_y`.
-**Blocking:** any kernel combining 2D blocks with reductions.
-**Added:** Sprint 4.2 | **Sprint:** Phase 4.6+ or Phase 5
+### ~~block_reduce_* 2D support~~ RESOLVED (Sprint 5.1)
+Reductions now compute linear tid = `tidx + tidy * block_dim_x` for
+2D kernels. 1D kernels unchanged (zero extra instructions). Tested
+with square (16x16), asymmetric (32x8), and identity-based 2D blocks.
+**Resolved:** Sprint 5.1
 
 ### Host-level codegen regression tests
 Critical fixes (launch config block_dim, shared addressing) are only
