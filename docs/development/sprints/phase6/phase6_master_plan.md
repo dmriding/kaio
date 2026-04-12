@@ -1,7 +1,11 @@
 # Phase 6 Master Plan — Tensor Cores + Async Copies
 
-**Status:** Planning
+**Status:** In progress (6.1–6.4 complete; 6.5–6.8 pending)
 **Depends on:** Phase 5 complete (v0.1.0, commit `bbc1c4d`)
+**Current branch tip:** `c3c1c6a` (Sprint 6.4 log-fill)
+
+See [PHASE_6_LOG.md](PHASE_6_LOG.md) for per-sprint commit hashes
+and test counts.
 
 ## Goal
 
@@ -152,7 +156,13 @@ No implicit assumptions, no runtime failure as discovery mechanism.
    single-instruction test before full kernel.
 2. **Mixed precision** — fp16 inputs → fp32 accumulation. Need
    appropriate test tolerances and user documentation.
-3. **SM gating** — tensor-core path must not launch on SM < 7.0.
+3. **SM gating** — tensor-core path must not launch on SM < 8.0.
+   Phase 6's `mma.sync.m16n8k16` and `cp.async` both require Ampere+
+   (SM 8.0+). Earlier shapes (Volta `m8n8k4`, Turing `m16n8k8`) are
+   out of scope. Both `matmul_tc` and `matmul_tc_async` enforce this
+   via a runtime `device.info()` check; Sprint 6.5 will centralize
+   the enforcement through `PtxModule::validate()` via
+   `KaioDevice::load_module`.
 4. **IR/DSL divergence** — if IR becomes "where real performance
    lives," DSL becomes "demo layer." Keep IR internal to kaio-ops.
 

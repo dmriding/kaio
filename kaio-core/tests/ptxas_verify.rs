@@ -1,10 +1,16 @@
-//! Belt-and-suspenders verification: emit vector_add PTX and verify it
-//! with ptxas (NVIDIA's offline PTX assembler).
+//! Belt-and-suspenders verification: emit PTX and verify it with
+//! ptxas (NVIDIA's offline PTX assembler).
 //!
-//! Soft-skip: if ptxas is not in PATH, the test passes without verification.
-//! This means CI without CUDA toolkit will show this test as "passed" even
-//! though no verification occurred. The eprintln! output makes this visible
-//! when running with --nocapture.
+//! **All tests are `#[ignore]`** — run them via `cargo test -- --ignored`
+//! on a machine with the CUDA toolkit installed. They were previously
+//! unmarked and would **soft-skip** (pass without running ptxas) when
+//! ptxas wasn't in PATH, which meant default CI on Linux without the
+//! CUDA toolkit reported green without doing any actual verification.
+//! Marking them `#[ignore]` aligns the gate with Phase 6's reality:
+//! Dave's Windows dev box with `--ignored` is the canonical verification
+//! surface, not the stock GitHub Actions runner. The soft-skip below
+//! stays as a secondary safety for anyone who runs `--ignored` on a
+//! machine without ptxas.
 //!
 //! Uses `KAIO_SM_TARGET` env var (default `sm_70`) for portability across GPUs.
 
@@ -17,6 +23,7 @@ fn sm_target() -> String {
 }
 
 #[test]
+#[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
 fn ptxas_verify_vector_add() {
     // Soft-skip: passes without verification if ptxas not in PATH
     let ptxas_check = std::process::Command::new("ptxas")
@@ -72,6 +79,7 @@ fn sm_target_ampere_or_better() -> String {
 }
 
 #[test]
+#[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
 fn ptxas_verify_mma_sync() {
     let ptxas_check = std::process::Command::new("ptxas")
         .arg("--version")
@@ -110,6 +118,7 @@ fn ptxas_verify_mma_sync() {
 }
 
 #[test]
+#[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
 fn ptxas_verify_mma_sync_shared() {
     let ptxas_check = std::process::Command::new("ptxas")
         .arg("--version")
@@ -148,6 +157,7 @@ fn ptxas_verify_mma_sync_shared() {
 }
 
 #[test]
+#[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
 fn ptxas_verify_cp_async() {
     let ptxas_check = std::process::Command::new("ptxas")
         .arg("--version")
@@ -185,6 +195,7 @@ fn ptxas_verify_cp_async() {
 }
 
 #[test]
+#[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
 fn ptxas_verify_shared_mem() {
     let ptxas_check = std::process::Command::new("ptxas")
         .arg("--version")

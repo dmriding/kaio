@@ -146,3 +146,31 @@ f16 load + packed storage + f32 conversion in the tensor-core path,
 which is indirect coverage. A dedicated scalar-f16 GPU roundtrip
 test would close the gap explicitly.
 **Added:** Sprint 6.2 (retroactive 6.1 gap) | **Sprint:** TBD
+
+### `ptxas_verify` tests mutate process-global `KAIO_SM_TARGET`
+
+Three of the `kaio-core/tests/ptxas_verify.rs` tests
+(`ptxas_verify_mma_sync`, `ptxas_verify_mma_sync_shared`,
+`ptxas_verify_cp_async`) call `unsafe { std::env::set_var("KAIO_SM_TARGET",
+...) }` to force an Ampere-or-better target for the PTX they're about
+to verify. The test binary's single-threaded default makes this safe
+in practice, but there's no harness-level enforcement (no
+`#[serial]`, no cargo-nextest isolation), and any future parallel
+test that reads `KAIO_SM_TARGET` could race against these writes.
+
+Not a correctness issue in the PTX itself — the test harness's
+default `--test-threads=1` inside a single binary keeps this
+serialized — but it's a hygiene gap that would bite if someone runs
+with `--test-threads=N` or a future test starts mutating env vars
+from another thread. Candidates:
+
+1. Replace `set_var` with a per-test PTX re-build path that accepts
+   the SM target as an argument, sidestepping the env var entirely.
+2. Add a `serial_test` dependency and gate the affected tests.
+3. Document the constraint and leave it.
+
+Option 1 is cleanest. The `build_mma_sync_ptx` / `build_cp_async_ptx`
+helpers in `tests/common/mod.rs` currently read `KAIO_SM_TARGET`
+internally — parameterize them to take an SM target instead, and
+the env-var mutation disappears.
+**Added:** Sprint 6.4 (Codex adversarial review 2026-04-12) | **Sprint:** TBD
