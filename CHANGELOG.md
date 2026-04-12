@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
+## [Unreleased] — Phase 6: Tensor Cores & Async Copies
+
+Branch: `phase6`. In progress toward v0.2.0.
+
+### Added — Sprint 6.1 (fp16/bf16 types)
+- `PtxType::F16` / `PtxType::BF16` with `.f16` / `.bf16` PTX suffixes.
+- `RegKind::H` (`%h`) / `RegKind::Hb` (`%hb`) register classes with
+  independent counters from `%r`/`%f`.
+- `cvt` rounding modes generalized for float-to-float (incl. half)
+  conversions — emits `.rn` consistently.
+- `half` crate as kaio-core's first dependency; cudarc `f16` feature
+  enabled. `GpuBuffer<f16>` / `GpuBuffer<bf16>` roundtrip on the device.
+- `half::f16` and `half::bf16` implement `GpuType`.
+
+### Added — Sprint 6.2 (mma.sync + cp.async + fragments)
+- **`TensorCoreOp::MmaSync`** with `MmaShape::M16N8K16` — emits
+  `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32` (and the `bf16`
+  variant). Ampere+ (SM 8.0+) only.
+- **Typed fragment containers** — `FragmentA` (4 × `.b32` packed half2),
+  `FragmentB` (2 × `.b32` packed half2), `FragmentC` (4 × `.f32`). Pure
+  register bags with `pub` fields; helpers (`alloc_a/b/c`,
+  `load_fragment_*_global_*`, `store_fragment_c_global_row`) live as
+  free functions in `kaio-core::fragment`.
+- **`RegisterAllocator::alloc_packed_half2`** — explicit allocator for
+  the `.b32` registers `mma.sync` expects for A/B fragments.
+- **`MemoryOp::CpAsync*`** variants: `CpAsyncCaSharedGlobal`
+  (`cp.async.ca.shared.global [shared], [global], N` for N ∈ {4,8,16}),
+  `CpAsyncCommitGroup`, `CpAsyncWaitGroup { n }`. Size validated at
+  construction via `MemoryOp::new_cp_async_ca`.
+- **`PtxModule::validate()`** + `ValidationError::SmTooLow` — rejects
+  kernels at emit time when they use features (`mma.sync`, `cp.async`)
+  requiring a higher target SM than the module declares. Surfaced via
+  `kaio-runtime::KaioDevice::load_module`.
+- **`KaioDevice::load_module(&PtxModule)`** — preferred entrypoint for
+  in-memory modules; validates before handing text to the driver.
+- **Gate test** `mma_sync_m16n8k16_fragment_gate` — single mma.sync on
+  known-value 16×16 × 16×8 inputs, bit-exact assertion (passes on RTX 4090).
+- **Smoke test** `cp_async_ca_roundtrip_4_floats` — primitive global →
+  shared → global roundtrip via `cp.async.ca` + `commit_group` +
+  `wait_group 0` (passes on RTX 4090).
+- ptxas verification for `mma.sync` and `cp.async` at `sm_80+`.
+- `KernelStats`: `mma`, `cp_async`, `cp_async_commit`, `cp_async_wait`.
+
+### Changed — Phase 6
+- Phase 6 master plan corrected: `mma.sync.m16n8k16` requires SM 8.0+
+  (Ampere), not SM 7.0+ (Volta). Earlier Volta/Turing shapes (`m8n8k4`,
+  `m16n8k8`) are out of scope.
+
 ## [0.1.0] — Phase 5: Fused Attention & Community Release
 
 ### Added — Phase 5

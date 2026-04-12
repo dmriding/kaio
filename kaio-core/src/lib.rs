@@ -15,6 +15,7 @@
 #![warn(missing_docs)]
 
 pub mod emit;
+pub mod fragment;
 pub mod instr;
 pub mod ir;
 pub mod types;

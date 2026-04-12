@@ -98,6 +98,75 @@ pub enum MemoryOp {
         /// Source register (generic-space address from `ld.param`).
         src: Register,
     },
+    /// Asynchronous global→shared copy, cache-at-all-levels variant:
+    /// `cp.async.ca.shared.global [dst_shared], [src_global], size_bytes;`
+    ///
+    /// Issues a non-blocking transfer from global memory into shared
+    /// memory without tying up registers. The copy is in-flight after
+    /// this instruction; use [`CpAsyncCommitGroup`](Self::CpAsyncCommitGroup)
+    /// to delimit a batch and [`CpAsyncWaitGroup`](Self::CpAsyncWaitGroup)
+    /// to synchronize. Requires **SM 8.0+ (Ampere)**.
+    ///
+    /// `size_bytes` must be one of 4, 8, or 16 (validated at construction
+    /// via [`MemoryOp::new_cp_async_ca`](Self::new_cp_async_ca)).
+    ///
+    /// Example: `cp.async.ca.shared.global [%r0], [%rd3], 16;`
+    ///
+    /// *Placement note:* cp.async lives in `MemoryOp` for Sprint 6.2
+    /// because semantically it is a memory op. The commit/wait variants
+    /// are pipeline-state operations and may relocate to a dedicated
+    /// `PipelineOp` category in Sprint 6.4 once double-buffering patterns
+    /// exercise the state machine.
+    CpAsyncCaSharedGlobal {
+        /// Register holding the shared-memory destination offset.
+        dst_shared: Register,
+        /// Register holding the global-memory source address (`.to.global`).
+        src_global: Register,
+        /// Copy size in bytes: must be 4, 8, or 16.
+        size_bytes: u8,
+    },
+    /// Commit all pending `cp.async` operations into a new async group:
+    /// `cp.async.commit_group;`
+    ///
+    /// Groups are numbered implicitly from 0 (most-recently committed)
+    /// upward. Used in conjunction with
+    /// [`CpAsyncWaitGroup`](Self::CpAsyncWaitGroup) to block until a
+    /// specific group completes. Requires **SM 8.0+**.
+    CpAsyncCommitGroup,
+    /// Wait until at most `n` async copy groups remain in-flight:
+    /// `cp.async.wait_group n;`
+    ///
+    /// `wait_group 0` waits for all outstanding groups to complete
+    /// (the common one-stage-pipeline case). For double-buffered
+    /// kernels, `wait_group 1` is used to block on the N-1'th group
+    /// while issuing the N'th. Requires **SM 8.0+**.
+    CpAsyncWaitGroup {
+        /// Number of outstanding groups still permitted after this wait.
+        n: u8,
+    },
+}
+
+impl MemoryOp {
+    /// Construct a [`CpAsyncCaSharedGlobal`](Self::CpAsyncCaSharedGlobal),
+    /// validating the size byte count.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size_bytes` is not one of `4`, `8`, or `16` — the
+    /// only sizes PTX accepts for `cp.async.ca`. PTX won't catch this
+    /// until ptxas runs, and the error there is cryptic, so we fail
+    /// loudly at construction time.
+    pub fn new_cp_async_ca(dst_shared: Register, src_global: Register, size_bytes: u8) -> Self {
+        assert!(
+            matches!(size_bytes, 4 | 8 | 16),
+            "cp.async.ca size must be 4, 8, or 16 bytes (got {size_bytes})"
+        );
+        Self::CpAsyncCaSharedGlobal {
+            dst_shared,
+            src_global,
+            size_bytes,
+        }
+    }
 }
 
 impl Emit for MemoryOp {
@@ -135,6 +204,25 @@ impl Emit for MemoryOp {
             }
             MemoryOp::CvtaToGlobal { dst, src } => {
                 w.instruction("cvta.to.global.u64", &[dst as &dyn fmt::Display, src])
+            }
+            MemoryOp::CpAsyncCaSharedGlobal {
+                dst_shared,
+                src_global,
+                size_bytes,
+            } => {
+                // cp.async.ca.shared.global [dst_shared], [src_global], size;
+                let dst_str = format!("[{dst_shared}]");
+                let src_str = format!("[{src_global}]");
+                let sz = *size_bytes as u32;
+                w.instruction(
+                    "cp.async.ca.shared.global",
+                    &[&dst_str as &dyn fmt::Display, &src_str, &sz],
+                )
+            }
+            MemoryOp::CpAsyncCommitGroup => w.instruction("cp.async.commit_group", &[]),
+            MemoryOp::CpAsyncWaitGroup { n } => {
+                let n = *n as u32;
+                w.instruction("cp.async.wait_group", &[&n as &dyn fmt::Display])
             }
         }
     }
@@ -309,6 +397,98 @@ mod tests {
         };
         op.emit(&mut w).unwrap();
         assert_eq!(w.finish(), "    ld.shared.bf16 %hb0, [%r0];\n");
+    }
+
+    // --- cp.async (Sprint 6.2) ---
+
+    #[test]
+    fn emit_cp_async_ca_shared_global_16b() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::new_cp_async_ca(
+            reg(RegKind::R, 0, PtxType::U32),  // shared offset
+            reg(RegKind::Rd, 3, PtxType::U64), // global addr
+            16,
+        );
+        op.emit(&mut w).unwrap();
+        assert_eq!(
+            w.finish(),
+            "    cp.async.ca.shared.global [%r0], [%rd3], 16;\n"
+        );
+    }
+
+    #[test]
+    fn emit_cp_async_ca_size_4() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::new_cp_async_ca(
+            reg(RegKind::R, 1, PtxType::U32),
+            reg(RegKind::Rd, 4, PtxType::U64),
+            4,
+        );
+        op.emit(&mut w).unwrap();
+        assert_eq!(
+            w.finish(),
+            "    cp.async.ca.shared.global [%r1], [%rd4], 4;\n"
+        );
+    }
+
+    #[test]
+    fn emit_cp_async_ca_size_8() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::new_cp_async_ca(
+            reg(RegKind::R, 2, PtxType::U32),
+            reg(RegKind::Rd, 5, PtxType::U64),
+            8,
+        );
+        op.emit(&mut w).unwrap();
+        assert!(w.finish().ends_with("8;\n"));
+    }
+
+    #[test]
+    #[should_panic(expected = "cp.async.ca size must be 4, 8, or 16 bytes")]
+    fn cp_async_ca_rejects_bad_size() {
+        // 12 is not a valid size — construction should panic.
+        MemoryOp::new_cp_async_ca(
+            reg(RegKind::R, 0, PtxType::U32),
+            reg(RegKind::Rd, 0, PtxType::U64),
+            12,
+        );
+    }
+
+    #[test]
+    fn emit_cp_async_commit_group() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        MemoryOp::CpAsyncCommitGroup.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    cp.async.commit_group;\n");
+    }
+
+    #[test]
+    fn emit_cp_async_wait_group_zero() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        MemoryOp::CpAsyncWaitGroup { n: 0 }.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    cp.async.wait_group 0;\n");
+    }
+
+    #[test]
+    fn emit_cp_async_wait_group_n() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        MemoryOp::CpAsyncWaitGroup { n: 3 }.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    cp.async.wait_group 3;\n");
+    }
+
+    #[test]
+    fn cp_async_via_ptx_instruction() {
+        use crate::ir::PtxInstruction;
+        let mut w = PtxWriter::new();
+        w.indent();
+        let instr = PtxInstruction::Memory(MemoryOp::CpAsyncCommitGroup);
+        instr.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    cp.async.commit_group;\n");
     }
 
     #[test]

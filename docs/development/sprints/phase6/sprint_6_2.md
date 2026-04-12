@@ -199,4 +199,93 @@ Bisect-friendly.
 
 ## Results
 
-_(populated after execution)_
+**Status:** Done. Both 6.2a (mma.sync + fragments + gate) and 6.2b
+(cp.async smoke) green on first green-light GPU run.
+
+### Shipped
+
+- `TensorCoreOp::MmaSync` + `MmaShape::M16N8K16` in
+  `kaio-core/src/instr/tensor_core.rs`; `.row.col` hardcoded for fp16/bf16
+  inputs as the PTX spec requires.
+- `FragmentA` (4 × `.b32` packed half2), `FragmentB` (2 × `.b32` packed
+  half2), `FragmentC` (4 × `.f32`) in `kaio-core/src/fragment.rs`. Pure
+  register containers with `pub` fields, as approved.
+- Free functions: `alloc_a/b/c`, `load_fragment_a_m16n8k16_global_row`,
+  `load_fragment_b_m16n8k16_global_col`,
+  `store_fragment_c_m16n8k16_global_row`. Internal shared helper
+  `compute_group_thread_ids` (emits `div.u32` + `rem.u32` by 4) and
+  `u64_addr_from_u32_offset` (widens 32-bit offset, adds to 64-bit base,
+  optionally folds in a compile-time byte offset).
+- `RegisterAllocator::alloc_packed_half2()` — semantic alias for `.b32`.
+- `MemoryOp::CpAsyncCaSharedGlobal` (size 4/8/16 validated via
+  `MemoryOp::new_cp_async_ca`), `MemoryOp::CpAsyncCommitGroup`,
+  `MemoryOp::CpAsyncWaitGroup { n }`.
+- `PtxModule::validate()` + `ValidationError::SmTooLow`, surfaced via
+  `KaioDevice::load_module` in `kaio-runtime`. Narrow target-capability
+  scope; parses `"sm_NN"`, skips unrecognized targets.
+- `KernelStats` counts: `mma`, `cp_async`, `cp_async_commit`,
+  `cp_async_wait`.
+
+### Gate test (D6) — first-try pass
+
+`mma_sync_m16n8k16_fragment_gate` on RTX 4090 (sm_89): 128/128 fp32
+output elements match the hand-computed `(j+1) * (256i + 120)` bit-exact.
+This was the feared hard part; the NVIDIA canonical thread-data mapping
+(§9.7.13.5.8.1) implemented directly from the spec produced correct
+output on the first GPU run. No debugging round needed.
+
+### Smoke test (6.2b)
+
+`cp_async_ca_roundtrip_4_floats` on RTX 4090: lane 0 issues one
+`cp.async.ca.shared.global` of 16 bytes, `commit_group`, `wait_group 0`,
+`bar.sync`; lanes 0..3 read their element from shared memory and write
+it back to the output buffer. Output equals input exactly.
+
+### Test counts
+
+| Suite | Before | After | Δ |
+|---|---|---|---|
+| `kaio-core` lib | 96 | 124 | +28 |
+| `kaio-core/tests/ptxas_verify` | 2 | 4 | +2 |
+| `kaio-core/tests/vector_add_emit` | 2 | 2 | 0 |
+| `kaio-macros` | 117 | 117 | 0 |
+| GPU tests total | 102 | 104 | +2 |
+| **Grand total** | 219 + 102 | 247 + 104 | **+30 host, +2 GPU** |
+
+All host tests pass. All GPU tests pass with `KAIO_SM_TARGET=sm_89`
+on RTX 4090. Clippy clean (fixed one `collapsible_if` and one
+`useless_conversion` on first clippy run). `cargo doc` clean (one
+intra-doc link fixed in `kaio-runtime::device`).
+
+### ptxas verification
+
+`ptxas --gpu-name sm_80` accepts both the `mma.sync` and `cp.async`
+emission paths.
+
+### Surprises / notable non-issues
+
+- **Fragment layout worked on first try.** The pre-sprint worry was that
+  deriving the thread-data mapping from the PTX ISA spec alone (no nvcc
+  reference pregeneration) would produce silent corruption. It didn't.
+  The spec figure was precise enough when read carefully.
+- **Packed `.b32` loads over `.f16` pair loads.** Since `a[i,k]` and
+  `a[i,k+1]` are adjacent in memory for a row-major fp16 matrix, we
+  emit one `ld.global.b32` per fragment register instead of two
+  `ld.global.f16`. Cleaner PTX, fewer instructions, matches what nvcc
+  would do.
+- **Div/rem by 4 for `tid/4` and `tid%4`** worked fine — PTX driver
+  lowers constant-power-of-two div to shift and rem to mask. No need
+  to add `shr`/`and` bitops to the IR for 6.2.
+
+### Carry-forward to 6.3
+
+- Fragment **shared-memory** load helpers
+  (`load_fragment_a_m16n8k16_shared_row`, `load_fragment_b_m16n8k16_shared_col`)
+  are the first thing Sprint 6.3 adds — sibling free functions next to
+  the global-source variants, matching D6's plan.
+- Consider hoisting the `group_id` / `thread_id_in_group` computation
+  out of individual fragment helpers if Sprint 6.3's tiled matmul shows
+  the repeated div/rem becoming material. Not needed for this sprint.
+- `PipelineOp` refactor of cp.async commit/wait: defer until 6.4's
+  double-buffering pressure makes the current `MemoryOp` placement feel
+  wrong in practice.

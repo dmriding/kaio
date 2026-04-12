@@ -133,6 +133,7 @@ impl Emit for PtxInstruction {
             Self::Arith(op) => op.emit(w),
             Self::Memory(op) => op.emit(w),
             Self::Control(op) => op.emit(w),
+            Self::TensorCore(op) => op.emit(w),
             Self::Mov { dst, src, ty } => {
                 let mnemonic = format!("mov{}", ty.ptx_suffix());
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, src])

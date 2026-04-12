@@ -13,7 +13,9 @@ pub mod arith;
 pub mod control;
 pub mod memory;
 pub mod special;
+pub mod tensor_core;
 
 pub use arith::{ArithOp, MadMode};
 pub use control::{CmpOp, ControlOp};
 pub use memory::MemoryOp;
+pub use tensor_core::{MmaShape, TensorCoreOp};

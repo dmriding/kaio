@@ -25,6 +25,15 @@ pub enum KaioError {
     /// Failed to load a PTX module into the driver.
     #[error("PTX module load failed: {0}")]
     PtxLoad(String),
+
+    /// A `PtxModule` failed validation before being handed to the driver.
+    ///
+    /// Raised by [`KaioDevice::load_module`](crate::KaioDevice::load_module)
+    /// when the module's target SM is too low for a feature it uses
+    /// (e.g. `mma.sync` in a `sm_70` module). Surfacing this before the
+    /// driver compiles the PTX avoids cryptic downstream errors.
+    #[error("PTX module validation failed: {0}")]
+    Validation(#[from] kaio_core::ir::ValidationError),
 }
 
 /// Convenience alias for `std::result::Result<T, KaioError>`.

@@ -1,10 +1,11 @@
 //! Shared test helpers for kaio-core integration tests.
 
 use kaio_core::emit::{Emit, PtxWriter};
+use kaio_core::fragment::{alloc_a, alloc_b, alloc_c};
 use kaio_core::instr::control::{CmpOp, ControlOp};
 use kaio_core::instr::memory::MemoryOp;
 use kaio_core::instr::special;
-use kaio_core::instr::{ArithOp, MadMode};
+use kaio_core::instr::{ArithOp, MadMode, MmaShape, TensorCoreOp};
 use kaio_core::ir::{
     Operand, PtxInstruction, PtxKernel, PtxModule, PtxParam, RegisterAllocator, SharedDecl,
 };
@@ -247,6 +248,131 @@ pub fn build_shared_mem_ptx() -> String {
 
     let mut module =
         PtxModule::new(&std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_70".to_string()));
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
+/// Build a minimal kernel that emits one `mma.sync.m16n8k16.row.col.f32.f16.f16.f32`
+/// with zero-initialized fragment registers.
+///
+/// Used by `ptxas_verify_mma_sync` to confirm the PTX emission passes
+/// the offline assembler for SM 8.0+. The kernel is not functionally
+/// meaningful — just enough valid PTX to exercise the `TensorCoreOp::MmaSync`
+/// emit path end-to-end.
+#[allow(dead_code)]
+pub fn build_mma_sync_ptx() -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("mma_sync_smoke");
+
+    let a = alloc_a(&mut alloc);
+    let b = alloc_b(&mut alloc);
+    let c = alloc_c(&mut alloc);
+    let d = alloc_c(&mut alloc);
+
+    // Zero-initialize all fragment registers.
+    for r in &a.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmU32(0),
+            ty: PtxType::U32,
+        });
+    }
+    for r in &b.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmU32(0),
+            ty: PtxType::U32,
+        });
+    }
+    for r in &c.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmF32(0.0),
+            ty: PtxType::F32,
+        });
+    }
+
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+        d,
+        a,
+        b,
+        c,
+        shape: MmaShape::M16N8K16,
+        d_ty: PtxType::F32,
+        a_ty: PtxType::F16,
+        b_ty: PtxType::F16,
+        c_ty: PtxType::F32,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    // mma.sync requires SM 8.0+. Floor the env override at sm_80.
+    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
+    let mut module = PtxModule::new(&sm);
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
+/// Build a minimal kernel exercising `cp.async.ca.shared.global`,
+/// `cp.async.commit_group`, and `cp.async.wait_group`.
+///
+/// Used by `ptxas_verify_cp_async` to confirm the cp.async emission
+/// passes the offline assembler for SM 8.0+.
+#[allow(dead_code)]
+pub fn build_cp_async_ptx() -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("cp_async_smoke");
+
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile".to_string(),
+        align: 16,
+        size_bytes: 16,
+    });
+
+    kernel.add_param(PtxParam::pointer("src", PtxType::F32));
+
+    let rd_src_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_src_param,
+        param_name: "src".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_src_global = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_src_global,
+        src: rd_src_param,
+    }));
+
+    let r_shared_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_shared_addr,
+        src: Operand::SharedAddr("tile".to_string()),
+        ty: PtxType::U32,
+    });
+
+    kernel.push(PtxInstruction::Memory(MemoryOp::new_cp_async_ca(
+        r_shared_addr,
+        rd_src_global,
+        16,
+    )));
+    kernel.push(PtxInstruction::Memory(MemoryOp::CpAsyncCommitGroup));
+    kernel.push(PtxInstruction::Memory(MemoryOp::CpAsyncWaitGroup { n: 0 }));
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+        barrier_id: 0,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
+    let mut module = PtxModule::new(&sm);
     module.add_kernel(kernel);
 
     let mut w = PtxWriter::new();

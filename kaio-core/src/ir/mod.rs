@@ -13,7 +13,7 @@ pub mod register;
 
 pub use instruction::PtxInstruction;
 pub use kernel::{KernelStats, PtxKernel, SharedDecl};
-pub use module::PtxModule;
+pub use module::{PtxModule, ValidationError};
 pub use operand::{Operand, SpecialReg};
 pub use param::PtxParam;
 pub use register::{Register, RegisterAllocator};

@@ -73,6 +73,23 @@ impl RegisterAllocator {
         reg
     }
 
+    /// Allocate a `.b32` register intended to hold **two fp16 values
+    /// packed into 32 bits** — the storage format `mma.sync.m16n8k16.f16`
+    /// expects for its A and B fragment operands.
+    ///
+    /// This is a thin semantic alias for `alloc(PtxType::U32)` — the
+    /// register lives in the `%r` class at the PTX level. The separate
+    /// method exists so call sites in `fragment.rs` make their intent
+    /// explicit and so grep'ing for `alloc_packed_half2` finds every
+    /// fragment-storage allocation in the codebase.
+    ///
+    /// No new [`RegKind`] variant is introduced — the register really is
+    /// `.b32` at the hardware level, and inventing a fake kind would lie
+    /// about the PTX reality.
+    pub fn alloc_packed_half2(&mut self) -> Register {
+        self.alloc(PtxType::U32)
+    }
+
     /// All registers allocated so far, in allocation order.
     pub fn allocated(&self) -> &[Register] {
         &self.allocated

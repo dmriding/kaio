@@ -301,6 +301,11 @@ for a complete end-to-end example.
   crates.io v0.1.0
 - [ ] **Phase 6** — Tensor cores (`mma.sync` fp16/bf16), async copies
   (`cp.async`), 60-70% cuBLAS target
+  - [x] **6.1** — fp16/bf16 type system (`PtxType::F16/BF16`, `%h`/`%hb`,
+    cvt rounding, `GpuBuffer<f16>`)
+  - [x] **6.2** — `mma.sync.m16n8k16` + `cp.async` + typed fragments
+    (Ampere+ / SM 8.0+); single-instruction gate test passes bit-exact
+    on RTX 4090
 - [ ] **Phase 7** — Quantized kernels (INT8/INT4), training integration
   (`kaio-candle` bridge)
 - [ ] **Phase 8** — PyO3 bindings (Python access to kaio-ops)
