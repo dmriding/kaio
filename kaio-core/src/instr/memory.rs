@@ -46,6 +46,28 @@ pub enum MemoryOp {
         /// PTX type of the loaded value.
         ty: PtxType,
     },
+    /// Predicated load from global memory: `@[!]{pred} ld.global{ty} dst, [addr];`
+    ///
+    /// Skips the load when the predicate evaluates false (or true when
+    /// `negate` is set). Used for edge-tile bounds checking — the OOB
+    /// thread's `dst` register is left unchanged, so callers typically
+    /// pre-initialize `dst` to zero with `mov.b32 dst, 0` and then
+    /// conditionally overwrite with a predicated load.
+    ///
+    /// Sprint 6.7 (multi-warp matmul_tc edge tiles) is the first user.
+    /// Example: `@%p1 ld.global.u32 %r5, [%rd9];`
+    LdGlobalPred {
+        /// Destination register (unchanged when predicate is false).
+        dst: Register,
+        /// Register holding the memory address.
+        addr: Register,
+        /// PTX type of the loaded value.
+        ty: PtxType,
+        /// Predicate register controlling the load.
+        pred: Register,
+        /// When `true`, negate the predicate (`@!pred`).
+        negate: bool,
+    },
     /// Store to global memory: `st.global{ty} [addr], src;`
     ///
     /// **Operand order is reversed in PTX** — address comes first,
@@ -60,6 +82,27 @@ pub enum MemoryOp {
         src: Register,
         /// PTX type of the stored value.
         ty: PtxType,
+    },
+    /// Predicated store to global memory: `@[!]{pred} st.global{ty} [addr], src;`
+    ///
+    /// Skips the store when the predicate evaluates false (or true when
+    /// `negate` is set). Used for edge-tile bounds checking on output
+    /// writes — out-of-bounds threads simply don't store, leaving the
+    /// destination memory untouched.
+    ///
+    /// Sprint 6.7 (multi-warp matmul_tc edge tiles) is the first user.
+    /// Example: `@%p1 st.global.f32 [%rd11], %f4;`
+    StGlobalPred {
+        /// Register holding the memory address.
+        addr: Register,
+        /// Source register (value to store).
+        src: Register,
+        /// PTX type of the stored value.
+        ty: PtxType,
+        /// Predicate register controlling the store.
+        pred: Register,
+        /// When `true`, negate the predicate (`@!pred`).
+        negate: bool,
     },
     /// Load from shared memory: `ld.shared{ty} dst, [addr];`
     ///
@@ -186,11 +229,37 @@ impl Emit for MemoryOp {
                 let addr_str = format!("[{addr}]");
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, &addr_str])
             }
+            MemoryOp::LdGlobalPred {
+                dst,
+                addr,
+                ty,
+                pred,
+                negate,
+            } => {
+                let neg = if *negate { "!" } else { "" };
+                w.line(&format!(
+                    "@{neg}{pred} ld.global{} {dst}, [{addr}];",
+                    ty.ptx_memory_suffix()
+                ))
+            }
             MemoryOp::StGlobal { addr, src, ty } => {
                 let mnemonic = format!("st.global{}", ty.ptx_memory_suffix());
                 let addr_str = format!("[{addr}]");
                 // PTX store order: [address], source (reversed from load)
                 w.instruction(&mnemonic, &[&addr_str as &dyn fmt::Display, src])
+            }
+            MemoryOp::StGlobalPred {
+                addr,
+                src,
+                ty,
+                pred,
+                negate,
+            } => {
+                let neg = if *negate { "!" } else { "" };
+                w.line(&format!(
+                    "@{neg}{pred} st.global{} [{addr}], {src};",
+                    ty.ptx_memory_suffix()
+                ))
             }
             MemoryOp::LdShared { dst, addr, ty } => {
                 let mnemonic = format!("ld.shared{}", ty.ptx_memory_suffix());
@@ -297,6 +366,53 @@ mod tests {
         };
         op.emit(&mut w).unwrap();
         assert_eq!(w.finish(), "    ld.global.f32 %f1, [%rd8];\n");
+    }
+
+    #[test]
+    fn emit_ld_global_pred_b32() {
+        // Sprint 6.7 edge-tile predicated load.
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::LdGlobalPred {
+            dst: reg(RegKind::R, 5, PtxType::U32),
+            addr: reg(RegKind::Rd, 9, PtxType::U64),
+            ty: PtxType::U32,
+            pred: reg(RegKind::P, 1, PtxType::Pred),
+            negate: false,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    @%p1 ld.global.u32 %r5, [%rd9];\n");
+    }
+
+    #[test]
+    fn emit_ld_global_pred_negated_b32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::LdGlobalPred {
+            dst: reg(RegKind::R, 5, PtxType::U32),
+            addr: reg(RegKind::Rd, 9, PtxType::U64),
+            ty: PtxType::U32,
+            pred: reg(RegKind::P, 2, PtxType::Pred),
+            negate: true,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    @!%p2 ld.global.u32 %r5, [%rd9];\n");
+    }
+
+    #[test]
+    fn emit_st_global_pred_f32() {
+        // Sprint 6.7 edge-tile predicated store.
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::StGlobalPred {
+            addr: reg(RegKind::Rd, 11, PtxType::U64),
+            src: reg(RegKind::F, 4, PtxType::F32),
+            ty: PtxType::F32,
+            pred: reg(RegKind::P, 3, PtxType::Pred),
+            negate: false,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    @%p3 st.global.f32 [%rd11], %f4;\n");
     }
 
     #[test]

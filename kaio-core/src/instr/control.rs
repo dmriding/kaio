@@ -64,6 +64,28 @@ pub enum ControlOp {
         /// PTX type for the comparison.
         ty: PtxType,
     },
+    /// Set predicate from comparison ANDed with a source predicate:
+    /// `setp.{cmp_op}.and{ty} pred, lhs, rhs, src_pred;`
+    ///
+    /// Computes `pred = (lhs CmpOp rhs) AND src_pred` in one instruction.
+    /// Used for compact edge-tile bounds checking — combines a row check
+    /// with an existing col-check predicate without a separate `and.pred`.
+    /// Sprint 6.7 (multi-warp matmul_tc edge tiles) is the first user.
+    /// Example: `setp.lt.and.u32 %p3, %r5, %r10, %p2;`
+    SetPAnd {
+        /// Destination predicate register.
+        dst: Register,
+        /// Comparison operation applied to `lhs`/`rhs`.
+        cmp_op: CmpOp,
+        /// Left-hand operand of the comparison.
+        lhs: Operand,
+        /// Right-hand operand of the comparison.
+        rhs: Operand,
+        /// PTX type for the comparison.
+        ty: PtxType,
+        /// Source predicate AND'd with the comparison result.
+        src_pred: Register,
+    },
     /// Predicated branch: `@{pred} bra {target};` or `@!{pred} bra {target};`
     ///
     /// Branches to `target` label if `pred` is true (or false when negated).
@@ -165,6 +187,17 @@ impl Emit for ControlOp {
                 let mnemonic = format!("setp.{}{}", cmp_op.ptx_str(), ty.ptx_suffix());
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
             }
+            ControlOp::SetPAnd {
+                dst,
+                cmp_op,
+                lhs,
+                rhs,
+                ty,
+                src_pred,
+            } => {
+                let mnemonic = format!("setp.{}.and{}", cmp_op.ptx_str(), ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs, src_pred])
+            }
             ControlOp::BraPred {
                 pred,
                 target,
@@ -221,6 +254,23 @@ mod tests {
     }
 
     // --- nvcc golden comparisons ---
+
+    #[test]
+    fn emit_setp_and_lt_u32() {
+        // Sprint 6.7 edge-tile: setp.lt.and.u32 %p3, %r5, %r10, %p2
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ControlOp::SetPAnd {
+            dst: reg(RegKind::P, 3, PtxType::Pred),
+            cmp_op: CmpOp::Lt,
+            lhs: Operand::Reg(reg(RegKind::R, 5, PtxType::U32)),
+            rhs: Operand::Reg(reg(RegKind::R, 10, PtxType::U32)),
+            ty: PtxType::U32,
+            src_pred: reg(RegKind::P, 2, PtxType::Pred),
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    setp.lt.and.u32 %p3, %r5, %r10, %p2;\n");
+    }
 
     #[test]
     fn emit_setp_ge_u32() {
