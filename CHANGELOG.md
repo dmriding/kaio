@@ -96,6 +96,35 @@ Branch: `phase6`. In progress toward v0.2.0.
   now takes a `row_stride_bytes: u32` parameter. Pre-6.3 callers
   pass `32` to match old behavior.
 
+### Added — Sprint 6.4 (cp.async double-buffered matmul)
+- **`kaio_ops::matmul_tc_async`** — double-buffered variant of
+  `matmul_tc` that stages A tiles via `cp.async.ca.shared.global`
+  (16 B per thread) while B stays synchronous. Pipeline preamble
+  issues `A[0]` + commit; K loop waits on current A, issues next A
+  before `mma.sync`, recomputes buffer offsets. Same dimension
+  constraints as `matmul_tc` (M%16 = N%8 = K%16 = 0) and same
+  SM 8.0+ requirement. **Internal (`#[doc(hidden)]`)** for now;
+  promotes to public API in Sprint 6.7 alongside `matmul_tc`.
+- Shared memory layout uses two buffers per tile: `tile_a[1024]`
+  (2 × 512 B, `.align 16` for cp.async destination alignment) and
+  `tile_b[512]` (2 × 256 B). Per-block shared = 1.5 KB.
+- `kaio-ops::matmul_tc_kernel::emit_load_b_tile` and
+  `validate_dims_tc` promoted from private to `pub(crate)` so the
+  async sibling module can reuse them (visibility bump only,
+  no behavioral change).
+- 4 GPU correctness tests (tiny, small, rect, medium) — bit-close
+  to CPU reference with identical error floor as 6.3 (max error
+  ~1e-7 against a 1e-2 tolerance).
+- 2 host tests — `buffer_offsets_toggle` (pure toggle math) and
+  `build_matmul_tc_async_ptx_produces_valid_structure`
+  (instruction-centric PTX check: cp.async mnemonics, shared-decl
+  sizing, exactly-one mma, exactly-two commit_groups).
+- Optional env-gated (`KAIO_SPRINT_6_4_TIMING=1`) timing log on the
+  medium test — records async vs sync `ms/iter` for Sprint 6.7's
+  multi-warp restructure to improve against. Not a benchmark, not
+  in CI output. Current baseline: async is ~7% slower than sync at
+  1 warp / block — as predicted, overlap gains require 6.7.
+
 ## [0.1.0] — Phase 5: Fused Attention & Community Release
 
 ### Added — Phase 5

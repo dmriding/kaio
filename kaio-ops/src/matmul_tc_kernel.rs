@@ -64,7 +64,10 @@ const TILE_A_BYTES: u32 = BM * BK * BYTES_PER_HALF; // 512
 const TILE_B_BYTES: u32 = BK * BN * BYTES_PER_HALF; // 256
 
 /// Validate dimension constraints for [`matmul_tc`].
-fn validate_dims_tc(
+///
+/// `pub(crate)` so Sprint 6.4's `matmul_tc_async_kernel` can reuse —
+/// the dim constraints are identical (M%16 = N%8 = K%16 = 0).
+pub(crate) fn validate_dims_tc(
     a: &GpuBuffer<f16>,
     b: &GpuBuffer<f16>,
     c: &GpuBuffer<f32>,
@@ -246,7 +249,11 @@ fn emit_load_a_tile(
 /// `col = flat / 16`, `row = flat % 16`,
 /// `global_byte_off = row * (N * 2) + col * 2`,
 /// `shared_byte_off = col * 32 + row * 2`.
-fn emit_load_b_tile(
+///
+/// `pub(crate)` so Sprint 6.4's `matmul_tc_async_kernel` can reuse —
+/// B stays synchronous in 6.4 because cp.async cannot express B's
+/// row-major → column-major strided gather (see sprint_6_4.md D3).
+pub(crate) fn emit_load_b_tile(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
     b_tile_src_global: Register, // u64: first byte of this block's B tile at k_tile=0 row

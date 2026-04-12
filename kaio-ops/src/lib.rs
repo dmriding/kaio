@@ -22,6 +22,7 @@
 
 mod attention_kernel;
 mod matmul_kernel;
+mod matmul_tc_async_kernel;
 mod matmul_tc_kernel;
 mod tuner;
 
@@ -42,3 +43,12 @@ pub use matmul_kernel::matmul_naive;
 // this is crate-internal API that happens to be test-reachable.
 #[doc(hidden)]
 pub use matmul_tc_kernel::matmul_tc;
+
+// TEMP: hidden export for integration tests — Sprint 6.4 cp.async
+// double-buffered variant of matmul_tc. Same dimension constraints
+// and promotion trigger as matmul_tc above (Sprint 6.7 lifts
+// divisibility + promotes to stable `pub` with README/CHANGELOG
+// announcement). Sprint 6.5's auto-tuner will dispatch between
+// `matmul`, `matmul_tc`, and `matmul_tc_async` internally.
+#[doc(hidden)]
+pub use matmul_tc_async_kernel::matmul_tc_async;
