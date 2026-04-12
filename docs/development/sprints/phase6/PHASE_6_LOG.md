@@ -12,7 +12,7 @@ Master plan: [phase6_master_plan.md](phase6_master_plan.md)
 | [6.1](sprint_6_1.md) | fp16/bf16 types + conversions | ✅ Complete | `a1dd450` | 219 host + 102 GPU (+11 host, +2 GPU) |
 | [6.2](sprint_6_2.md) | mma.sync + cp.async in kaio-core, typed fragments, gate test | ✅ Complete | `71603c2` | 247 host + 104 GPU (+28 host, +2 GPU) |
 | [6.3](sprint_6_3.md) | Tensor-core matmul (IR API, m16n8k16 SM 8.0+, internal) | ✅ Complete | `09cc304` | 262 host + 108 GPU (+15 host, +4 GPU) |
-| [6.4](sprint_6_4.md) | cp.async double-buffered matmul (SM 8.0+, internal) | ✅ Complete | _pending_ | 264 host + 112 GPU (+2 host, +4 GPU) |
+| [6.4](sprint_6_4.md) | cp.async double-buffered matmul (SM 8.0+, internal) | ✅ Complete | `be0e708` | 264 host + 112 GPU (+2 host, +4 GPU) |
 | [6.5](sprint_6_5.md) | Integration + auto-tuner | Pending | — | — |
 | [6.6](sprint_6_6.md) | TC attention (optional) | Pending | — | — |
 | [6.7](sprint_6_7.md) | Benchmarks + performance docs | Pending | — | — |
