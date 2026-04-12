@@ -14,7 +14,7 @@ Master plan: [phase6_master_plan.md](phase6_master_plan.md)
 | [6.3](sprint_6_3.md) | Tensor-core matmul (IR API, m16n8k16 SM 8.0+, internal) | ✅ Complete | `09cc304` | 262 host + 108 GPU (+15 host, +4 GPU) |
 | [6.4](sprint_6_4.md) | cp.async double-buffered matmul (SM 8.0+, internal) | ✅ Complete | `be0e708` | 264 host + 112 GPU (+2 host, +4 GPU) |
 | [6.5](sprint_6_5.md) | TC auto-tuner (`matmul_auto_tc`) + `load_module` migration (first public API) | ✅ Complete | `076fcfc` | 268 host + 122 GPU (+9 host, +5 GPU) |
-| [6.6](sprint_6_6.md) | Fused TC attention + causal variant (internal API) | ✅ Complete | _pending_ | 275 host + 133 GPU (+7 host, +11 GPU) |
+| [6.6](sprint_6_6.md) | Fused TC attention + causal variant (internal API) | ✅ Complete | `5c3ae53` | 275 host + 133 GPU (+7 host, +11 GPU) |
 | [6.7](sprint_6_7.md) | Benchmarks + performance docs | Pending | — | — |
 | [6.8](sprint_6_8.md) | Polish + v0.2.0 publish | Pending | — | — |
 
