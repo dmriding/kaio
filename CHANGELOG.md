@@ -301,17 +301,49 @@ Branch: `phase6`. In progress toward v0.2.0.
   edge-tile predication. Code that relied on the error being raised
   (e.g., for input padding logic) needs to either drop the padding
   or check the dimensions client-side.
-- **`matmul_auto_tc` cache-miss default flipped** from `TensorCore`
-  to `TensorCoreAsync`. Per-shape cache hits override the default;
-  this only affects the first-call path before tuning is run. See
-  D6 in `docs/development/sprints/phase6/sprint_6_7.md` for the
-  measurement.
+- **`matmul_auto_tc` cache-miss default is now a size heuristic**
+  (`max(M, N, K) >= 3072` → `TensorCoreAsync`, else `TensorCore`).
+  Previously always `TensorCore`. Matches the full 6.7 bench curve
+  (sync wins 256-2048, async wins 4096). Per-shape cache hits
+  override the heuristic; this only affects the first-call path
+  before tuning is run. See D6 in
+  `docs/development/sprints/phase6/sprint_6_7.md` and the 2026-04-12
+  Codex post-review fold for the measurement.
 - **`kaio_ops::matmul_tc` and `kaio_ops::matmul_tc_async` are now
   stable `pub` exports.** They were previously `#[doc(hidden)] pub
   use` (test-reachable but not part of the documented surface). Code
   that imported them via `use kaio_ops::matmul_tc;` continues to
   work; code that relied on them being hidden from `cargo doc` output
   will now see them in rustdoc.
+
+### Added — Sprint 6.8 (showcase examples for v0.2.0)
+- **`examples/fused_silu_gate/`** — gated SiLU activation
+  (`x * sigmoid(x) * gate`), the feedforward primitive in every
+  LLaMA / Mistral / Qwen block. Demonstrates `exp` builtin + elementwise
+  fusion pattern in ~7 lines of kernel code.
+- **`examples/gelu_comparison/`** — exact (tanh) vs fast (sigmoid)
+  GELU, side-by-side with per-variant correctness + median timing.
+  Includes a "bandwidth-bound teaching moment" section in the README
+  explaining why the two variants run at identical wall-clock speed
+  despite the compute-op asymmetry — and why kernel fusion matters
+  more than arithmetic optimization for ML workloads.
+- **`examples/rms_norm/`** — single-block RMSNorm
+  (`out[i] = (x[i] / rms) * weight[i]`) covering the
+  `block_reduce_sum + sqrt + divide` integration pattern. The README
+  is explicit about the single-block limitation (`hidden_dim <=
+  block_size`) and names the post-v0.2.0 path to multi-block RMSNorm
+  (cross-block reduction primitive or `kaio_ops::rms_norm`).
+- Each example is a **standalone Cargo project** with its own
+  `[workspace]` table so `cargo run --release` works from a fresh
+  clone without touching the parent workspace. `kaio` dependency is
+  a path dep during pre-publish; Sprint 6.9 will flip it to
+  `kaio = "0.2.0"` at release time.
+
+### Changed — Sprint 6.8
+- Workspace `Cargo.toml` gained `exclude = ["examples/*"]` — cosmetic
+  belt-and-braces; the per-example empty `[workspace]` tables are what
+  actually detaches them, but the workspace exclude makes the intent
+  explicit.
 
 ## [0.1.0] — Phase 5: Fused Attention & Community Release
 

@@ -1,0 +1,13 @@
+[package]
+name = "fused_silu_gate"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Empty table: detaches this example from the enclosing KAIO workspace so
+# `cargo run --release` from this directory works against a local checkout.
+[workspace]
+
+[dependencies]
+# TODO(Sprint 6.9 publish): flip to `kaio = "0.2.0"` before pushing to crates.io.
+kaio = { path = "../../kaio" }

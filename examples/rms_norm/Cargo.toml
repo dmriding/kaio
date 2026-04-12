@@ -1,0 +1,11 @@
+[package]
+name = "rms_norm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+# TODO(Sprint 6.9 publish): flip to `kaio = "0.2.0"` before pushing to crates.io.
+kaio = { path = "../../kaio" }

@@ -114,6 +114,8 @@ JIT-compiles at runtime — but it works, and Rust has no equivalent.
 
 ## Examples
 
+### Getting-started (single-file, in-tree)
+
 Clone the repo and run:
 
 | Example        | Description                      | Command                                  |
@@ -122,6 +124,22 @@ Clone the repo and run:
 | saxpy          | Scalar parameter passing         | `cargo run --example saxpy -p kaio`      |
 | reduction      | Shared memory + block reduction  | `cargo run --example reduction -p kaio`  |
 | matmul         | Matrix multiply via kaio-ops API | `cargo run --example matmul -p kaio-ops` |
+
+### Showcase (standalone Cargo projects)
+
+Each of these lives in [`examples/`](examples/) as its own standalone
+Cargo project (its own `Cargo.toml`, its own `[workspace]` detach).
+Run with `cargo run --release` from inside each directory — no need
+to build the KAIO workspace first.
+
+| Example              | Kernel                                        | Why it matters                                      |
+| -------------------- | --------------------------------------------- | --------------------------------------------------- |
+| **fused_silu_gate**  | `x * sigmoid(x) * gate`                      | The gated activation in every LLaMA feedforward block |
+| **gelu_comparison**  | Exact (tanh) vs fast (sigmoid) GELU           | Kernel-variant workflow + bandwidth-bound teaching moment |
+| **rms_norm**         | Single-block RMSNorm                          | LLaMA-family normalization (replaces LayerNorm)    |
+
+Each example runs correctness (against an f64 CPU reference) and
+reports median wall-clock latency over 100 timed runs.
 
 ## Patterns
 

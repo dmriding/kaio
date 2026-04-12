@@ -1,8 +1,11 @@
 # Sprint 6.8 — Showcase Examples for v0.2.0
 
-**Status:** Pending (executes after Sprint 6.7)
+**Status:** ✅ Complete (2026-04-12)
 **Branch:** `phase6`
-**Parent:** TBD — final commit of Sprint 6.7
+**Parent:** `78b886c` — Sprint 6.7 post-review (size-heuristic cache-miss default)
+**Dep-graph reorder:** 6.8 ran ahead of 6.7b. At 79.9/85.1% cuBLAS
+sgemm the 6.7 perf story is already launch-ready; examples now
+make v0.2.0 discoverable. 6.7b follows as a v0.2.x perf bump.
 **Previous draft:** `sprint_6_8_rough_draft.md` (replaced by this doc)
 
 ---
@@ -377,4 +380,79 @@ to the deferred list in that case.
 
 ## Results
 
-*(populated after execution)*
+All three examples landed and run cleanly on RTX 4090 sm_89.
+
+### Measured output
+
+```
+=== fused_silu_gate ===
+Input size:        1048576 elements
+Correctness:       PASS  (max_abs_err = 1.49e-8)
+Median latency:    188.8 μs  (of 100 timed runs, 5 warm-ups skipped)
+
+=== gelu_comparison ===
+Input size:        1048576 elements
+Exact (tanh):      PASS  (max_abs_err = 2.38e-7)  — 177.9 μs
+Fast (sigmoid):    PASS  (max_abs_err = 2.38e-7)  — 186.6 μs
+Fast is 104.9% of exact's time.
+
+=== rms_norm ===
+Input size:        256 elements  (single-block — see README)
+Correctness:       PASS  (max_abs_err = 2.38e-7)
+Median latency:    181.7 μs  (of 100 timed runs, 5 warm-ups skipped)
+```
+
+### Deviations from plan
+
+1. **Workspace-detach mechanism changed.** The plan called for
+   `exclude = ["examples/*"]` at the workspace root. In practice
+   Cargo still treated the example as a would-be workspace member and
+   refused to build. Fix: each example's `Cargo.toml` carries an empty
+   `[workspace]` table, which cleanly detaches it. The workspace-level
+   `exclude` is kept as belt-and-braces / documented intent. This was
+   flagged in the plan's risk register as item 3; the fallback was the
+   one specified there.
+
+2. **RMSNorm kernel form.** The plan's implicit expression was
+   `let val = if tid < n { x[tid] } else { 0.0f32 };` — the
+   `#[gpu_kernel]` macro rejects `if` as an expression. Rewrote as
+   imperative-style `let mut val = 0.0f32; if tid < n { val = x[tid]; }`,
+   matching the pattern already used in `kaio/examples/reduction.rs`.
+   This is consistent with the existing DSL scope; no new friction
+   point to flag.
+
+3. **GELU README — bandwidth-bound teaching moment added post-build.**
+   Both variants landed at essentially identical wall-clock speed
+   (104.9%) because they're bandwidth-bound, not compute-bound. Opus
+   flagged this as the best teaching insight in the whole example
+   set. Added a new section explaining why the "fast approximation"
+   saves nothing on memory-bound workloads and why kernel fusion
+   (not arithmetic micro-optimization) is the load-bearing lever for
+   ML kernels.
+
+### What this sprint proved
+
+- The `#[gpu_kernel]` DSL is ergonomic enough for real-world ML
+  kernels at the showcase level. No DSL extensions were needed for
+  any of the three.
+- `block_reduce_sum + sqrt + divide` integration works end-to-end
+  from a user-authored kernel (previously only exercised from
+  internal tests).
+- Standalone `Cargo.toml` + `[workspace]` table + path-dep is a
+  clean publishing story — the flip to `kaio = "0.2.0"` at Sprint
+  6.9 is a one-line edit per example.
+- The bandwidth-bound insight in `gelu_comparison/README.md` is the
+  kind of "stars a repo" content Dave wants in the v0.2.0 launch
+  story — a concrete demonstration that KAIO rewards fusion, not
+  micro-optimization.
+
+### Carry-forward
+
+- **Sprint 6.9 publish:** flip `kaio = { path = "../../kaio" }` to
+  `kaio = "0.2.0"` in all three `examples/*/Cargo.toml` at release.
+- **Sprint 6.7b:** vectorized loads + bank-conflict padding, chase
+  90%+ at 4096² on the matmul bench. Unblocked now.
+- **CI integration (deferred):** a follow-up sprint should add an
+  `examples-build` GitHub Actions job iterating over `examples/*/`
+  to prevent silent API drift. Not in 6.8 scope; worth its own
+  tech-debt line if it bites before we add it.

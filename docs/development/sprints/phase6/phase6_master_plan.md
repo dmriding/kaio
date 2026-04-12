@@ -1,8 +1,12 @@
 # Phase 6 Master Plan — Tensor Cores + Async Copies
 
-**Status:** In progress (6.1–6.7 complete; 6.7b–6.9 pending)
+**Status:** In progress (6.1–6.8 complete; 6.7b + 6.9 pending)
 **Depends on:** Phase 5 complete (v0.1.0, commit `bbc1c4d`)
-**Current branch tip:** `a3d5ca3` (Sprint 6.7 complete — multi-warp TC matmul + promotion)
+**Current branch tip:** Sprint 6.8 (showcase examples) complete; see PHASE_6_LOG.
+**Sprint order update (2026-04-12):** 6.8 was reordered ahead of 6.7b.
+At 79.9/85.1% of cuBLAS sgemm (4096²) the 6.7 perf story is already
+launch-ready, so showcase examples go next to make v0.2.0 discoverable.
+6.7b (vectorized loads / 90%+ chase) becomes a v0.2.x perf bump.
 
 See [PHASE_6_LOG.md](PHASE_6_LOG.md) for per-sprint commit hashes
 and test counts.
