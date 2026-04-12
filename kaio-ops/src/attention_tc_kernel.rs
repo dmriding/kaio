@@ -1313,6 +1313,1108 @@ pub fn attention_tc_gate_a(
     Ok(())
 }
 
+// ---------------------------------------------------------------------
+// Gate B helpers — softmax, cvt bridge, probs store.
+// These compose with the matmul1 body from Gate A but write into shared
+// (scores_tile, probs_tile) rather than global, so the softmax phase
+// has all 16 × seq_k f32 values resident before reducing per-row.
+// ---------------------------------------------------------------------
+
+/// Store a full FragmentC to `scores_tile` at the column offset
+/// corresponding to the current `n_chunk`. Matches the PTX ISA
+/// m16n8k16 C/D layout: each lane holds four scalars at
+///   reg[0]: (group_id    , 2*tig    )
+///   reg[1]: (group_id    , 2*tig + 1)
+///   reg[2]: (group_id + 8, 2*tig    )
+///   reg[3]: (group_id + 8, 2*tig + 1)
+/// where group_id = tid/4, tig = tid%4.
+#[allow(clippy::too_many_arguments)]
+fn emit_store_fragment_c_to_scores_tile(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    frag_d: kaio_core::fragment::FragmentC,
+    scores_tile_shared: Register,
+    tid_x: Register,
+    n_chunk: Register,
+    seq_k_bytes_f32: Register,
+) {
+    let r_group_id = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_group_id,
+        lhs: Operand::Reg(tid_x),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    let r_tig = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_tig,
+        lhs: Operand::Reg(tid_x),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    let r_n_start_bytes_f32 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_n_start_bytes_f32,
+        lhs: Operand::Reg(n_chunk),
+        rhs: Operand::ImmU32(BN * BYTES_PER_F32),
+        ty: PtxType::U32,
+    }));
+    let r_row_off_g = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_row_off_g,
+        lhs: Operand::Reg(r_group_id),
+        rhs: Operand::Reg(seq_k_bytes_f32),
+        ty: PtxType::U32,
+    }));
+    let r_tig8 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_tig8,
+        lhs: Operand::Reg(r_tig),
+        rhs: Operand::ImmU32(8),
+        ty: PtxType::U32,
+    }));
+    let r_row_off_tmp = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_row_off_tmp,
+        lhs: Operand::Reg(r_row_off_g),
+        rhs: Operand::Reg(r_n_start_bytes_f32),
+        ty: PtxType::U32,
+    }));
+    let r_row0_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_row0_off,
+        lhs: Operand::Reg(r_row_off_tmp),
+        rhs: Operand::Reg(r_tig8),
+        ty: PtxType::U32,
+    }));
+    let r_eight_rows = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_eight_rows,
+        lhs: Operand::Reg(seq_k_bytes_f32),
+        rhs: Operand::ImmU32(8),
+        ty: PtxType::U32,
+    }));
+    let r_row8_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_row8_off,
+        lhs: Operand::Reg(r_row0_off),
+        rhs: Operand::Reg(r_eight_rows),
+        ty: PtxType::U32,
+    }));
+    let emit_st = |alloc: &mut RegisterAllocator,
+                   kernel: &mut PtxKernel,
+                   base: Register,
+                   extra: u32,
+                   src_reg: Register| {
+        let addr = alloc.alloc(PtxType::U32);
+        let with_tile = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: with_tile,
+            lhs: Operand::Reg(scores_tile_shared),
+            rhs: Operand::Reg(base),
+            ty: PtxType::U32,
+        }));
+        if extra == 0 {
+            kernel.push(PtxInstruction::Mov {
+                dst: addr,
+                src: Operand::Reg(with_tile),
+                ty: PtxType::U32,
+            });
+        } else {
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: addr,
+                lhs: Operand::Reg(with_tile),
+                rhs: Operand::ImmU32(extra),
+                ty: PtxType::U32,
+            }));
+        }
+        kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+            addr,
+            src: src_reg,
+            ty: PtxType::F32,
+        }));
+    };
+    emit_st(alloc, kernel, r_row0_off, 0, frag_d.regs[0]);
+    emit_st(alloc, kernel, r_row0_off, 4, frag_d.regs[1]);
+    emit_st(alloc, kernel, r_row8_off, 0, frag_d.regs[2]);
+    emit_st(alloc, kernel, r_row8_off, 4, frag_d.regs[3]);
+}
+
+/// Softmax over `scores_tile` (16 × seq_k f32 shared) writing f16
+/// probs to `probs_tile`. Per-row serial (16 iterations). Each row
+/// uses three warp-strided column sub-loops:
+///   (1) max-reduce    → bfly reduce the local max
+///   (2) exp + sum     → bfly reduce the local sum (stores exp values
+///                       back into scores_tile for phase 3 re-reading)
+///   (3) normalize+cvt → multiply by 1/sum, cvt to f16, store probs.
+///
+/// For `seq_k < 32`, lanes with `lane ≥ seq_k` never enter the strided
+/// loop; their `local_max = -INF` and `local_sum = 0` are identity
+/// elements for bfly reduction so the per-row result is correct.
+fn emit_softmax_rows(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    scores_tile_shared: Register,
+    probs_tile_shared: Register,
+    tid_x: Register,
+    seq_k: Register,
+    seq_k_bytes_f32: Register,
+    seq_k_bytes_f16: Register,
+) {
+    const LOG2_E: f32 = std::f32::consts::LOG2_E;
+    const NEG_INF_F32: f32 = -3.4028235e38f32;
+
+    let r_row_idx = alloc.alloc(PtxType::U32);
+    let r_row_off_f32 = alloc.alloc(PtxType::U32);
+    let r_row_off_f16 = alloc.alloc(PtxType::U32);
+    let r_scores_row = alloc.alloc(PtxType::U32);
+    let r_probs_row = alloc.alloc(PtxType::U32);
+
+    let r_local_max = alloc.alloc(PtxType::F32);
+    let r_local_sum = alloc.alloc(PtxType::F32);
+    let r_tmp_shfl = alloc.alloc(PtxType::F32);
+
+    let r_col = alloc.alloc(PtxType::U32);
+    let r_col_bytes_f32 = alloc.alloc(PtxType::U32);
+    let r_col_bytes_f16 = alloc.alloc(PtxType::U32);
+    let r_addr_f32 = alloc.alloc(PtxType::U32);
+    let r_addr_f16 = alloc.alloc(PtxType::U32);
+
+    let r_val = alloc.alloc(PtxType::F32);
+    let r_diff = alloc.alloc(PtxType::F32);
+    let r_scaled = alloc.alloc(PtxType::F32);
+    let r_ex = alloc.alloc(PtxType::F32);
+    let r_inv_sum = alloc.alloc(PtxType::F32);
+    let r_prob_f32 = alloc.alloc(PtxType::F32);
+    let r_prob_f16 = alloc.alloc(PtxType::F16);
+
+    kernel.push(PtxInstruction::Mov {
+        dst: r_row_idx,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("SOFTMAX_ROW_LOOP".to_string()));
+
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_row_off_f32,
+        lhs: Operand::Reg(r_row_idx),
+        rhs: Operand::Reg(seq_k_bytes_f32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_scores_row,
+        lhs: Operand::Reg(scores_tile_shared),
+        rhs: Operand::Reg(r_row_off_f32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_row_off_f16,
+        lhs: Operand::Reg(r_row_idx),
+        rhs: Operand::Reg(seq_k_bytes_f16),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_probs_row,
+        lhs: Operand::Reg(probs_tile_shared),
+        rhs: Operand::Reg(r_row_off_f16),
+        ty: PtxType::U32,
+    }));
+
+    // Phase 1: max reduction
+    kernel.push(PtxInstruction::Mov {
+        dst: r_local_max,
+        src: Operand::ImmF32(NEG_INF_F32),
+        ty: PtxType::F32,
+    });
+    kernel.push(PtxInstruction::Mov {
+        dst: r_col,
+        src: Operand::Reg(tid_x),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("SOFTMAX_MAX_LOOP".to_string()));
+    let p_max_done = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_max_done,
+        cmp_op: CmpOp::Ge,
+        lhs: Operand::Reg(r_col),
+        rhs: Operand::Reg(seq_k),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_max_done,
+        target: "SOFTMAX_MAX_EXIT".to_string(),
+        negate: false,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_col_bytes_f32,
+        lhs: Operand::Reg(r_col),
+        rhs: Operand::ImmU32(BYTES_PER_F32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_addr_f32,
+        lhs: Operand::Reg(r_scores_row),
+        rhs: Operand::Reg(r_col_bytes_f32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+        dst: r_val,
+        addr: r_addr_f32,
+        ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Max {
+        dst: r_local_max,
+        lhs: Operand::Reg(r_local_max),
+        rhs: Operand::Reg(r_val),
+        ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_col,
+        lhs: Operand::Reg(r_col),
+        rhs: Operand::ImmU32(32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::Bra {
+        target: "SOFTMAX_MAX_LOOP".to_string(),
+    }));
+    kernel.push(PtxInstruction::Label("SOFTMAX_MAX_EXIT".to_string()));
+    for mask in [16u32, 8, 4, 2, 1] {
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncBfly {
+            dst: r_tmp_shfl,
+            src: r_local_max,
+            lane_mask: Operand::ImmU32(mask),
+            c: 31,
+            mask: 0xFFFFFFFF,
+        }));
+        kernel.push(PtxInstruction::Arith(ArithOp::Max {
+            dst: r_local_max,
+            lhs: Operand::Reg(r_local_max),
+            rhs: Operand::Reg(r_tmp_shfl),
+            ty: PtxType::F32,
+        }));
+    }
+
+    // Phase 2: exp + sum
+    kernel.push(PtxInstruction::Mov {
+        dst: r_local_sum,
+        src: Operand::ImmF32(0.0),
+        ty: PtxType::F32,
+    });
+    kernel.push(PtxInstruction::Mov {
+        dst: r_col,
+        src: Operand::Reg(tid_x),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("SOFTMAX_EXP_LOOP".to_string()));
+    let p_exp_done = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_exp_done,
+        cmp_op: CmpOp::Ge,
+        lhs: Operand::Reg(r_col),
+        rhs: Operand::Reg(seq_k),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_exp_done,
+        target: "SOFTMAX_EXP_EXIT".to_string(),
+        negate: false,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_col_bytes_f32,
+        lhs: Operand::Reg(r_col),
+        rhs: Operand::ImmU32(BYTES_PER_F32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_addr_f32,
+        lhs: Operand::Reg(r_scores_row),
+        rhs: Operand::Reg(r_col_bytes_f32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+        dst: r_val,
+        addr: r_addr_f32,
+        ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Sub {
+        dst: r_diff,
+        lhs: Operand::Reg(r_val),
+        rhs: Operand::Reg(r_local_max),
+        ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_scaled,
+        lhs: Operand::Reg(r_diff),
+        rhs: Operand::ImmF32(LOG2_E),
+        ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Ex2 {
+        dst: r_ex,
+        src: Operand::Reg(r_scaled),
+    }));
+    kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+        addr: r_addr_f32,
+        src: r_ex,
+        ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_local_sum,
+        lhs: Operand::Reg(r_local_sum),
+        rhs: Operand::Reg(r_ex),
+        ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_col,
+        lhs: Operand::Reg(r_col),
+        rhs: Operand::ImmU32(32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::Bra {
+        target: "SOFTMAX_EXP_LOOP".to_string(),
+    }));
+    kernel.push(PtxInstruction::Label("SOFTMAX_EXP_EXIT".to_string()));
+    for mask in [16u32, 8, 4, 2, 1] {
+        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncBfly {
+            dst: r_tmp_shfl,
+            src: r_local_sum,
+            lane_mask: Operand::ImmU32(mask),
+            c: 31,
+            mask: 0xFFFFFFFF,
+        }));
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: r_local_sum,
+            lhs: Operand::Reg(r_local_sum),
+            rhs: Operand::Reg(r_tmp_shfl),
+            ty: PtxType::F32,
+        }));
+    }
+
+    // Phase 3: normalize + cvt
+    kernel.push(PtxInstruction::Arith(ArithOp::Rcp {
+        dst: r_inv_sum,
+        src: Operand::Reg(r_local_sum),
+    }));
+    kernel.push(PtxInstruction::Mov {
+        dst: r_col,
+        src: Operand::Reg(tid_x),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("SOFTMAX_NORM_LOOP".to_string()));
+    let p_norm_done = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_norm_done,
+        cmp_op: CmpOp::Ge,
+        lhs: Operand::Reg(r_col),
+        rhs: Operand::Reg(seq_k),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_norm_done,
+        target: "SOFTMAX_NORM_EXIT".to_string(),
+        negate: false,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_col_bytes_f32,
+        lhs: Operand::Reg(r_col),
+        rhs: Operand::ImmU32(BYTES_PER_F32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_col_bytes_f16,
+        lhs: Operand::Reg(r_col),
+        rhs: Operand::ImmU32(BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_addr_f32,
+        lhs: Operand::Reg(r_scores_row),
+        rhs: Operand::Reg(r_col_bytes_f32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_addr_f16,
+        lhs: Operand::Reg(r_probs_row),
+        rhs: Operand::Reg(r_col_bytes_f16),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+        dst: r_val,
+        addr: r_addr_f32,
+        ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_prob_f32,
+        lhs: Operand::Reg(r_val),
+        rhs: Operand::Reg(r_inv_sum),
+        ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Cvt {
+        dst: r_prob_f16,
+        src: r_prob_f32,
+        dst_ty: PtxType::F16,
+        src_ty: PtxType::F32,
+    });
+    kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+        addr: r_addr_f16,
+        src: r_prob_f16,
+        ty: PtxType::F16,
+    }));
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_col,
+        lhs: Operand::Reg(r_col),
+        rhs: Operand::ImmU32(32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::Bra {
+        target: "SOFTMAX_NORM_LOOP".to_string(),
+    }));
+    kernel.push(PtxInstruction::Label("SOFTMAX_NORM_EXIT".to_string()));
+
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_row_idx,
+        lhs: Operand::Reg(r_row_idx),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_row_loop = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_row_loop,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(r_row_idx),
+        rhs: Operand::ImmU32(BM),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_row_loop,
+        target: "SOFTMAX_ROW_LOOP".to_string(),
+        negate: false,
+    }));
+}
+
+/// Copy `probs_tile` (16 × seq_k fp16 shared, row-major) → global
+/// `probs_global_rowslab`. Gate B dev output path only; Gate C
+/// consumes probs directly from shared in the second mma.sync.
+fn emit_store_probs_to_global(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    probs_tile_shared: Register,
+    probs_global_rowslab: Register,
+    tid_x: Register,
+    seq_k: Register,
+    seq_k_bytes_f16: Register,
+) {
+    let r_total_half2 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_total_half2,
+        lhs: Operand::Reg(seq_k),
+        rhs: Operand::ImmU32(8),
+        ty: PtxType::U32,
+    }));
+    let r_half2_per_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_half2_per_row,
+        lhs: Operand::Reg(seq_k),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+
+    let r_flat = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_flat,
+        src: Operand::Reg(tid_x),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("STORE_PROBS_LOOP".to_string()));
+    let p_done = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_done,
+        cmp_op: CmpOp::Ge,
+        lhs: Operand::Reg(r_flat),
+        rhs: Operand::Reg(r_total_half2),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_done,
+        target: "STORE_PROBS_EXIT".to_string(),
+        negate: false,
+    }));
+
+    let r_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_row,
+        lhs: Operand::Reg(r_flat),
+        rhs: Operand::Reg(r_half2_per_row),
+        ty: PtxType::U32,
+    }));
+    let r_col_half2 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_col_half2,
+        lhs: Operand::Reg(r_flat),
+        rhs: Operand::Reg(r_half2_per_row),
+        ty: PtxType::U32,
+    }));
+    let r_col_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_col_bytes,
+        lhs: Operand::Reg(r_col_half2),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    let r_shared_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: r_shared_off,
+        a: Operand::Reg(r_row),
+        b: Operand::Reg(seq_k_bytes_f16),
+        c: Operand::Reg(r_col_bytes),
+        ty: PtxType::U32,
+        mode: MadMode::Lo,
+    }));
+    let r_shared_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_shared_addr,
+        lhs: Operand::Reg(probs_tile_shared),
+        rhs: Operand::Reg(r_shared_off),
+        ty: PtxType::U32,
+    }));
+    let rd_row_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_row_off,
+        lhs: Operand::Reg(r_row),
+        rhs: Operand::Reg(seq_k_bytes_f16),
+        src_ty: PtxType::U32,
+    }));
+    let rd_col_bytes = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_col_bytes,
+        src: r_col_bytes,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+    let rd_per_thread_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_per_thread_off,
+        lhs: Operand::Reg(rd_row_off),
+        rhs: Operand::Reg(rd_col_bytes),
+        ty: PtxType::U64,
+    }));
+    let rd_global_addr = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_global_addr,
+        lhs: Operand::Reg(probs_global_rowslab),
+        rhs: Operand::Reg(rd_per_thread_off),
+        ty: PtxType::U64,
+    }));
+    let r_tmp = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+        dst: r_tmp,
+        addr: r_shared_addr,
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Memory(MemoryOp::StGlobal {
+        addr: rd_global_addr,
+        src: r_tmp,
+        ty: PtxType::U32,
+    }));
+
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_flat,
+        lhs: Operand::Reg(r_flat),
+        rhs: Operand::ImmU32(32),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::Bra {
+        target: "STORE_PROBS_LOOP".to_string(),
+    }));
+    kernel.push(PtxInstruction::Label("STORE_PROBS_EXIT".to_string()));
+}
+
+// ---------------------------------------------------------------------
+// Gate B — matmul1 + softmax + cvt dev kernel. Writes f16 probs
+// (seq_q × seq_k) to global. Deleted before Gate C ships.
+// ---------------------------------------------------------------------
+
+/// Build the IR module for the Gate B dev kernel.
+#[doc(hidden)]
+pub fn build_attention_tc_gate_b_module(sm: &str) -> PtxModule {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("attention_tc_gate_b");
+
+    kernel.add_param(PtxParam::pointer("q_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("k_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("probs_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::scalar("seq_q", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("seq_k", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("d_k", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("inv_sqrt_dk", PtxType::F32));
+
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_q".to_string(),
+        align: 4,
+        size_bytes: TILE_Q_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "k_chunk".to_string(),
+        align: 4,
+        size_bytes: K_CHUNK_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "scores_tile".to_string(),
+        align: 4,
+        size_bytes: SCORES_TILE_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "probs_tile".to_string(),
+        align: 4,
+        size_bytes: PROBS_TILE_BYTES,
+    });
+
+    // Params + cvta
+    let rd_q_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_q_param,
+        param_name: "q_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_k_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_k_param,
+        param_name: "k_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_probs_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_probs_param,
+        param_name: "probs_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let r_seq_k = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_seq_k,
+        param_name: "seq_k".to_string(),
+        ty: PtxType::U32,
+    }));
+    let r_d_k = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_d_k,
+        param_name: "d_k".to_string(),
+        ty: PtxType::U32,
+    }));
+    let r_inv_sqrt_dk = alloc.alloc(PtxType::F32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_inv_sqrt_dk,
+        param_name: "inv_sqrt_dk".to_string(),
+        ty: PtxType::F32,
+    }));
+
+    let rd_q = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_q,
+        src: rd_q_param,
+    }));
+    let rd_k_global = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_k_global,
+        src: rd_k_param,
+    }));
+    let rd_probs = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_probs,
+        src: rd_probs_param,
+    }));
+
+    let (r_tid, tid_instr) = special::tid_x(&mut alloc);
+    kernel.push(tid_instr);
+    let r_bidx = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_bidx,
+        src: Operand::SpecialReg(SpecialReg::CtaidX),
+        ty: PtxType::U32,
+    });
+
+    let r_block_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_block_row,
+        lhs: Operand::Reg(r_bidx),
+        rhs: Operand::ImmU32(BM),
+        ty: PtxType::U32,
+    }));
+
+    let r_d_k_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_d_k_bytes,
+        lhs: Operand::Reg(r_d_k),
+        rhs: Operand::ImmU32(BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+    let r_seq_k_bytes_f32 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_seq_k_bytes_f32,
+        lhs: Operand::Reg(r_seq_k),
+        rhs: Operand::ImmU32(BYTES_PER_F32),
+        ty: PtxType::U32,
+    }));
+    let r_seq_k_bytes_f16 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_seq_k_bytes_f16,
+        lhs: Operand::Reg(r_seq_k),
+        rhs: Operand::ImmU32(BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+
+    let rd_q_rowslab_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_q_rowslab_off,
+        lhs: Operand::Reg(r_block_row),
+        rhs: Operand::Reg(r_d_k_bytes),
+        src_ty: PtxType::U32,
+    }));
+    let rd_q_rowslab = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_q_rowslab,
+        lhs: Operand::Reg(rd_q),
+        rhs: Operand::Reg(rd_q_rowslab_off),
+        ty: PtxType::U64,
+    }));
+    let rd_probs_rowslab_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_probs_rowslab_off,
+        lhs: Operand::Reg(r_block_row),
+        rhs: Operand::Reg(r_seq_k_bytes_f16),
+        src_ty: PtxType::U32,
+    }));
+    let rd_probs_rowslab = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_probs_rowslab,
+        lhs: Operand::Reg(rd_probs),
+        rhs: Operand::Reg(rd_probs_rowslab_off),
+        ty: PtxType::U64,
+    }));
+
+    let r_tile_q = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_q,
+        src: Operand::SharedAddr("tile_q".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_k_chunk = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_k_chunk,
+        src: Operand::SharedAddr("k_chunk".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_scores_tile = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_scores_tile,
+        src: Operand::SharedAddr("scores_tile".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_probs_tile = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_probs_tile,
+        src: Operand::SharedAddr("probs_tile".to_string()),
+        ty: PtxType::U32,
+    });
+
+    emit_stage_q(
+        &mut alloc,
+        &mut kernel,
+        rd_q_rowslab,
+        r_tile_q,
+        r_tid,
+        r_d_k,
+    );
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    let r_num_n_chunks = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_num_n_chunks,
+        lhs: Operand::Reg(r_seq_k),
+        rhs: Operand::ImmU32(BN),
+        ty: PtxType::U32,
+    }));
+    let r_num_k_chunks = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_num_k_chunks,
+        lhs: Operand::Reg(r_d_k),
+        rhs: Operand::ImmU32(BK),
+        ty: PtxType::U32,
+    }));
+
+    let r_n_chunk = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_n_chunk,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("ATTN_TC_B_N_LOOP".to_string()));
+
+    let frag_d = alloc_c(&mut alloc);
+    for r in &frag_d.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmF32(0.0),
+            ty: PtxType::F32,
+        });
+    }
+
+    let r_n_start = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_n_start,
+        lhs: Operand::Reg(r_n_chunk),
+        rhs: Operand::ImmU32(BN),
+        ty: PtxType::U32,
+    }));
+    let rd_n_start_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_n_start_off,
+        lhs: Operand::Reg(r_n_start),
+        rhs: Operand::Reg(r_d_k_bytes),
+        src_ty: PtxType::U32,
+    }));
+    let rd_k_n_base = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_k_n_base,
+        lhs: Operand::Reg(rd_k_global),
+        rhs: Operand::Reg(rd_n_start_off),
+        ty: PtxType::U64,
+    }));
+
+    let r_k_chunk_idx = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_k_chunk_idx,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("ATTN_TC_B_K_LOOP".to_string()));
+
+    let r_k_start_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_start_bytes,
+        lhs: Operand::Reg(r_k_chunk_idx),
+        rhs: Operand::ImmU32(BK * BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+    let rd_k_start_bytes = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_k_start_bytes,
+        src: r_k_start_bytes,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+    let rd_k_chunk_src = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_k_chunk_src,
+        lhs: Operand::Reg(rd_k_n_base),
+        rhs: Operand::Reg(rd_k_start_bytes),
+        ty: PtxType::U64,
+    }));
+    emit_stage_k_chunk(
+        &mut alloc,
+        &mut kernel,
+        rd_k_chunk_src,
+        r_k_chunk,
+        r_tid,
+        r_d_k_bytes,
+    );
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    let r_frag_a_base = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_frag_a_base,
+        lhs: Operand::Reg(r_tile_q),
+        rhs: Operand::Reg(r_k_start_bytes),
+        ty: PtxType::U32,
+    }));
+    let frag_a = emit_load_fragment_a_runtime_stride(
+        &mut alloc,
+        &mut kernel,
+        r_frag_a_base,
+        r_tid,
+        r_d_k_bytes,
+    );
+    let frag_b = load_fragment_b_m16n8k16_shared_col(
+        &mut alloc,
+        &mut kernel,
+        r_k_chunk,
+        r_tid,
+        32,
+    );
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+        d: frag_d,
+        a: frag_a,
+        b: frag_b,
+        c: frag_d,
+        shape: MmaShape::M16N8K16,
+        d_ty: PtxType::F32,
+        a_ty: PtxType::F16,
+        b_ty: PtxType::F16,
+        c_ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_k_chunk_idx,
+        lhs: Operand::Reg(r_k_chunk_idx),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_k_loop = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_k_loop,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(r_k_chunk_idx),
+        rhs: Operand::Reg(r_num_k_chunks),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_k_loop,
+        target: "ATTN_TC_B_K_LOOP".to_string(),
+        negate: false,
+    }));
+
+    for r in &frag_d.regs {
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: *r,
+            lhs: Operand::Reg(*r),
+            rhs: Operand::Reg(r_inv_sqrt_dk),
+            ty: PtxType::F32,
+        }));
+    }
+
+    emit_store_fragment_c_to_scores_tile(
+        &mut alloc,
+        &mut kernel,
+        frag_d,
+        r_scores_tile,
+        r_tid,
+        r_n_chunk,
+        r_seq_k_bytes_f32,
+    );
+
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_n_chunk,
+        lhs: Operand::Reg(r_n_chunk),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_n_loop = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_n_loop,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(r_n_chunk),
+        rhs: Operand::Reg(r_num_n_chunks),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_n_loop,
+        target: "ATTN_TC_B_N_LOOP".to_string(),
+        negate: false,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    emit_softmax_rows(
+        &mut alloc,
+        &mut kernel,
+        r_scores_tile,
+        r_probs_tile,
+        r_tid,
+        r_seq_k,
+        r_seq_k_bytes_f32,
+        r_seq_k_bytes_f16,
+    );
+
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    emit_store_probs_to_global(
+        &mut alloc,
+        &mut kernel,
+        r_probs_tile,
+        rd_probs_rowslab,
+        r_tid,
+        r_seq_k,
+        r_seq_k_bytes_f16,
+    );
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new(sm);
+    module.add_kernel(kernel);
+    module
+}
+
+/// Gate B dev host entrypoint — runs `attention_tc_gate_b` and writes
+/// f16 probs (seq_q × seq_k) to `probs`. Deleted before final commit.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn attention_tc_gate_b(
+    device: &KaioDevice,
+    q: &GpuBuffer<f16>,
+    k: &GpuBuffer<f16>,
+    probs: &mut GpuBuffer<f16>,
+    seq_q: u32,
+    seq_k: u32,
+    d_k: u32,
+) -> Result<()> {
+    use cudarc::driver::{LaunchConfig, PushKernelArg};
+
+    if seq_q == 0 || seq_k == 0 || d_k == 0 {
+        return Err(KaioError::InvalidConfig(
+            "attention_tc_gate_b dims must be non-zero".to_string(),
+        ));
+    }
+    if !seq_q.is_multiple_of(BM) || !seq_k.is_multiple_of(BK) || !d_k.is_multiple_of(BK) {
+        return Err(KaioError::InvalidConfig(format!(
+            "attention_tc_gate_b: seq_q%16=seq_k%16=d_k%16=0 required \
+             (got seq_q={seq_q}, seq_k={seq_k}, d_k={d_k})"
+        )));
+    }
+    if seq_k > MAX_SEQ_K || d_k > MAX_D_K {
+        return Err(KaioError::InvalidConfig(format!(
+            "attention_tc_gate_b: seq_k ≤ {MAX_SEQ_K} and d_k ≤ {MAX_D_K} required"
+        )));
+    }
+    let probs_len = (seq_q as usize) * (seq_k as usize);
+    if probs.len() < probs_len {
+        return Err(KaioError::InvalidConfig(format!(
+            "attention_tc_gate_b: probs buffer too small: need {probs_len}, got {}",
+            probs.len()
+        )));
+    }
+
+    let info = device.info()?;
+    let (major, minor) = info.compute_capability;
+    let sm = format!("sm_{major}{minor}");
+    let module = build_attention_tc_gate_b_module(&sm);
+    let kmodule = device.load_module(&module)?;
+    let func = kmodule.function("attention_tc_gate_b")?;
+
+    let inv_sqrt_dk: f32 = 1.0f32 / (d_k as f32).sqrt();
+
+    let cfg = LaunchConfig {
+        grid_dim: (seq_q / BM, 1, 1),
+        block_dim: (32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(func.inner())
+            .arg(q.inner())
+            .arg(k.inner())
+            .arg(probs.inner_mut())
+            .arg(&seq_q)
+            .arg(&seq_k)
+            .arg(&d_k)
+            .arg(&inv_sqrt_dk)
+            .launch(cfg)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

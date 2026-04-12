@@ -75,3 +75,10 @@ pub use matmul_tc_async_kernel::matmul_tc_async;
 // is a regression gate failure.
 #[doc(hidden)]
 pub use attention_tc_kernel::attention_tc_gate_a;
+
+// TEMP / DEV: Sprint 6.6 Gate B dev entrypoint — matmul1 + softmax
+// + cvt bridge (writes f16 probs). Isolates the softmax + cvt seam
+// before Gate C layers on the second matmul. Deleted before the
+// final Sprint 6.6 commit.
+#[doc(hidden)]
+pub use attention_tc_kernel::attention_tc_gate_b;
