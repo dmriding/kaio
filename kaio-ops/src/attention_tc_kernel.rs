@@ -3595,4 +3595,119 @@ mod tests {
         assert_eq!(required, 80);
         assert_eq!(actual, 70);
     }
+
+    // ---- 6.6c regression tests: SM validation + shared-memory budget ----
+
+    #[test]
+    fn attention_tc_module_builds_for_sm_89() {
+        let module = build_attention_tc_module("sm_89", false);
+        let emitted = {
+            use kaio_core::emit::{Emit, PtxWriter};
+            let mut w = PtxWriter::new();
+            module.emit(&mut w).unwrap();
+            w.finish()
+        };
+        assert!(emitted.contains(".entry attention_tc"));
+        assert!(emitted.contains("mma.sync.aligned.m16n8k16"));
+        assert!(emitted.contains("cvt.rn.f16.f32"));
+        // Exactly two mma.sync in the non-causal variant.
+        let mma_count = emitted.matches("mma.sync.aligned.m16n8k16").count();
+        assert_eq!(
+            mma_count, 2,
+            "attention_tc should emit exactly 2 mma.sync (matmul1 + matmul2), got {mma_count}"
+        );
+    }
+
+    #[test]
+    fn attention_tc_causal_module_contains_mask_ops() {
+        let module = build_attention_tc_module("sm_89", true);
+        let emitted = {
+            use kaio_core::emit::{Emit, PtxWriter};
+            let mut w = PtxWriter::new();
+            module.emit(&mut w).unwrap();
+            w.finish()
+        };
+        assert!(emitted.contains(".entry attention_tc_causal"));
+        // Causal variant emits setp.gt.u32 + selp.f32 pairs for each
+        // of the 4 FragmentC scalar positions per n_chunk.
+        assert!(
+            emitted.contains("setp.gt.u32"),
+            "causal variant should emit setp.gt.u32 for the mask predicate"
+        );
+        assert!(
+            emitted.contains("selp.f32"),
+            "causal variant should emit selp.f32 for the branchless mask"
+        );
+        let mma_count = emitted.matches("mma.sync.aligned.m16n8k16").count();
+        assert_eq!(mma_count, 2);
+    }
+
+    #[test]
+    fn attention_tc_module_rejects_sm_70_via_validate() {
+        use kaio_core::ir::ValidationError;
+        let module = build_attention_tc_module("sm_70", false);
+        let err = module
+            .validate()
+            .expect_err("sm_70 should reject mma.sync via validate");
+        let ValidationError::SmTooLow {
+            required, actual, ..
+        } = err;
+        assert_eq!(required, 80);
+        assert_eq!(actual, 70);
+    }
+
+    #[test]
+    fn attention_tc_causal_module_rejects_sm_70_via_validate() {
+        use kaio_core::ir::ValidationError;
+        let module = build_attention_tc_module("sm_70", true);
+        let err = module
+            .validate()
+            .expect_err("sm_70 should reject mma.sync (causal variant) via validate");
+        let ValidationError::SmTooLow {
+            required, actual, ..
+        } = err;
+        assert_eq!(required, 80);
+        assert_eq!(actual, 70);
+    }
+
+    #[test]
+    fn attention_tc_module_shared_bytes_under_ceiling() {
+        // Worst-case module (seq_k=384, d_k=128, d_v=64 worst-case
+        // buffers sized via the MAX_* constants) shared-memory usage
+        // must fit under the 46 KB ceiling, leaving ≥2 KB margin
+        // vs the 48 KB hardware static shared limit.
+        //
+        // Sum of declared byte counts in both attention_tc variants
+        // (non-causal + causal declare identically-shaped regions):
+        //   tile_q:      4 KB
+        //   k_chunk:     256 B
+        //   scores_tile: 24 KB
+        //   probs_tile:  12 KB
+        //   v_chunk:     256 B
+        //   Total:       ~40.5 KB
+        //
+        // Regression-gates against future kaio-core alignment-policy
+        // drift that could silently push us over 48 KB without a
+        // failing compile.
+        for causal in [false, true] {
+            let module = build_attention_tc_module("sm_89", causal);
+            assert_eq!(module.kernels.len(), 1);
+            let decls = &module.kernels[0].shared_decls;
+            let sum: u32 = decls.iter().map(|d| d.size_bytes).sum();
+            assert!(
+                sum <= SHARED_MEMORY_CEILING_BYTES,
+                "attention_tc{causal} shared bytes {sum} exceed ceiling {SHARED_MEMORY_CEILING_BYTES}",
+                causal = if causal { "_causal" } else { "" }
+            );
+            // And assert the total matches what the module-level const
+            // says it should (catches silent decl drift).
+            assert_eq!(
+                sum, DECLARED_SHARED_BYTES,
+                "attention_tc{causal} declared shared sum changed \
+                 unexpectedly — update DECLARED_SHARED_BYTES or \
+                 the shared decls",
+                causal = if causal { "_causal" } else { "" }
+            );
+        }
+    }
 }
