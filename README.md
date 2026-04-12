@@ -323,6 +323,14 @@ for a complete end-to-end example.
     ad-hoc per-kernel checks. Narrow contract: temporary
     `M%16=N%8=K%16=0` constraint, production performance targets land
     in Sprint 6.7.
+  - [x] **6.6** — Fused tensor-core scaled dot-product attention
+    (`attention_tc` / `attention_tc_causal`, internal preview). Two
+    back-to-back `mma.sync.m16n8k16` with warp-shuffle softmax and
+    intra-kernel `cvt.rn.f16.f32` bridge. 11 GPU correctness tests
+    pass on RTX 4090 (5 non-causal + 5 causal + row-0 canary) at
+    `seq_k ≤ 384`, `d_k ≤ 128`, SM 8.0+. `#[doc(hidden)]` until
+    Phase 7's FlashAttention-TC lifts the constraints and
+    `attention_auto_tc` arrives as the user-facing dispatcher.
 - [ ] **Phase 7** — Quantized kernels (INT8/INT4), training integration
   (`kaio-candle` bridge)
 - [ ] **Phase 8** — PyO3 bindings (Python access to kaio-ops)

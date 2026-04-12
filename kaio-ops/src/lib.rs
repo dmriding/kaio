@@ -68,21 +68,6 @@ pub use matmul_tc_kernel::matmul_tc;
 #[doc(hidden)]
 pub use matmul_tc_async_kernel::matmul_tc_async;
 
-// TEMP / DEV: Sprint 6.6 Gate A dev entrypoint — matmul1-only
-// (Q·Kᵀ·inv_sqrt_dk → scores). Exists solely to validate the first
-// mma.sync in isolation during 6.6 development. Deleted before the
-// final Sprint 6.6 commit — any production code reaching this symbol
-// is a regression gate failure.
-#[doc(hidden)]
-pub use attention_tc_kernel::attention_tc_gate_a;
-
-// TEMP / DEV: Sprint 6.6 Gate B dev entrypoint — matmul1 + softmax
-// + cvt bridge (writes f16 probs). Isolates the softmax + cvt seam
-// before Gate C layers on the second matmul. Deleted before the
-// final Sprint 6.6 commit.
-#[doc(hidden)]
-pub use attention_tc_kernel::attention_tc_gate_b;
-
 // TEMP: Sprint 6.6 final `attention_tc` + `attention_tc_causal` —
 // fused TC scaled dot-product attention. #[doc(hidden)] pub use
 // until Phase 7 lifts the divisibility + seq_k constraints and adds

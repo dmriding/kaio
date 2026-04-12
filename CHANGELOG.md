@@ -189,6 +189,50 @@ Branch: `phase6`. In progress toward v0.2.0.
     SM based on the actual device. For scalar kernels, the env var
     still works as before.
 
+### Added — Sprint 6.6 (fused TC attention, internal preview)
+- **`kaio_ops::attention_tc`** — first fused tensor-core scaled
+  dot-product attention in KAIO. `f16 Q × f16 K × f16 V → f32 out`
+  via two back-to-back `mma.sync.m16n8k16` instructions with an
+  intra-kernel `cvt.rn.f16.f32` bridge between the f32 softmax
+  output and the f16 input to the second matmul — the architectural
+  contract every production TC-attention implementation (FlashAttention
+  v2, xFormers, FasterTransformer) depends on, validated here on
+  RTX 4090 bit-close to the CPU reference. `#[doc(hidden)] pub use`
+  — **internal preview only** until Phase 7's FlashAttention-TC
+  lands and `attention_auto_tc` becomes the real user-facing
+  dispatcher (matches the `matmul_auto_tc` pattern from Sprint 6.5).
+  - Narrow contract: SM 8.0+ (Ampere or newer), `seq_q % 16 == 0`,
+    `seq_k % 16 == 0`, `d_k % 16 == 0`, `d_v % 8 == 0`,
+    `seq_k ≤ 384`, `d_k ≤ 128`, `d_v ≤ 128`. Divisibility and
+    `seq_k` cap lifted at Phase 7; the seq_k ceiling exists because
+    the full softmax scores matrix lives in shared memory (Phase 7's
+    online softmax eliminates it).
+  - Correctness-first, **not fast**. Single-warp-per-block kernel
+    targeting the 6.3 bring-up philosophy — deliberately slow at
+    realistic sizes, restructured for throughput at Sprint 6.7.
+- **`kaio_ops::attention_tc_causal`** — standard decoder causal-
+  masked variant, same signature. Build-time `causal: bool` flag
+  drives PTX emission (zero-runtime-cost branching; two distinct
+  modules from one Rust builder). Applies `-3.4e38` mask between
+  matmul1 and softmax via `setp.gt.u32` + `selp.f32` per-lane
+  branchless select. Global-coordinate math regression-gated by
+  a dedicated `row0_self_only` canary test.
+- **`kaio_core::instr::ArithOp::Selp`** — new IR variant emitting
+  `selp{ty} dst, a, b, p` (PTX ISA §9.7.8.1). Branchless conditional
+  assignment; required by the 6.6b causal mask and generally useful
+  for any lane-predicated data-flow that should avoid warp divergence.
+- Per-binary `#[allow(dead_code)]` on `kaio-ops/tests/common/mod.rs` —
+  shared helpers file is compiled per test binary and any one binary
+  sees different subsets as "used"; the allow silences the false
+  positives without hiding genuinely-unused code.
+- Eleven new GPU correctness tests on RTX 4090: five shapes for
+  `attention_tc`, five shapes for `attention_tc_causal`, plus the
+  causal row-0 canary. Five new host unit tests locking down module
+  shape (mma count, cvt presence, mask-op presence for causal),
+  `sm_70` rejection via `PtxModule::validate()` for both variants,
+  and a shared-memory budget regression test (worst-case
+  `SharedDecl` sum + alignment ≤ 46 KB). Test counts: 275 host / 133 GPU.
+
 ## [0.1.0] — Phase 5: Fused Attention & Community Release
 
 ### Added — Phase 5

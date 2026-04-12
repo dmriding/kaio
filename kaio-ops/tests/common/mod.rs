@@ -9,7 +9,13 @@
 //! Each integration-test file declares `mod common;` — Rust
 //! compiles one copy of this module per test binary (that's how
 //! the integration-test harness works; not ideal, but cheaper than
-//! every file re-inlining the helpers).
+//! every file re-inlining the helpers). Per-binary the unused
+//! helpers look dead; `#[allow(dead_code)]` silences the false
+//! positives without hiding genuinely-unused code in this module
+//! (verified by `cargo test --workspace` — any pruned helper
+//! would break the binary that uses it, not this warning path).
+
+#![allow(dead_code)]
 
 use half::f16;
 
@@ -226,64 +232,6 @@ pub fn cpu_attention_f16xf16_f32(
         }
     }
     out
-}
-
-/// CPU reference for just the scaled-and-optionally-masked scores
-/// matrix (Q·Kᵀ·inv_sqrt_dk, plus optional causal mask). Gate A (matmul1
-/// only) tests against this; Gate B tests against a scores+softmax+cvt
-/// reference built on top.
-#[allow(clippy::too_many_arguments)]
-pub fn cpu_attention_scores_f16xf16_f32(
-    q: &[f16],
-    k: &[f16],
-    seq_q: usize,
-    seq_k: usize,
-    d_k: usize,
-    causal: bool,
-) -> Vec<f32> {
-    let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
-    let mut scores = vec![0.0f32; seq_q * seq_k];
-    for i in 0..seq_q {
-        for j in 0..seq_k {
-            let mut dot = 0.0f32;
-            for d in 0..d_k {
-                dot += q[i * d_k + d].to_f32() * k[j * d_k + d].to_f32();
-            }
-            let s = dot * inv_sqrt_dk;
-            scores[i * seq_k + j] = if causal && j > i { f32::NEG_INFINITY } else { s };
-        }
-    }
-    scores
-}
-
-/// CPU reference for the f32 softmax output (probs before the f16 cvt).
-/// Gate B tests against this.
-pub fn cpu_attention_probs_f32(
-    scores: &[f32],
-    seq_q: usize,
-    seq_k: usize,
-) -> Vec<f32> {
-    let mut probs = vec![0.0f32; seq_q * seq_k];
-    for i in 0..seq_q {
-        let row = &scores[i * seq_k..(i + 1) * seq_k];
-        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        for j in 0..seq_k {
-            let e = if row[j] == f32::NEG_INFINITY {
-                0.0
-            } else {
-                (row[j] - max).exp()
-            };
-            probs[i * seq_k + j] = e;
-            sum += e;
-        }
-        if sum > 0.0 {
-            for j in 0..seq_k {
-                probs[i * seq_k + j] /= sum;
-            }
-        }
-    }
-    probs
 }
 
 /// Attention-tolerance comparator. Absolute OR relative — the `OR` is
