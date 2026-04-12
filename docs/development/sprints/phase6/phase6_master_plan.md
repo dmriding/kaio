@@ -120,7 +120,8 @@ No implicit assumptions, no runtime failure as discovery mechanism.
 | 6.5 | Integration + auto-tuner | 3-way dispatch (scalar / TC / TC+async) |
 | 6.6 | TC attention (optional) | mma.sync in FlashAttention inner loops — skip if unstable |
 | 6.7 | Benchmarks + performance docs | cuBLAS comparison, precision docs |
-| 6.8 | Polish + v0.2.0 publish | CHANGELOG, README, version bump |
+| 6.8 | Showcase examples for v0.2.0 | Three standalone Cargo projects under `examples/` — fused SiLU-gate, GELU comparison, single-block RMSNorm. See [`sprint_6_8.md`](sprint_6_8.md). |
+| 6.9 | Polish + v0.2.0 publish | CHANGELOG, README, version bump |
 
 ## Dependency Graph
 
@@ -135,7 +136,9 @@ No implicit assumptions, no runtime failure as discovery mechanism.
                                                        |
                                                   6.7 (benchmarks)
                                                        |
-                                                  6.8 (publish)
+                                                  6.8 (showcase examples)
+                                                       |
+                                                  6.9 (publish)
 ```
 
 ## Success Criteria
