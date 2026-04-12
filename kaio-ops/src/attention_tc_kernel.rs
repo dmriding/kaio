@@ -2677,13 +2677,20 @@ fn emit_store_fragment_c_to_global_out(
 // Final kernel: matmul1 → scale → softmax → cvt → matmul2 → output.
 // ---------------------------------------------------------------------
 
-/// Build the IR module for the final `attention_tc` kernel (Gate C
-/// non-causal variant). Causal variant uses the same builder with
-/// the `causal: bool` flag flipped (6.6b).
+/// Build the IR module for the final `attention_tc` kernel. Takes a
+/// build-time `causal: bool` flag that drives PTX emission — `true`
+/// emits the mask block between matmul1 and softmax, `false` skips
+/// it. No runtime branch; two distinct modules for two distinct
+/// variants (kernel names `attention_tc` / `attention_tc_causal`).
 #[doc(hidden)]
-pub fn build_attention_tc_module(sm: &str) -> PtxModule {
+pub fn build_attention_tc_module(sm: &str, causal: bool) -> PtxModule {
     let mut alloc = RegisterAllocator::new();
-    let mut kernel = PtxKernel::new("attention_tc");
+    let kernel_name = if causal {
+        "attention_tc_causal"
+    } else {
+        "attention_tc"
+    };
+    let mut kernel = PtxKernel::new(kernel_name);
 
     kernel.add_param(PtxParam::pointer("q_ptr", PtxType::F16));
     kernel.add_param(PtxParam::pointer("k_ptr", PtxType::F16));
@@ -3078,6 +3085,133 @@ pub fn build_attention_tc_module(sm: &str) -> PtxModule {
         }));
     }
 
+    // Causal mask (build-time flag). FragmentC layout (PTX ISA
+    // 9.7.13.5.8.1 m16n8k16 f32) gives each lane four scalars at:
+    //   reg[0]: (group_id    , 2*tig    )
+    //   reg[1]: (group_id    , 2*tig + 1)
+    //   reg[2]: (group_id + 8, 2*tig    )
+    //   reg[3]: (group_id + 8, 2*tig + 1)
+    // where group_id = tid/4, tig = tid%4. These are row/col
+    // coordinates within this n_chunk's 16×8 output tile. Map to
+    // *global* seq positions:
+    //   global_row = block_row + local_row
+    //   global_col = n_chunk*8 + local_col
+    // and predicate `global_col > global_row` → set scalar to
+    // -3.4e38 (matches scalar attention_causal's convention; softmax
+    // max-subtract then underflows cleanly to 0 without NaN).
+    if causal {
+        const NEG_MASK_F32: f32 = -3.4028235e38f32;
+        // group_id = tid / 4, tig = tid % 4 — already computable on
+        // every lane. Reuse the same formulas as the store helper.
+        let r_group_id = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Div {
+            dst: r_group_id,
+            lhs: Operand::Reg(r_tid),
+            rhs: Operand::ImmU32(4),
+            ty: PtxType::U32,
+        }));
+        let r_tig = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+            dst: r_tig,
+            lhs: Operand::Reg(r_tid),
+            rhs: Operand::ImmU32(4),
+            ty: PtxType::U32,
+        }));
+        // two_tig = 2 * tig (column base within the 8-col chunk)
+        let r_two_tig = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: r_two_tig,
+            lhs: Operand::Reg(r_tig),
+            rhs: Operand::ImmU32(2),
+            ty: PtxType::U32,
+        }));
+        // n_start = n_chunk * 8  (already computed above as r_n_start)
+        // global_row_g0 = block_row + group_id
+        // global_row_g8 = block_row + group_id + 8
+        let r_global_row_g0 = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: r_global_row_g0,
+            lhs: Operand::Reg(r_block_row),
+            rhs: Operand::Reg(r_group_id),
+            ty: PtxType::U32,
+        }));
+        let r_global_row_g8 = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: r_global_row_g8,
+            lhs: Operand::Reg(r_global_row_g0),
+            rhs: Operand::ImmU32(8),
+            ty: PtxType::U32,
+        }));
+        // global_col_c0 = n_start + 2*tig
+        // global_col_c1 = n_start + 2*tig + 1
+        let r_global_col_c0 = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: r_global_col_c0,
+            lhs: Operand::Reg(r_n_start),
+            rhs: Operand::Reg(r_two_tig),
+            ty: PtxType::U32,
+        }));
+        let r_global_col_c1 = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: r_global_col_c1,
+            lhs: Operand::Reg(r_global_col_c0),
+            rhs: Operand::ImmU32(1),
+            ty: PtxType::U32,
+        }));
+
+        let apply_mask = |alloc: &mut RegisterAllocator,
+                          kernel: &mut PtxKernel,
+                          dst: Register,
+                          col: Register,
+                          row: Register| {
+            // p = (col > row)
+            let p = alloc.alloc(PtxType::Pred);
+            kernel.push(PtxInstruction::Control(ControlOp::SetP {
+                dst: p,
+                cmp_op: CmpOp::Gt,
+                lhs: Operand::Reg(col),
+                rhs: Operand::Reg(row),
+                ty: PtxType::U32,
+            }));
+            // dst = p ? -3.4e38 : dst
+            kernel.push(PtxInstruction::Arith(ArithOp::Selp {
+                dst,
+                a: Operand::ImmF32(NEG_MASK_F32),
+                b: Operand::Reg(dst),
+                pred: p,
+                ty: PtxType::F32,
+            }));
+        };
+        apply_mask(
+            &mut alloc,
+            &mut kernel,
+            frag_s.regs[0],
+            r_global_col_c0,
+            r_global_row_g0,
+        );
+        apply_mask(
+            &mut alloc,
+            &mut kernel,
+            frag_s.regs[1],
+            r_global_col_c1,
+            r_global_row_g0,
+        );
+        apply_mask(
+            &mut alloc,
+            &mut kernel,
+            frag_s.regs[2],
+            r_global_col_c0,
+            r_global_row_g8,
+        );
+        apply_mask(
+            &mut alloc,
+            &mut kernel,
+            frag_s.regs[3],
+            r_global_col_c1,
+            r_global_row_g8,
+        );
+    }
+
     // Store scores tile chunk.
     emit_store_fragment_c_to_scores_tile(
         &mut alloc,
@@ -3342,6 +3476,43 @@ pub fn attention_tc(
     d_k: u32,
     d_v: u32,
 ) -> Result<()> {
+    attention_tc_dispatch(device, q, k, v, out, seq_q, seq_k, d_k, d_v, false)
+}
+
+/// Fused TC attention host API (causal). Identical to `attention_tc`
+/// but applies the standard decoder causal mask between matmul1 and
+/// softmax — scores[i, j] for `j > i` (global coordinates) are set
+/// to -3.4e38 so that `exp(score - row_max)` underflows to 0,
+/// matching scalar `attention_causal` semantics. Build-time flag
+/// path; no runtime branch inside the warp.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_tc_causal(
+    device: &KaioDevice,
+    q: &GpuBuffer<f16>,
+    k: &GpuBuffer<f16>,
+    v: &GpuBuffer<f16>,
+    out: &mut GpuBuffer<f32>,
+    seq_q: u32,
+    seq_k: u32,
+    d_k: u32,
+    d_v: u32,
+) -> Result<()> {
+    attention_tc_dispatch(device, q, k, v, out, seq_q, seq_k, d_k, d_v, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attention_tc_dispatch(
+    device: &KaioDevice,
+    q: &GpuBuffer<f16>,
+    k: &GpuBuffer<f16>,
+    v: &GpuBuffer<f16>,
+    out: &mut GpuBuffer<f32>,
+    seq_q: u32,
+    seq_k: u32,
+    d_k: u32,
+    d_v: u32,
+    causal: bool,
+) -> Result<()> {
     use cudarc::driver::{LaunchConfig, PushKernelArg};
 
     validate_attention_tc_dims(q, k, v, out, seq_q, seq_k, d_k, d_v)?;
@@ -3349,13 +3520,18 @@ pub fn attention_tc(
     let info = device.info()?;
     let (major, minor) = info.compute_capability;
     let sm = format!("sm_{major}{minor}");
-    let module = build_attention_tc_module(&sm);
+    let module = build_attention_tc_module(&sm, causal);
     // ? propagates KaioError::Validation cleanly on pre-Ampere —
     // PtxModule::validate catches mma.sync's SM requirement before
     // any driver interaction. Distinct from KaioError::PtxLoad
     // which stays reserved for genuine ptxas / driver failures.
     let kmodule = device.load_module(&module)?;
-    let func = kmodule.function("attention_tc")?;
+    let func_name = if causal {
+        "attention_tc_causal"
+    } else {
+        "attention_tc"
+    };
+    let func = kmodule.function(func_name)?;
 
     let inv_sqrt_dk: f32 = 1.0f32 / (d_k as f32).sqrt();
 

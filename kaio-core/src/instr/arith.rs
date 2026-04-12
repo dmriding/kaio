@@ -257,6 +257,26 @@ pub enum ArithOp {
         /// Source operand.
         src: Operand,
     },
+    /// Select-if-predicate: `selp{ty} dst, a, b, p;` → `dst = p ? a : b`.
+    ///
+    /// Branchless conditional assignment — no warp divergence. Useful
+    /// for applying per-lane predicated writes (e.g. Sprint 6.6b's
+    /// causal mask emits `setp.gt.u32 %p, %col, %row; selp.f32 %score,
+    /// -3.4e38, %score, %p`). PTX ISA §9.7.8.1.
+    ///
+    /// Example: `selp.f32 %f5, %f3, %f4, %p1;`
+    Selp {
+        /// Destination register.
+        dst: Register,
+        /// Operand selected when predicate is true.
+        a: Operand,
+        /// Operand selected when predicate is false.
+        b: Operand,
+        /// Predicate register.
+        pred: Register,
+        /// PTX type suffix.
+        ty: PtxType,
+    },
 }
 
 impl Emit for ArithOp {
@@ -344,6 +364,16 @@ impl Emit for ArithOp {
             }
             ArithOp::Rcp { dst, src } => {
                 w.instruction("rcp.approx.f32", &[dst as &dyn fmt::Display, src])
+            }
+            ArithOp::Selp {
+                dst,
+                a,
+                b,
+                pred,
+                ty,
+            } => {
+                let mnemonic = format!("selp{}", ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, a, b, pred])
             }
         }
     }
@@ -732,5 +762,27 @@ mod tests {
         .emit(&mut w)
         .unwrap();
         assert_eq!(w.finish(), "    rcp.approx.f32 %f0, %f1;\n");
+    }
+
+    #[test]
+    fn emit_selp_f32() {
+        // Branchless select: `selp.f32 dst, a, b, p` → if p then a else b.
+        // Used by Sprint 6.6b causal attention mask:
+        //   setp.gt.u32 %p, %col, %row;
+        //   selp.f32 %score, -3.4e38, %score, %p;
+        // Operand::ImmF32 emits decimal form (same convention as
+        // matmul_tc's FragmentC zero-init); ptxas accepts it.
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Selp {
+            dst: reg(RegKind::F, 5, PtxType::F32),
+            a: Operand::ImmF32(1.0),
+            b: Operand::Reg(reg(RegKind::F, 4, PtxType::F32)),
+            pred: reg(RegKind::P, 1, PtxType::Pred),
+            ty: PtxType::F32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    selp.f32 %f5, 1.0, %f4, %p1;\n");
     }
 }

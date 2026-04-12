@@ -83,11 +83,11 @@ pub use attention_tc_kernel::attention_tc_gate_a;
 #[doc(hidden)]
 pub use attention_tc_kernel::attention_tc_gate_b;
 
-// TEMP: Sprint 6.6 final `attention_tc` — fused non-causal TC
-// scaled dot-product attention. #[doc(hidden)] pub use until Phase 7
-// lifts the divisibility + seq_k constraints and adds
+// TEMP: Sprint 6.6 final `attention_tc` + `attention_tc_causal` —
+// fused TC scaled dot-product attention. #[doc(hidden)] pub use
+// until Phase 7 lifts the divisibility + seq_k constraints and adds
 // `attention_flash_tc` (at which point `attention_auto_tc` becomes
 // the real user-facing dispatcher, matching the `matmul_auto_tc`
 // pattern from Sprint 6.5).
 #[doc(hidden)]
-pub use attention_tc_kernel::attention_tc;
+pub use attention_tc_kernel::{attention_tc, attention_tc_causal};
