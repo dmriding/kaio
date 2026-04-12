@@ -186,7 +186,7 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 | Attention       | `kaio_ops::attention()`, `attention_causal()`              | Supported |
 | FlashAttention  | `kaio_ops::attention_flash()` — O(d_k) memory             | Supported |
 | Auto-tuner      | `kaio_ops::tune_matmul()`, `matmul_auto()`                | Supported |
-| TC auto-tuner   | `kaio_ops::matmul_auto_tc()` (f16, SM 8.0+, preview)      | Sprint 6.5 |
+| TC matmul       | `kaio_ops::matmul_tc()` / `matmul_tc_async()` / `matmul_auto_tc()` — f16×f16→f32, SM 8.0+, [~80–85% cuBLAS sgemm at 4096²](docs/performance.md) | Supported |
 
 ## Limitations
 
@@ -331,6 +331,16 @@ for a complete end-to-end example.
     `seq_k ≤ 384`, `d_k ≤ 128`, SM 8.0+. `#[doc(hidden)]` until
     Phase 7's FlashAttention-TC lifts the constraints and
     `attention_auto_tc` arrives as the user-facing dispatcher.
+  - [x] **6.7** — Multi-warp 64×64 TC matmul restructure (4 warps ×
+    32×32 quadrant via 8 mma per K-tile), edge-tile predication lifts
+    M and N divisibility (K%16=0 stays — mma K-tile is structural),
+    cuBLAS sgemm benchmark at 256–4096. Measured **79.9% (sync)** /
+    **85.1% (async)** of cuBLAS sgemm at 4096² on RTX 4090. `matmul_tc`
+    + `matmul_tc_async` promoted from `#[doc(hidden)]` to stable `pub`.
+    See [docs/performance.md](docs/performance.md) for the full table
+    and the apples-to-apples disclaimer.
+  - [ ] **6.7b** — Vectorized loads (LDG.128) + bank-conflict padding,
+    chasing the remaining headroom toward 90%+.
 - [ ] **Phase 7** — Quantized kernels (INT8/INT4), training integration
   (`kaio-candle` bridge)
 - [ ] **Phase 8** — PyO3 bindings (Python access to kaio-ops)

@@ -85,17 +85,24 @@ Every `load_fragment_*` / `store_fragment_*` call in
 `kaio-core/src/fragment.rs` independently emits its own `div.u32` +
 `rem.u32` to derive `groupID` and `threadID_in_group` from `%tid.x`.
 For the Sprint 6.2 gate test (3 helper calls) this is 6 extra
-instructions per warp — negligible. For Sprint 6.3's tiled matmul
-(multiple fragment loads per K-tile, many K-tiles) the same
-computation gets repeated dozens of times and should be hoisted.
+instructions per warp — negligible. Sprint 6.7's multi-warp
+`emit_warp_quadrant_mma` calls the loaders 6 times per K-iter (2
+FragmentA + 4 FragmentB), but ptxas's CSE optimization handles the
+redundant div/rem cleanly given the constant divisor 4 (it's lowered
+to shift/mask). Measured 6.7 perf at 79.9% (sync) / 85.1% (async)
+of cuBLAS sgemm at 4096² without the hoist — within 6.7b's chase
+range, so the hoist would land alongside vectorized loads where the
+fragment loaders are being rewritten anyway.
 
 Cheapest fix: have the helpers accept `(group_id, thread_id_in_group)`
 registers as an optional parameter, with a `None` → "compute locally"
 fallback. Or: introduce a `FragmentWarpContext` struct holding the
 two registers + `%tid.x`, computed once at kernel start and threaded
-through the helpers. Decide when 6.3 shows the pattern concretely.
-**Added:** Sprint 6.2 | **Sprint:** Phase 6.3 when the shape of the
-tiled kernel makes the right trade-off obvious
+through the helpers.
+
+**Added:** Sprint 6.2 | **Sprint:** Phase 6.7b (alongside vectorized
+loads — the fragment loaders are getting rewritten there anyway, so
+parameterizing them at the same time minimizes churn)
 
 ### `PtxModule::validate()` bypass via `load_ptx(&str)`
 
@@ -191,3 +198,23 @@ helpers in `tests/common/mod.rs` currently read `KAIO_SM_TARGET`
 internally — parameterize them to take an SM target instead, and
 the env-var mutation disappears.
 **Added:** Sprint 6.4 (Codex adversarial review 2026-04-12) | **Sprint:** TBD
+
+### Pathological-shape benchmark CPU reference dominates wall time
+
+The 1023×1023×1024 GPU correctness test in `matmul_tc_api.rs` /
+`matmul_tc_async_api.rs` (Sprint 6.7 Gate C) takes ~67 seconds per
+test. The kernel itself completes in milliseconds; the runtime is
+dominated by the host-side O(M·N·K) ≈ 1e9-op CPU reference loop in
+`cpu_matmul_f16xf16_f32`. Acceptable for a correctness gate — the
+test does what it says — but slows down `cargo test --workspace
+-- --ignored` runs noticeably.
+
+Candidates: (1) sample the output at fixed indices and compare only
+those against a partial reference (cheap analytical formula or a
+Rayon-parallelized partial cpu_matmul); (2) replace bit-close with
+a checksum (XOR of the lower 32 bits of every output as f32 bit
+pattern, compared against a CPU-computed checksum); (3) lower the
+"large off-by-one" to 511×511×512 — keeps the off-by-one stress vs
+512 boundary without the 4× runtime hit.
+
+**Added:** Sprint 6.7 Gate C | **Sprint:** TBD (low priority)

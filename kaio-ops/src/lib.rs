@@ -11,13 +11,15 @@
 //!
 //! - [`matmul`] / [`matmul_auto`] — scalar f32 × f32 → f32 matmul,
 //!   works on any NVIDIA GPU (SM 7.0+).
-//! - [`matmul_auto_tc`] — tensor-core f16 × f16 → f32 matmul with
-//!   auto-tuner dispatch between the synchronous and `cp.async`
-//!   double-buffered variants. **Sprint 6.5 preview surface**:
-//!   requires SM 8.0+ (Ampere) and `M%16 = N%8 = K%16 = 0`.
-//!   Production performance lands in Sprint 6.7's multi-warp
-//!   restructure; see the `matmul_auto_tc` rustdoc for the full
-//!   contract.
+//! - [`matmul_auto_tc`] / [`matmul_tc`] / [`matmul_tc_async`] —
+//!   tensor-core f16 × f16 → f32 matmul. Multi-warp 64×64 block tile,
+//!   4 warps × 32×32 sub-quadrant via 8 mma.sync.m16n8k16 per K-tile.
+//!   Edge-tile predication on M and N — only `K % 16 == 0` is
+//!   required (mma K-tile is structural). Requires SM 8.0+ (Ampere).
+//!   Sprint 6.7 measured performance: **79.9%** of cuBLAS sgemm at
+//!   4096² for the sync variant, **85.1%** for the cp.async double-
+//!   buffered variant. See `docs/performance.md` for the full table
+//!   and the project-local-baseline disclaimer.
 //! - [`attention`] / [`attention_auto`] and causal variants —
 //!   fused attention for f32.
 //!
@@ -52,21 +54,13 @@ pub use tuner::{
 #[doc(hidden)]
 pub use matmul_kernel::matmul_naive;
 
-// TEMP: hidden export for integration tests. Promote to stable `pub`
-// (and announce in README + CHANGELOG) when Sprint 6.7 lifts the
-// divisibility constraint and adds edge-tile handling. Until then
-// this is crate-internal API that happens to be test-reachable.
-#[doc(hidden)]
-pub use matmul_tc_kernel::matmul_tc;
-
-// TEMP: hidden export for integration tests — Sprint 6.4 cp.async
-// double-buffered variant of matmul_tc. Same dimension constraints
-// and promotion trigger as matmul_tc above (Sprint 6.7 lifts
-// divisibility + promotes to stable `pub` with README/CHANGELOG
-// announcement). Sprint 6.5's `matmul_auto_tc` tuner dispatches
-// between this and `matmul_tc` based on benchmarked latency.
-#[doc(hidden)]
+// Sprint 6.7 D7 promotion (multi-warp restructure + edge tiles +
+// 79.9% cuBLAS sgemm at 4096² + benchmark): stable public API.
+// Both kernels accept any positive M, N and require K%16=0
+// (mma.sync.m16n8k16 K-tile is structural). f16 inputs, f32
+// accumulation, SM 8.0+ (Ampere).
 pub use matmul_tc_async_kernel::matmul_tc_async;
+pub use matmul_tc_kernel::matmul_tc;
 
 // TEMP: Sprint 6.6 final `attention_tc` + `attention_tc_causal` —
 // fused TC scaled dot-product attention. #[doc(hidden)] pub use

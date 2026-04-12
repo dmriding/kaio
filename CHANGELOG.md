@@ -233,6 +233,86 @@ Branch: `phase6`. In progress toward v0.2.0.
   and a shared-memory budget regression test (worst-case
   `SharedDecl` sum + alignment ≤ 46 KB). Test counts: 275 host / 133 GPU.
 
+### Added — Sprint 6.7 (multi-warp TC matmul + edge tiles + benchmark + promotion)
+- **`kaio_ops::matmul_tc` and `kaio_ops::matmul_tc_async` promoted to
+  stable `pub`** (no longer `#[doc(hidden)]`). The `matmul_auto_tc`
+  tuner-dispatched entry point graduates from "Sprint 6.5 preview"
+  framing — measurable throughput-class TC matmul is now part of the
+  KAIO public surface. **Stable public API, with measurable performance
+  uplift over the Sprint 6.5 preview** — still room for additional
+  headroom in Sprint 6.7b (vectorized loads + bank-conflict padding)
+  and Phase 7 (bf16, larger mma shapes).
+- **Multi-warp 64×64 block tile** — block dim becomes `(32, 4, 1)` with
+  4 warps per block, each warp owning a 32×32 sub-quadrant computed via
+  8 × `mma.sync.m16n8k16` per K-iteration in a 2 m_stripes × 4 n_stripes
+  grid. Replaces the Sprint 6.3/6.4 single-warp 16×8-tile-per-block
+  layout that spawned ~131k blocks at 4096² with only 32 threads each.
+  The new layout lands ~16 resident warps per SM on Ampere+/Ada — full
+  occupancy class.
+- **Edge-tile predication** — `M` and `N` are no longer required to be
+  multiples of 16 / 8. Per-thread bounds checks (cooperative tile loads
+  pre-zero shared then bra-skip OOB rows/cols; output stores predicate
+  via `setp.lt.and.u32` combining row+col bounds in one instruction)
+  handle ragged dimensions. `K % 16 == 0` remains required — the
+  mma.sync.m16n8k16 K-tile is structural and the kernel does not pad K
+  inside a K-iteration.
+- **`matmul_tc_bench.rs` (NEW)** — kaio-ops integration bench for TC
+  sync + TC async + cuBLAS sgemm at 256/512/1024/2048/4096. 5 warmup
+  + 20 timed-iter median. Run with `cargo test -p kaio-ops --test
+  matmul_tc_bench -- --ignored --nocapture`.
+- **Measured performance on RTX 4090 (sm_89), 4096²:**
+  - TC sync (`matmul_tc`): **46.5 TFLOPS**, **79.9% of cuBLAS sgemm**.
+  - TC async (`matmul_tc_async`): **49.6 TFLOPS**, **85.1% of cuBLAS sgemm**.
+  - cuBLAS sgemm reference: 58.2 TFLOPS.
+  - **Apples-to-apples disclaimer:** KAIO TC matmul uses fp16 inputs
+    with fp32 accumulation; cuBLAS sgemm is f32. Comparison is against
+    sgemm because it's the existing supported benchmark path in this
+    repo (cudarc 0.19's `Gemm::gemm`). Results should be read as a
+    project-local performance baseline, not a claim of apples-to-apples
+    precision identity.
+- **Tuner conservative-default flip (D6):** `matmul_auto_tc` now
+  defaults to `TensorCoreAsync` on cache miss (previously
+  `TensorCore`). Multi-warp restructure inverts the Sprint 6.4 single-
+  warp observation — at 4096² async wins by ~6.5%.
+- **`kaio_core::instr::MemoryOp::LdGlobalPred` and `StGlobalPred`** —
+  predicated global memory ops (`@[!]p ld.global` / `st.global`).
+  Standard pattern for edge-tile bounds checking; first user is the
+  multi-warp matmul output store.
+- **`kaio_core::instr::ControlOp::SetPAnd`** — `setp.{cmp}.and.{ty}
+  dst, lhs, rhs, src_pred` for predicate composition in one PTX
+  instruction. Eliminates the need for a separate `and.pred` step
+  when combining row + col bounds for OOB stores.
+- 12 new pathological-shape GPU tests (6 per kernel): sub-tile
+  (7×5×16, 15×7×16), off-by-one against mma boundary (17×9×16,
+  33×17×16), mid-range mixed (100×50×64), large off-by-one
+  (1023×1023×1024). Plus a per-warp quadrant canary at 64×64×64
+  (catches per-warp routing bugs that uniform inputs would mask).
+  Test counts: **279 host / 148 GPU** workspace-wide (sync 11 + async 10
+  + tuner 6 for TC alone, plus 6.6 attention 11 + 6.5 tuner_test +
+  remaining scalar/attention coverage).
+- 4 new kaio-core unit tests for the new IR variants
+  (`emit_ld_global_pred_b32`, `emit_ld_global_pred_negated_b32`,
+  `emit_st_global_pred_f32`, `emit_setp_and_lt_u32`).
+
+### Breaking — Sprint 6.7
+- **`matmul_tc` / `matmul_tc_async` divisibility relaxed.** Inputs
+  with `M % 16 != 0` or `N % 8 != 0` previously returned
+  `KaioError::InvalidConfig`; they now produce correct output via
+  edge-tile predication. Code that relied on the error being raised
+  (e.g., for input padding logic) needs to either drop the padding
+  or check the dimensions client-side.
+- **`matmul_auto_tc` cache-miss default flipped** from `TensorCore`
+  to `TensorCoreAsync`. Per-shape cache hits override the default;
+  this only affects the first-call path before tuning is run. See
+  D6 in `docs/development/sprints/phase6/sprint_6_7.md` for the
+  measurement.
+- **`kaio_ops::matmul_tc` and `kaio_ops::matmul_tc_async` are now
+  stable `pub` exports.** They were previously `#[doc(hidden)] pub
+  use` (test-reachable but not part of the documented surface). Code
+  that imported them via `use kaio_ops::matmul_tc;` continues to
+  work; code that relied on them being hidden from `cargo doc` output
+  will now see them in rustdoc.
+
 ## [0.1.0] — Phase 5: Fused Attention & Community Release
 
 ### Added — Phase 5

@@ -15,7 +15,8 @@ Master plan: [phase6_master_plan.md](phase6_master_plan.md)
 | [6.4](sprint_6_4.md) | cp.async double-buffered matmul (SM 8.0+, internal) | ✅ Complete | `be0e708` | 264 host + 112 GPU (+2 host, +4 GPU) |
 | [6.5](sprint_6_5.md) | TC auto-tuner (`matmul_auto_tc`) + `load_module` migration (first public API) | ✅ Complete | `076fcfc` | 268 host + 122 GPU (+9 host, +5 GPU) |
 | [6.6](sprint_6_6.md) | Fused TC attention + causal variant (internal API) | ✅ Complete | `5c3ae53` | 275 host + 133 GPU (+7 host, +11 GPU) |
-| [6.7](sprint_6_7.md) | Benchmarks + multi-warp restructure + performance docs | Pending | — | — |
+| [6.7](sprint_6_7.md) | Multi-warp 64×64 TC matmul + edge tiles + cuBLAS bench (79.9% sync, 85.1% async at 4096²) + matmul_tc/_async promoted to stable pub | ✅ Complete | _(final)_ | 279 host + 148 GPU |
+| 6.7b | Vectorized loads (LDG.128) + bank-conflict padding (chase 90%+) | Pending | — | — |
 | [6.8](sprint_6_8.md) | Showcase examples (fused SiLU-gate, GELU comparison, RMSNorm) | Pending | — | — |
 | [6.9](sprint_6_9.md) | Polish + v0.2.0 publish | Pending | — | — |
 
@@ -37,13 +38,15 @@ Master plan: [phase6_master_plan.md](phase6_master_plan.md)
                                                        |
                                                   6.5 (auto-tuner)
                                                        |
-                                                  6.6 (TC attention — optional)
+                                                  6.6 (TC attention — internal)
                                                        |
-                                                  6.7 (benchmarks)
+                                                  6.7 (multi-warp + edge tiles + bench + promotion ✅)
+                                                       |
+                                                  6.7b (vectorized loads, chase 90%+)
                                                        |
                                                   6.8 (showcase examples)
                                                        |
-                                                  6.9 (publish)
+                                                  6.9 (publish v0.2.0)
 ```
 
 All sprints are sequential. Sprint 6.6 (TC attention) was originally

@@ -593,9 +593,10 @@ fn bench_matmul_tc_variant(
 /// Benchmark the two tensor-core matmul variants at the given
 /// dimensions and cache the faster one.
 ///
-/// Requires SM 8.0+ (Ampere) and `M % 16 == 0`, `N % 8 == 0`,
-/// `K % 16 == 0`. Returns [`KaioError::InvalidConfig`] otherwise —
-/// see [`matmul_auto_tc`] for the fallback guidance.
+/// Requires SM 8.0+ (Ampere) and `K % 16 == 0` (the mma.sync K-tile
+/// is structural; the kernel does not edge-pad K). M and N may be
+/// any positive value — edge-tile predication in the kernel handles
+/// non-multiple-of-64 cases.
 ///
 /// Cached result key: `(kernel="matmul_tc", sm_target, [m, n, k])`.
 /// The cache file is shared with [`tune_matmul`]; the `kernel` field
@@ -606,7 +607,7 @@ pub fn tune_matmul_tc(device: &KaioDevice, m: u32, n: u32, k: u32) -> Result<Str
     let sm = sm_target(device)?;
     let dims = vec![m, n, k];
 
-    let mut best_variant = MatmulTcVariant::TensorCore;
+    let mut best_variant = MatmulTcVariant::TensorCoreAsync;
     let mut best_time = f64::MAX;
 
     for &variant in MatmulTcVariant::all() {
@@ -636,37 +637,38 @@ pub fn tune_matmul_tc(device: &KaioDevice, m: u32, n: u32, k: u32) -> Result<Str
 }
 
 /// Run the tensor-core matmul using the best tuned variant, or the
-/// conservative default if the cache has no entry for these
-/// dimensions.
+/// production default (`TensorCoreAsync` — the cp.async double-
+/// buffered variant) if the cache has no entry for these dimensions.
 ///
-/// # Contract (Sprint 6.5 — narrow, deliberately temporary)
+/// # Contract
 ///
-/// - **Input type:** `f16 × f16 → f32`. f32 callers should use
-///   [`matmul_auto`] instead.
+/// - **Input type:** `f16 × f16 → f32` with fp32 accumulation. f32
+///   callers should use [`matmul_auto`] instead.
 /// - **Hardware:** NVIDIA Ampere or newer (SM 8.0+). Pre-Ampere
 ///   devices return [`KaioError::InvalidConfig`] naming the f32
 ///   fallback.
-/// - **Shape:** `M % 16 == 0 && N % 8 == 0 && K % 16 == 0`. This
-///   constraint is **temporary** — Sprint 6.7 will relax it via
-///   edge-tile bounds checking. Until then, callers must pad inputs
-///   or stay on the f32 path for non-divisible shapes.
-/// - **Performance:** the underlying kernels (`matmul_tc` and
-///   `matmul_tc_async`) are currently single-warp-per-block. They
-///   are correctness-validated but **not yet at the Phase 6 target
-///   of 60%+ cuBLAS** — production tensor-core performance lands
-///   in Sprint 6.7's multi-warp restructure.
-/// - **API stability:** pre-1.0. The signature is intentionally
-///   identical in shape to [`matmul_auto`] so any future extensions
-///   should be additive.
+/// - **Shape:** M and N may be any positive value (edge-tile
+///   predication handles ragged dims). `K % 16 == 0` is required —
+///   the mma.sync.m16n8k16 K-tile is structural and the kernel does
+///   not edge-pad K. Pad K to the next multiple of 16 if needed.
+/// - **Performance:** Sprint 6.7 multi-warp restructure measured
+///   **79.9%** of cuBLAS sgemm at 4096² for the sync variant,
+///   **85.1%** for the cp.async double-buffered variant, on RTX 4090
+///   sm_89. See `docs/performance.md` for the full table and the
+///   project-local-baseline disclaimer (KAIO uses fp16 inputs with
+///   fp32 accumulation; cuBLAS sgemm is f32). Sprint 6.7b will
+///   chase the remaining headroom via vectorized loads (LDG.128) +
+///   bank-conflict padding.
+/// - **API stability:** pre-1.0 (overall crate). The signature is
+///   intentionally identical in shape to [`matmul_auto`] so any
+///   future extensions remain additive.
 ///
 /// # Errors
 ///
-/// Returns [`KaioError::InvalidConfig`] on pre-Ampere hardware or
-/// non-divisible dimensions, with a message naming both real
-/// fallback options (pad/convert, or switch to the f32
-/// `matmul_auto` path). A [`KaioError::Validation`] surfacing from
-/// this function is not expected — the pre-dispatch eligibility
-/// check rejects sub-Ampere targets before the module is built.
+/// Returns [`KaioError::InvalidConfig`] on pre-Ampere hardware,
+/// zero-sized dims, or `K % 16 != 0` — with a message naming the
+/// actionable fallback (pad K, or use the f32 [`matmul_auto`] path
+/// if f16 precision is not required).
 pub fn matmul_auto_tc(
     device: &KaioDevice,
     a: &GpuBuffer<f16>,
@@ -685,18 +687,23 @@ pub fn matmul_auto_tc(
 fn resolve_matmul_tc_variant(device: &KaioDevice, m: u32, n: u32, k: u32) -> MatmulTcVariant {
     let sm = match sm_target(device) {
         Ok(s) => s,
-        // Conservative default: TensorCore (sync) is faster at 1 warp/block
-        // (6.4 timing, snapshot 019d817a). Sprint 6.7's multi-warp will
-        // likely invert this — revisit when multi-warp lands.
-        Err(_) => return MatmulTcVariant::TensorCore,
+        // D6 (Sprint 6.7 multi-warp benchmark): TensorCoreAsync is the
+        // production fallback. At 4096² async pulls ahead of sync by
+        // ~6.5% (49.6 vs 46.5 TFLOPS, 85.1% vs 79.9% of cuBLAS sgemm)
+        // — the multi-warp restructure gives cp.async enough compute
+        // parallelism to hide pipeline latency. Sync still wins at
+        // small workloads (256-1024) by tiny margins, but TC matmul
+        // shines at large shapes where async is the right default.
+        Err(_) => return MatmulTcVariant::TensorCoreAsync,
     };
     let cache = load_cache();
     match cache.lookup("matmul_tc", &sm, &[m, n, k]) {
-        Some(r) => MatmulTcVariant::from_str(&r.variant).unwrap_or(MatmulTcVariant::TensorCore),
-        // Conservative default: TensorCore (sync) is faster at 1 warp/block
-        // (6.4 timing, snapshot 019d817a). Sprint 6.7's multi-warp will
-        // likely invert this — revisit when multi-warp lands.
-        None => MatmulTcVariant::TensorCore,
+        Some(r) => {
+            MatmulTcVariant::from_str(&r.variant).unwrap_or(MatmulTcVariant::TensorCoreAsync)
+        }
+        // D6 fallback (see above) — TensorCoreAsync is the multi-warp
+        // production winner. Cache hits override this on a per-shape basis.
+        None => MatmulTcVariant::TensorCoreAsync,
     }
 }
 

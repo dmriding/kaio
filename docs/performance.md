@@ -222,9 +222,78 @@ See [benchmarks.md](benchmarks.md) for methodology and results.
 ### Quick reference
 
 ```sh
-# Run matmul benchmark (requires NVIDIA GPU + CUDA toolkit)
+# Scalar f32 matmul benchmark (Phase 4 — naive + optimized vs cuBLAS sgemm)
 cargo test -p kaio-ops --test matmul_bench -- --ignored --nocapture
+
+# Tensor-core f16 matmul benchmark (Sprint 6.7 — sync + async vs cuBLAS sgemm)
+cargo test -p kaio-ops --test matmul_tc_bench -- --ignored --nocapture
 ```
 
 Measures kernel execution time only (no allocation or transfer).
-Reports TFLOPS for naive, optimized, and cuBLAS sgemm.
+Reports TFLOPS for the kernels under test against the cuBLAS sgemm
+baseline. 5 warmup iterations + 20 timed iterations, median reported.
+
+## Tensor-Core Matmul Performance (Sprint 6.7)
+
+Multi-warp 64×64 block tile, 4 warps per block, each warp owning a
+32×32 sub-quadrant computed via 8 × `mma.sync.m16n8k16` per K-iteration.
+Two variants exposed: `matmul_tc` (synchronous shared-mem staging) and
+`matmul_tc_async` (cp.async double-buffered A staging). The
+`matmul_auto_tc` tuner dispatches between them per-shape via cached
+benchmark data (cache miss falls back to `TensorCoreAsync`, the
+production winner at large shapes — see Apples-to-apples disclaimer
+below).
+
+### Measured on RTX 4090 (sm_89), median of 20 timed iterations after 5 warmups
+
+| Size       | TC sync TFLOPS | TC async TFLOPS | cuBLAS sgemm TFLOPS | sync vs cuBLAS | async vs cuBLAS |
+|------------|---------------:|----------------:|--------------------:|---------------:|----------------:|
+| 256³       | 0.05           | 0.04            | 1.73                | 2.8%           | 2.5%            |
+| 512³       | 0.38           | 0.33            | 10.74               | 3.6%           | 3.1%            |
+| 1024³      | 3.01           | 2.72            | 36.84               | 8.2%           | 7.4%            |
+| 2048³      | 17.60          | 17.15           | 52.91               | 33.3%          | 32.4%           |
+| **4096³**  | **46.53**      | **49.56**       | **58.24**           | **79.9%**      | **85.1%**       |
+
+### Apples-to-apples disclaimer
+
+KAIO TC matmul uses **fp16 inputs with fp32 accumulation**. Comparison
+is against **cuBLAS sgemm** (f32 inputs, f32 output) because that is
+the existing supported benchmark path in this repo (cudarc 0.19's
+`Gemm::gemm` exposes sgemm cleanly). Results should be read as a
+**project-local performance baseline, not a claim of apples-to-apples
+precision identity.** The fp16-input / fp32-input asymmetry halves
+global memory bandwidth on the TC side and unlocks tensor-core
+throughput; that gap is part of the value proposition, not a flaw in
+the comparison. A true f16-vs-f16 comparison against cuBLAS HGEMM /
+GemmEx is tracked tech debt for a future sprint.
+
+### Why small sizes underperform cuBLAS
+
+At 256–1024, TC matmul lands at 3–8% of cuBLAS. This is expected:
+the multi-warp kernel launches `(N/64) × (M/64)` blocks and below
+1024² there are too few blocks to fill the SM array (1024² = 16
+blocks; one block per SM occupies only a sliver of the 4090's 128
+SMs). cuBLAS at small sizes uses dispatch heuristics that pick
+launch shapes appropriate to the workload — a single library tuned
+for the full size range. KAIO's TC matmul is a single kernel
+optimized for the large-shape regime where TC throughput matters.
+For small shapes, prefer scalar `matmul` (Phase 4) or stay on cuBLAS.
+
+### Path to >85%
+
+The remaining ~15 percentage points of headroom at 4096² is bounded by
+two structural choices the Sprint 6.7 kernel hasn't yet made:
+
+- **Vectorized global loads (LDG.128).** The cooperative tile loaders
+  use scalar `ld.global.b32` (4-byte loads). cuBLAS uses 16-byte
+  vectorized loads for ~4× higher load bandwidth. Sprint 6.7b adds a
+  `MemoryOp::LdGlobalB128` family + emits + ptxas verification, then
+  rewrites the cooperative loaders to use it.
+- **Bank-conflict-aware shared layouts.** Current tile_a / tile_b
+  layouts have natural bank-conflict patterns at multi-warp scale
+  that the kernel does not yet pad around. Standard CUTLASS-style
+  swizzle or `+1` padding eliminates them.
+
+Sprint 6.7b targets pushing into the 90%+ range with these two
+optimizations. Phase 7 adds bf16 inputs and larger mma shapes (where
+applicable on Hopper+).

@@ -50,7 +50,11 @@ All reported numbers are from a single machine configuration:
 ### How to reproduce
 
 ```sh
+# Scalar f32 matmul (Phase 4): naive + optimized vs cuBLAS sgemm
 cargo test -p kaio-ops --test matmul_bench -- --ignored --nocapture
+
+# Tensor-core f16 matmul (Sprint 6.7): sync + async vs cuBLAS sgemm
+cargo test -p kaio-ops --test matmul_tc_bench -- --ignored --nocapture
 ```
 
 Requires NVIDIA GPU and CUDA toolkit (for cuBLAS).
@@ -86,14 +90,53 @@ Requires NVIDIA GPU and CUDA toolkit (for cuBLAS).
 
 ## Performance Status
 
-**Current:** 31% of cuBLAS sgemm — BM=BN=64, BK=16, TM=TN=4, scalar loads
+**Scalar f32 matmul (Phase 4):** 31% of cuBLAS sgemm — BM=BN=64, BK=16,
+TM=TN=4, scalar loads.
 
-**Planned next levers:**
-- Vectorized global loads (`LDG.128`) — 4× fewer load instructions
-- Double buffering — overlap computation with next tile load
-- Size-based dispatch — use naive kernel for small sizes where
-  64×64 tile overhead dominates
+**Tensor-core f16 matmul (Sprint 6.7):** **79.9% (sync) / 85.1%
+(async)** of cuBLAS sgemm at 4096² on RTX 4090. Multi-warp 64×64
+block tile, 4 warps × 32×32 quadrant via 8 mma per K-tile, edge-tile
+predication. See the
+**[Tensor-Core Matmul Performance section in performance.md](performance.md#tensor-core-matmul-performance-sprint-67)**
+for the full table across 256–4096, the apples-to-apples disclaimer
+(KAIO uses fp16 inputs with fp32 accumulation; cuBLAS sgemm is f32),
+and the gap analysis pointing at vectorized loads + bank-conflict
+padding as the path past 85%.
 
-These optimizations require DSL extensions (vectorized load intrinsics)
-and are planned for Phase 5+. See [performance.md](performance.md)
-for writing fast kernels with the current tooling.
+---
+
+## Results — Sprint 6.7 Multi-Warp TC MatMul
+
+**Date:** 2026-04-12 | **GPU:** RTX 4090 (sm_89) | **Kernels:**
+multi-warp 64×64 sync (`matmul_tc`) + cp.async double-buffered
+(`matmul_tc_async`) | **Reference:** cuBLAS sgemm
+
+| Size  | TC sync TFLOPS | TC async TFLOPS | cuBLAS TFLOPS | sync vs cuBLAS | async vs cuBLAS |
+|-------|---------------:|----------------:|--------------:|---------------:|----------------:|
+| 256³  | 0.05           | 0.04            | 1.73          | 2.8%           | 2.5%            |
+| 512³  | 0.38           | 0.33            | 10.74         | 3.6%           | 3.1%            |
+| 1024³ | 3.01           | 2.72            | 36.84         | 8.2%           | 7.4%            |
+| 2048³ | 17.60          | 17.15           | 52.91         | 33.3%          | 32.4%           |
+| 4096³ | **46.53**      | **49.56**       | **58.24**     | **79.9%**      | **85.1%**       |
+
+**Apples-to-apples disclaimer:** KAIO TC matmul uses fp16 inputs with
+fp32 accumulation; cuBLAS sgemm is f32 inputs / f32 output. The
+comparison is a project-local performance baseline, not a precision-
+identity claim. See [performance.md](performance.md#apples-to-apples-disclaimer)
+for the full framing.
+
+**Analysis:**
+- Multi-warp restructure unlocks SM occupancy at large shapes — at
+  4096² the kernel launches 64×64 = 4,096 blocks × 128 threads =
+  ~16 resident warps/SM on RTX 4090.
+- Async pulls ahead of sync at 4096² (49.6 vs 46.5 TFLOPS, +6.5%) —
+  cp.async pipeline gets enough K-iterations (256) to hide latency.
+- Small sizes (256-1024) lose to cuBLAS by large margins — too few
+  blocks to fill the SM array, kernel launch overhead dominates.
+  Use scalar `matmul` or stay on cuBLAS for small shapes.
+- Gap to 90%+: Sprint 6.7b adds vectorized loads (LDG.128) and
+  bank-conflict padding.
+
+---
+
+## Phase 4 baseline retained for comparison

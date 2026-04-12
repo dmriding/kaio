@@ -1,6 +1,6 @@
 # Phase 6 Master Plan — Tensor Cores + Async Copies
 
-**Status:** In progress (6.1–6.4 complete; 6.5–6.8 pending)
+**Status:** In progress (6.1–6.7 complete; 6.7b–6.9 pending)
 **Depends on:** Phase 5 complete (v0.1.0, commit `bbc1c4d`)
 **Current branch tip:** `c3c1c6a` (Sprint 6.4 log-fill)
 
@@ -96,9 +96,11 @@ No implicit assumptions, no runtime failure as discovery mechanism.
 
 ### 6. Performance Target
 
-- Current: 31% of cuBLAS (scalar FMA)
-- Target: 60% of cuBLAS (tensor core fp16, fp32 accumulate)
-- Stretch: 70% (requires bank conflict optimization, profiling)
+- Phase 4 baseline: 31% of cuBLAS (scalar FMA)
+- Sprint 6.7 multi-warp result: **79.9% sync / 85.1% async** at 4096² ✅
+  (well past the 60% target and 70% stretch)
+- Sprint 6.7b target: 90%+ via vectorized loads (LDG.128) + bank-conflict
+  padding
 - cuBLAS uses tensor cores + vectorized loads + multi-stage pipeline
 
 ### 7. SM Version Requirements
@@ -119,7 +121,8 @@ No implicit assumptions, no runtime failure as discovery mechanism.
 | 6.4 | Double-buffered matmul | cp.async pipeline, SM 8.0+ |
 | 6.5 | Integration + auto-tuner | 3-way dispatch (scalar / TC / TC+async) |
 | 6.6 | TC attention (optional) | mma.sync in FlashAttention inner loops — skip if unstable |
-| 6.7 | Benchmarks + performance docs | cuBLAS comparison, precision docs |
+| 6.7 | Multi-warp + edge tiles + benchmarks + promotion | 64×64 block tile, M/N divisibility lifted, 79.9% sync / 85.1% async cuBLAS sgemm at 4096², matmul_tc[_async] promoted to stable pub |
+| 6.7b | Vectorized loads + bank-conflict padding | LDG.128, swizzle/padding, chasing 90%+ at 4096² |
 | 6.8 | Showcase examples for v0.2.0 | Three standalone Cargo projects under `examples/` — fused SiLU-gate, GELU comparison, single-block RMSNorm. See [`sprint_6_8.md`](sprint_6_8.md). |
 | 6.9 | Polish + v0.2.0 publish | CHANGELOG, README, version bump |
 
