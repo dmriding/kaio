@@ -1,7 +1,10 @@
 //! Shared test helpers for kaio-core integration tests.
 
 use kaio_core::emit::{Emit, PtxWriter};
-use kaio_core::fragment::{alloc_a, alloc_b, alloc_c};
+use kaio_core::fragment::{
+    alloc_a, alloc_b, alloc_c, load_fragment_a_m16n8k16_shared_row,
+    load_fragment_b_m16n8k16_shared_col,
+};
 use kaio_core::instr::control::{CmpOp, ControlOp};
 use kaio_core::instr::memory::MemoryOp;
 use kaio_core::instr::special;
@@ -366,6 +369,93 @@ pub fn build_cp_async_ptx() -> String {
     kernel.push(PtxInstruction::Memory(MemoryOp::CpAsyncWaitGroup { n: 0 }));
     kernel.push(PtxInstruction::Control(ControlOp::BarSync {
         barrier_id: 0,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
+    let mut module = PtxModule::new(&sm);
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
+/// Build a minimal kernel exercising the **shared-source** fragment
+/// load helpers: declares shared `tile_a` and `tile_b` allocations,
+/// gets a `%tid.x`, calls `load_fragment_a_m16n8k16_shared_row` and
+/// `load_fragment_b_m16n8k16_shared_col` (with zero C, fresh D), emits
+/// one `mma.sync`, and returns.
+///
+/// Used by `ptxas_verify_mma_sync_shared` to confirm the shared-source
+/// emission is structurally valid PTX for SM 8.0+. The kernel does no
+/// initial tile population — ptxas does not care that the shared
+/// memory is uninitialized; it only verifies the instruction syntax.
+#[allow(dead_code)]
+pub fn build_mma_sync_shared_ptx() -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("mma_sync_shared_smoke");
+
+    // Declare shared tiles matching Sprint 6.3 sizes.
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_a".to_string(),
+        align: 4,
+        size_bytes: 512, // 16 × 16 fp16
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_b".to_string(),
+        align: 4,
+        size_bytes: 256, // 16 × 8 fp16 column-major
+    });
+
+    // %tid.x
+    let (r_tid, tid_instr) = special::tid_x(&mut alloc);
+    kernel.push(tid_instr);
+
+    // Shared base-offset registers for tile_a and tile_b.
+    let r_tile_a = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_a,
+        src: Operand::SharedAddr("tile_a".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_tile_b = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_b,
+        src: Operand::SharedAddr("tile_b".to_string()),
+        ty: PtxType::U32,
+    });
+
+    // Fragment loads from shared.
+    let frag_a = load_fragment_a_m16n8k16_shared_row(&mut alloc, &mut kernel, r_tile_a, r_tid, 32);
+    let frag_b = load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, r_tile_b, r_tid, 32);
+
+    // Zero C fragment.
+    let frag_c = alloc_c(&mut alloc);
+    for r in &frag_c.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmF32(0.0),
+            ty: PtxType::F32,
+        });
+    }
+
+    // Fresh D fragment.
+    let frag_d = alloc_c(&mut alloc);
+
+    // One mma.sync.
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+        d: frag_d,
+        a: frag_a,
+        b: frag_b,
+        c: frag_c,
+        shape: MmaShape::M16N8K16,
+        d_ty: PtxType::F32,
+        a_ty: PtxType::F16,
+        b_ty: PtxType::F16,
+        c_ty: PtxType::F32,
     }));
 
     kernel.push(PtxInstruction::Control(ControlOp::Ret));

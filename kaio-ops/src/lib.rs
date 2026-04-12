@@ -22,6 +22,7 @@
 
 mod attention_kernel;
 mod matmul_kernel;
+mod matmul_tc_kernel;
 mod tuner;
 
 pub use attention_kernel::{attention, attention_causal, attention_flash, attention_flash_causal};
@@ -34,3 +35,10 @@ pub use tuner::{
 // Expose naive kernel for benchmarking (not public API)
 #[doc(hidden)]
 pub use matmul_kernel::matmul_naive;
+
+// TEMP: hidden export for integration tests. Promote to stable `pub`
+// (and announce in README + CHANGELOG) when Sprint 6.7 lifts the
+// divisibility constraint and adds edge-tile handling. Until then
+// this is crate-internal API that happens to be test-reachable.
+#[doc(hidden)]
+pub use matmul_tc_kernel::matmul_tc;

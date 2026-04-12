@@ -18,6 +18,9 @@ include = [
 
 [dependencies]
 kaio = { version = "0.1.0", path = "../kaio" }
+kaio-core = { version = "0.1.0", path = "../kaio-core" }
+cudarc = { workspace = true }
+half = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

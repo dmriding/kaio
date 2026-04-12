@@ -306,6 +306,9 @@ for a complete end-to-end example.
   - [x] **6.2** — `mma.sync.m16n8k16` + `cp.async` + typed fragments
     (Ampere+ / SM 8.0+); single-instruction gate test passes bit-exact
     on RTX 4090
+  - [x] **6.3** — IR-level tensor-core matmul (internal API, requires
+    M%16=N%8=K%16=0); shared-memory fragment loaders; four correctness
+    tests pass on RTX 4090. Performance restructuring deferred to 6.7.
 - [ ] **Phase 7** — Quantized kernels (INT8/INT4), training integration
   (`kaio-candle` bridge)
 - [ ] **Phase 8** — PyO3 bindings (Python access to kaio-ops)

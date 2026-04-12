@@ -37,7 +37,8 @@ impl PtxType {
         }
     }
 
-    /// PTX type suffix string (e.g. `.f32`, `.u64`).
+    /// PTX type suffix string for arithmetic, cvt, mma, and register
+    /// declarations (e.g. `.f32`, `.u64`, `.f16`, `.bf16`).
     pub fn ptx_suffix(&self) -> &'static str {
         match self {
             Self::F16 => ".f16",
@@ -49,6 +50,24 @@ impl PtxType {
             Self::S64 => ".s64",
             Self::U64 => ".u64",
             Self::Pred => ".pred",
+        }
+    }
+
+    /// PTX type suffix for **memory operations** (`ld`, `st`, and
+    /// `cp.async` variants).
+    ///
+    /// Differs from [`ptx_suffix`](Self::ptx_suffix) for half-precision
+    /// types: the PTX spec (§8.7.9 "ld") lists the valid types as
+    /// `{b8, b16, b32, b64, b128, u8, u16, u32, u64, s8, s16, s32,
+    /// s64, f32, f64}` — `f16` and `bf16` are **not** valid type
+    /// modifiers for scalar `ld`/`st`. To load a 16-bit half into an
+    /// `.f16` register you emit `ld.global.b16 %h, [addr]`.
+    ///
+    /// For every non-half type this matches [`ptx_suffix`](Self::ptx_suffix).
+    pub fn ptx_memory_suffix(&self) -> &'static str {
+        match self {
+            Self::F16 | Self::BF16 => ".b16",
+            _ => self.ptx_suffix(),
         }
     }
 
@@ -197,6 +216,20 @@ mod tests {
         assert_eq!(PtxType::S64.ptx_suffix(), ".s64");
         assert_eq!(PtxType::U64.ptx_suffix(), ".u64");
         assert_eq!(PtxType::Pred.ptx_suffix(), ".pred");
+    }
+
+    #[test]
+    fn ptx_type_memory_suffix() {
+        // Half types collapse to .b16 for memory ops (PTX ISA §8.7.9).
+        assert_eq!(PtxType::F16.ptx_memory_suffix(), ".b16");
+        assert_eq!(PtxType::BF16.ptx_memory_suffix(), ".b16");
+        // All other types use their native suffix.
+        assert_eq!(PtxType::F32.ptx_memory_suffix(), ".f32");
+        assert_eq!(PtxType::F64.ptx_memory_suffix(), ".f64");
+        assert_eq!(PtxType::S32.ptx_memory_suffix(), ".s32");
+        assert_eq!(PtxType::U32.ptx_memory_suffix(), ".u32");
+        assert_eq!(PtxType::S64.ptx_memory_suffix(), ".s64");
+        assert_eq!(PtxType::U64.ptx_memory_suffix(), ".u64");
     }
 
     #[test]

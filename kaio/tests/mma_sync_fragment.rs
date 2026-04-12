@@ -133,8 +133,9 @@ fn build_mma_gate_ptx() -> String {
         c_ty: PtxType::F32,
     }));
 
-    // Store D back to global memory.
-    store_fragment_c_m16n8k16_global_row(&mut alloc, &mut kernel, rd_d, r_tid, frag_d);
+    // Store D back to global memory. 32-byte row stride = native 16×8 D
+    // matrix (8 fp32 per row × 4 bytes).
+    store_fragment_c_m16n8k16_global_row(&mut alloc, &mut kernel, rd_d, r_tid, frag_d, 32);
 
     kernel.push(PtxInstruction::Control(ControlOp::Ret));
     kernel.set_registers(alloc.into_allocated());

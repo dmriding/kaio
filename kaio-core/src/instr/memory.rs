@@ -177,28 +177,28 @@ impl Emit for MemoryOp {
                 param_name,
                 ty,
             } => {
-                let mnemonic = format!("ld.param{}", ty.ptx_suffix());
+                let mnemonic = format!("ld.param{}", ty.ptx_memory_suffix());
                 let addr = format!("[{param_name}]");
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, &addr])
             }
             MemoryOp::LdGlobal { dst, addr, ty } => {
-                let mnemonic = format!("ld.global{}", ty.ptx_suffix());
+                let mnemonic = format!("ld.global{}", ty.ptx_memory_suffix());
                 let addr_str = format!("[{addr}]");
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, &addr_str])
             }
             MemoryOp::StGlobal { addr, src, ty } => {
-                let mnemonic = format!("st.global{}", ty.ptx_suffix());
+                let mnemonic = format!("st.global{}", ty.ptx_memory_suffix());
                 let addr_str = format!("[{addr}]");
                 // PTX store order: [address], source (reversed from load)
                 w.instruction(&mnemonic, &[&addr_str as &dyn fmt::Display, src])
             }
             MemoryOp::LdShared { dst, addr, ty } => {
-                let mnemonic = format!("ld.shared{}", ty.ptx_suffix());
+                let mnemonic = format!("ld.shared{}", ty.ptx_memory_suffix());
                 let addr_str = format!("[{addr}]");
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, &addr_str])
             }
             MemoryOp::StShared { addr, src, ty } => {
-                let mnemonic = format!("st.shared{}", ty.ptx_suffix());
+                let mnemonic = format!("st.shared{}", ty.ptx_memory_suffix());
                 let addr_str = format!("[{addr}]");
                 w.instruction(&mnemonic, &[&addr_str as &dyn fmt::Display, src])
             }
@@ -370,7 +370,9 @@ mod tests {
             ty: PtxType::F16,
         };
         op.emit(&mut w).unwrap();
-        assert_eq!(w.finish(), "    ld.global.f16 %h0, [%rd0];\n");
+        // PTX ISA §8.7.9: `ld`'s valid type set excludes f16/bf16 — must
+        // use `.b16` for 16-bit loads into `.f16` registers.
+        assert_eq!(w.finish(), "    ld.global.b16 %h0, [%rd0];\n");
     }
 
     #[test]
@@ -383,7 +385,8 @@ mod tests {
             ty: PtxType::F16,
         };
         op.emit(&mut w).unwrap();
-        assert_eq!(w.finish(), "    st.global.f16 [%rd0], %h0;\n");
+        // See ld.global counterpart — `.b16` is the memory-op form.
+        assert_eq!(w.finish(), "    st.global.b16 [%rd0], %h0;\n");
     }
 
     #[test]
@@ -396,7 +399,8 @@ mod tests {
             ty: PtxType::BF16,
         };
         op.emit(&mut w).unwrap();
-        assert_eq!(w.finish(), "    ld.shared.bf16 %hb0, [%r0];\n");
+        // Both f16 and bf16 use `.b16` in memory ops per PTX ISA.
+        assert_eq!(w.finish(), "    ld.shared.b16 %hb0, [%r0];\n");
     }
 
     // --- cp.async (Sprint 6.2) ---

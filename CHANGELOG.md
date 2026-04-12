@@ -56,6 +56,46 @@ Branch: `phase6`. In progress toward v0.2.0.
   (Ampere), not SM 7.0+ (Volta). Earlier Volta/Turing shapes (`m8n8k4`,
   `m16n8k8`) are out of scope.
 
+### Added — Sprint 6.3 (IR-level tensor-core matmul)
+- **`kaio_ops::matmul_tc`** — first IR-authored tensor-core matmul in
+  KAIO. Computes `C = A × B` with f16 × f16 → f32, `m16n8k16.f16.f32`.
+  **Internal (`#[doc(hidden)]`)** for now — requires `M % 16 == 0`,
+  `N % 8 == 0`, `K % 16 == 0`. Promotes to a public API in Sprint 6.7
+  once edge-tile handling lifts the divisibility constraint.
+- **Shared-memory fragment loaders** in `kaio-core::fragment`:
+  `load_fragment_a_m16n8k16_shared_row` and
+  `load_fragment_b_m16n8k16_shared_col` — free-function siblings to
+  the Sprint 6.2 global-source loaders, with a caller-supplied
+  `row_stride_bytes` / `col_stride_bytes` parameter for non-native
+  tile strides.
+- 4 GPU correctness tests (tiny, small, rect, medium) — bit-close to
+  CPU reference (max error ~1e-7 against a tolerance of 1e-2).
+- 6 host-only `validate_dims_tc` tests + 1 PTX-structure test + 1
+  ptxas-verify test for shared-source loaders.
+
+### Fixed — Sprint 6.3
+- **`ld.global.f16` / `st.shared.f16` are not valid PTX.** Sprint 6.1's
+  `MemoryOp::LdGlobal`/`StGlobal`/`LdShared`/`StShared`/`LdParam`
+  emitted the wrong type modifier for half-precision loads/stores —
+  PTX ISA §8.7.9 lists `f16` and `bf16` as invalid types for `ld`/`st`.
+  The correct form loads a 16-bit half into an `.f16` register via
+  `ld.global.b16`. Added `PtxType::ptx_memory_suffix()` that collapses
+  `F16`/`BF16` to `.b16`. Register declarations and `cvt` still use
+  `.f16`. Found by running the first kernel that actually executed an
+  f16 load/store on the GPU.
+- **`store_fragment_c_m16n8k16_global_row` row stride was hardcoded.**
+  The 6.2 helper assumed a standalone 16×8 D matrix (32-byte row
+  stride). For a 16×8 tile inside a larger M×N output (the matmul
+  case), the stride needs to be `N * 4` bytes. Added a
+  `row_stride_bytes: u32` parameter. Callers: `matmul_tc` emits the
+  D-store inline (runtime-valued stride), Sprint 6.2's gate test
+  passes `32`.
+
+### Changed — Sprint 6.3
+- **API change (Sprint 6.2 caller):** `store_fragment_c_m16n8k16_global_row`
+  now takes a `row_stride_bytes: u32` parameter. Pre-6.3 callers
+  pass `32` to match old behavior.
+
 ## [0.1.0] — Phase 5: Fused Attention & Community Release
 
 ### Added — Phase 5

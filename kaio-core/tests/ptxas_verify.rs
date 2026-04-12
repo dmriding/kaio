@@ -110,6 +110,44 @@ fn ptxas_verify_mma_sync() {
 }
 
 #[test]
+fn ptxas_verify_mma_sync_shared() {
+    let ptxas_check = std::process::Command::new("ptxas")
+        .arg("--version")
+        .output();
+    if ptxas_check.is_err() {
+        eprintln!("NOTE: ptxas not found in PATH — skipping PTX verification");
+        return;
+    }
+
+    let sm = sm_target_ampere_or_better();
+    // SAFETY: test binaries are single-threaded inside the test runner
+    // for this scenario — set_var is fine here.
+    unsafe { std::env::set_var("KAIO_SM_TARGET", &sm) };
+    let ptx = common::build_mma_sync_shared_ptx();
+
+    let tmp = std::env::temp_dir().join("kaio_mma_sync_shared_verify.ptx");
+    std::fs::write(&tmp, &ptx).expect("failed to write temp PTX file");
+
+    let output = std::process::Command::new("ptxas")
+        .args(["--gpu-name", &sm])
+        .arg(tmp.to_str().unwrap())
+        .output()
+        .expect("failed to run ptxas");
+
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        output.status.success(),
+        "ptxas verification FAILED for mma.sync shared-source ({sm}):\nstdout: {}\nstderr: {}\n\n=== PTX ===\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        ptx
+    );
+
+    eprintln!("ptxas verification PASSED for shared-source m16n8k16 fragment loaders ({sm})");
+}
+
+#[test]
 fn ptxas_verify_cp_async() {
     let ptxas_check = std::process::Command::new("ptxas")
         .arg("--version")

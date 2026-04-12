@@ -503,10 +503,14 @@ mod tests {
         assert!(output.contains(".param .u64 out_ptr"));
         assert!(output.contains(".reg .f16 %h<2>;"), "f16 reg declarations");
         assert!(output.contains(".reg .f32 %f<3>;"), "f32 reg declarations");
-        assert!(output.contains("ld.global.f16 %h0"));
+        // f16/bf16 loads and stores emit `.b16` — the valid ld/st type
+        // modifier for 16-bit memory ops (PTX ISA §8.7.9). Register class
+        // stays `.f16`. The `cvt` instruction still uses `.f16` / `.f32`
+        // because it's a register-to-register conversion, not memory.
+        assert!(output.contains("ld.global.b16 %h0"));
         assert!(output.contains("cvt.rn.f32.f16 %f0, %h0"));
         assert!(output.contains("cvt.rn.f16.f32 %h1, %f2"));
-        assert!(output.contains("st.global.f16 [%rd4], %h1"));
+        assert!(output.contains("st.global.b16 [%rd4], %h1"));
     }
 
     #[test]
