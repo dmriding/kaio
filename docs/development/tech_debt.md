@@ -1,7 +1,8 @@
 # KAIO — Technical Debt Tracker
 
 Items identified during development that are deferred but should be
-addressed before v0.1.0 release. Organized by priority.
+addressed before the next release milestone. v0.1.0 shipped (Phase 5);
+v0.2.0 is tracked under Phase 6. Organized by priority.
 
 ## High Priority (before Phase 5)
 

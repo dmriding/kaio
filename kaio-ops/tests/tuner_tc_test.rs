@@ -223,9 +223,10 @@ fn matmul_auto_tc_produces_correct_output() {
 #[ignore]
 fn matmul_auto_tc_falls_back_without_cache() {
     // No tune_matmul_tc call first — cache is empty for these dims.
-    // Expected: dispatch falls back to the conservative default
-    // (MatmulTcVariant::TensorCore per Sprint 6.5 D4), which matches
-    // 6.4's timing observation (async is slower at 1 warp/block).
+    // Expected: dispatch falls back to the size-heuristic default
+    // (Sprint 6.7 D6 post-review). 16×8×16 is well below the 3072
+    // threshold, so the sync variant (MatmulTcVariant::TensorCore) is
+    // selected — matches the 6.7 measured winner for small shapes.
     let device = KaioDevice::new(0).expect("GPU required");
     let info = device.info().expect("device info");
     if info.compute_capability.0 < 8 {
