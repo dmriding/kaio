@@ -270,6 +270,47 @@ mod tests {
         assert_eq!(w.finish(), "    st.shared.f32 [%r0], %f1;\n");
     }
 
+    // --- Half-precision load/store (Sprint 6.1) ---
+
+    #[test]
+    fn emit_ld_global_f16() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::LdGlobal {
+            dst: reg(RegKind::H, 0, PtxType::F16),
+            addr: reg(RegKind::Rd, 0, PtxType::U64),
+            ty: PtxType::F16,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    ld.global.f16 %h0, [%rd0];\n");
+    }
+
+    #[test]
+    fn emit_st_global_f16() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::StGlobal {
+            addr: reg(RegKind::Rd, 0, PtxType::U64),
+            src: reg(RegKind::H, 0, PtxType::F16),
+            ty: PtxType::F16,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    st.global.f16 [%rd0], %h0;\n");
+    }
+
+    #[test]
+    fn emit_ld_shared_bf16() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::LdShared {
+            dst: reg(RegKind::Hb, 0, PtxType::BF16),
+            addr: reg(RegKind::R, 0, PtxType::U32),
+            ty: PtxType::BF16,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    ld.shared.bf16 %hb0, [%r0];\n");
+    }
+
     #[test]
     fn st_global_operand_order() {
         // Verify store has [addr], src order — NOT src, [addr]

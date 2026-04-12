@@ -2,17 +2,17 @@
 
 ## Development Process
 
-KAIO is developed using AI-assisted coding tools (Claude Code, Opus 4.6)
-for implementation, with all architecture decisions, API design, and code
+KAIO is developed using AI-assisted coding tools (Claude Code Opus 4.6, OpenAI Codex 5.4, and a custom AI orchestration framework written by the maintainer)
+for implementation. All architecture decisions, API design, and code
 review done by the maintainer. AI handles the mechanical work: writing
 instruction emitters, generating test boilerplate, implementing spec'd
-sprint plans. The human handles the hard parts: deciding what to build,
+sprint plans and writing docs. The maintainer handles the hard parts: deciding what to build,
 how the API should feel, what tradeoffs to make, and whether the output
 is correct.
 
 Every line of generated code is reviewed, tested against nvcc golden
 output, validated with `ptxas --verify`, and executed on real GPU
-hardware before merge. The test suite includes 200+ host tests and 24
+hardware before merge. The test suite includes 200+ host tests and 100+
 GPU E2E tests with numerical accuracy validation against CPU reference
 implementations. If it ships, it works.
 
@@ -38,7 +38,7 @@ All contributions must pass before merge:
 
 ## Code Style
 
-- Doc comments on public items (aiming for `#![deny(missing_docs)]` by v0.1.0)
+- Doc comments on public items (`#![warn(missing_docs)]` enforced)
 - Every `unsafe` block has a `// SAFETY:` comment
 - Conventional commits: `feat:`, `fix:`, `test:`, `docs:`, `refactor:`
 - Tests inline in source files (`#[cfg(test)] mod tests`)

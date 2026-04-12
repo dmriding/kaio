@@ -24,4 +24,5 @@ kaio-runtime = { version = "0.1.0", path = "../kaio-runtime" }
 kaio-macros = { version = "0.1.0", path = "../kaio-macros" }
 
 [dev-dependencies]
+half = { workspace = true }
 trybuild = "1"

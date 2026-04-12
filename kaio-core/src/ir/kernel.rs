@@ -133,6 +133,8 @@ impl PtxKernel {
                 RegKind::F => s.registers_f += 1,
                 RegKind::Fd => s.registers_fd += 1,
                 RegKind::P => s.registers_p += 1,
+                RegKind::H => s.registers_h += 1,
+                RegKind::Hb => s.registers_hb += 1,
             }
         }
 
@@ -185,6 +187,10 @@ pub struct KernelStats {
     pub registers_fd: u32,
     /// `%p` registers (predicate).
     pub registers_p: u32,
+    /// `%h` registers (f16).
+    pub registers_h: u32,
+    /// `%hb` registers (bf16).
+    pub registers_hb: u32,
     /// Total declared shared memory in bytes.
     pub shared_bytes: u32,
 }

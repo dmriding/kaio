@@ -39,7 +39,7 @@ impl fmt::Display for Register {
 /// in the PTX kernel prelude.
 #[derive(Debug)]
 pub struct RegisterAllocator {
-    counters: [u32; 5],
+    counters: [u32; 7],
     allocated: Vec<Register>,
 }
 
@@ -53,7 +53,7 @@ impl RegisterAllocator {
     /// Create a new allocator with all counters at zero.
     pub fn new() -> Self {
         Self {
-            counters: [0; 5],
+            counters: [0; 7],
             allocated: Vec::new(),
         }
     }
@@ -110,17 +110,23 @@ mod tests {
         let rd = alloc.alloc(PtxType::U64);
         let p = alloc.alloc(PtxType::Pred);
         let fd = alloc.alloc(PtxType::F64);
+        let h = alloc.alloc(PtxType::F16);
+        let hb = alloc.alloc(PtxType::BF16);
         // All should be index 0 — independent counters
         assert_eq!(r.index, 0);
         assert_eq!(f.index, 0);
         assert_eq!(rd.index, 0);
         assert_eq!(p.index, 0);
         assert_eq!(fd.index, 0);
+        assert_eq!(h.index, 0);
+        assert_eq!(hb.index, 0);
         assert_eq!(r.name(), "%r0");
         assert_eq!(f.name(), "%f0");
         assert_eq!(rd.name(), "%rd0");
         assert_eq!(p.name(), "%p0");
         assert_eq!(fd.name(), "%fd0");
+        assert_eq!(h.name(), "%h0");
+        assert_eq!(hb.name(), "%hb0");
     }
 
     #[test]
@@ -134,6 +140,27 @@ mod tests {
         assert_eq!(regs[0], r0);
         assert_eq!(regs[1], r1);
         assert_eq!(regs[2], r2);
+    }
+
+    #[test]
+    fn f16_bf16_register_allocation() {
+        let mut alloc = RegisterAllocator::new();
+        let h0 = alloc.alloc(PtxType::F16);
+        let h1 = alloc.alloc(PtxType::F16);
+        let hb0 = alloc.alloc(PtxType::BF16);
+        let hb1 = alloc.alloc(PtxType::BF16);
+        // f16 counters are independent from bf16
+        assert_eq!(h0.index, 0);
+        assert_eq!(h1.index, 1);
+        assert_eq!(hb0.index, 0);
+        assert_eq!(hb1.index, 1);
+        assert_eq!(h0.name(), "%h0");
+        assert_eq!(h1.name(), "%h1");
+        assert_eq!(hb0.name(), "%hb0");
+        assert_eq!(hb1.name(), "%hb1");
+        // Verify kinds
+        assert_eq!(h0.kind, RegKind::H);
+        assert_eq!(hb0.kind, RegKind::Hb);
     }
 
     #[test]
