@@ -86,7 +86,6 @@ const WARP_QUAD_N: u32 = 32; // cols per warp quadrant
 const MMAS_PER_WARP_M: u32 = WARP_QUAD_M / BM; // 2 row-stripes per warp
 const MMAS_PER_WARP_N: u32 = WARP_QUAD_N / BN; // 4 col-stripes per warp
 const WARPS_PER_BLOCK: u32 = 4;
-#[allow(dead_code)] // documentation: derived launch threads-per-block
 const THREADS_PER_BLOCK: u32 = WARPS_PER_BLOCK * 32; // 128
 
 // --- Shared tile sizes ---
@@ -159,129 +158,6 @@ pub(crate) fn validate_dims_tc(
     Ok(())
 }
 
-/// Stage B: row-major global → column-major shared, 32 threads × 4 fp16
-/// each (single-warp 16×8 tile, the original Sprint 6.3 helper).
-///
-/// **Sprint 6.7 note:** This helper is preserved verbatim because
-/// `matmul_tc_async_kernel` still imports it (until Gate B migrates the
-/// async kernel to multi-warp). The new multi-warp B-loader is
-/// `emit_mw_load_tile_b_16x64` below; both will live side-by-side
-/// through Gate A only.
-///
-/// `pub(crate)` for the async kernel's reuse.
-pub(crate) fn emit_load_b_tile(
-    alloc: &mut RegisterAllocator,
-    kernel: &mut PtxKernel,
-    b_tile_src_global: Register,
-    tile_b_shared: Register,
-    tid_x: Register,
-    n_bytes: Register,
-) {
-    let lane_base = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-        dst: lane_base,
-        lhs: Operand::Reg(tid_x),
-        rhs: Operand::ImmU32(4),
-        ty: PtxType::U32,
-    }));
-
-    for i in 0..4u32 {
-        let flat = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Arith(ArithOp::Add {
-            dst: flat,
-            lhs: Operand::Reg(lane_base),
-            rhs: Operand::ImmU32(i),
-            ty: PtxType::U32,
-        }));
-        let col = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Arith(ArithOp::Div {
-            dst: col,
-            lhs: Operand::Reg(flat),
-            rhs: Operand::ImmU32(16),
-            ty: PtxType::U32,
-        }));
-        let row = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Arith(ArithOp::Rem {
-            dst: row,
-            lhs: Operand::Reg(flat),
-            rhs: Operand::ImmU32(16),
-            ty: PtxType::U32,
-        }));
-
-        let row_bytes = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-            dst: row_bytes,
-            lhs: Operand::Reg(row),
-            rhs: Operand::ImmU32(BYTES_PER_HALF),
-            ty: PtxType::U32,
-        }));
-        let shared_off = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Arith(ArithOp::Mad {
-            dst: shared_off,
-            a: Operand::Reg(col),
-            b: Operand::ImmU32(TILE_B_COL_STRIDE_BYTES),
-            c: Operand::Reg(row_bytes),
-            ty: PtxType::U32,
-            mode: MadMode::Lo,
-        }));
-        let shared_addr = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Arith(ArithOp::Add {
-            dst: shared_addr,
-            lhs: Operand::Reg(tile_b_shared),
-            rhs: Operand::Reg(shared_off),
-            ty: PtxType::U32,
-        }));
-
-        let row_global_off64 = alloc.alloc(PtxType::U64);
-        kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
-            dst: row_global_off64,
-            lhs: Operand::Reg(row),
-            rhs: Operand::Reg(n_bytes),
-            src_ty: PtxType::U32,
-        }));
-        let col_bytes = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-            dst: col_bytes,
-            lhs: Operand::Reg(col),
-            rhs: Operand::ImmU32(BYTES_PER_HALF),
-            ty: PtxType::U32,
-        }));
-        let col_bytes64 = alloc.alloc(PtxType::U64);
-        kernel.push(PtxInstruction::Cvt {
-            dst: col_bytes64,
-            src: col_bytes,
-            dst_ty: PtxType::U64,
-            src_ty: PtxType::U32,
-        });
-        let per_thread_off64 = alloc.alloc(PtxType::U64);
-        kernel.push(PtxInstruction::Arith(ArithOp::Add {
-            dst: per_thread_off64,
-            lhs: Operand::Reg(row_global_off64),
-            rhs: Operand::Reg(col_bytes64),
-            ty: PtxType::U64,
-        }));
-        let global_addr = alloc.alloc(PtxType::U64);
-        kernel.push(PtxInstruction::Arith(ArithOp::Add {
-            dst: global_addr,
-            lhs: Operand::Reg(b_tile_src_global),
-            rhs: Operand::Reg(per_thread_off64),
-            ty: PtxType::U64,
-        }));
-
-        let tmp_h = alloc.alloc(PtxType::F16);
-        kernel.push(PtxInstruction::Memory(MemoryOp::LdGlobal {
-            dst: tmp_h,
-            addr: global_addr,
-            ty: PtxType::F16,
-        }));
-        kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
-            addr: shared_addr,
-            src: tmp_h,
-            ty: PtxType::F16,
-        }));
-    }
-}
-
 /// Multi-warp cooperative load of the 64×16 fp16 row-major A block tile
 /// from global memory into row-major shared. 128 threads × 4 b32 issues
 /// per thread = 512 b32 = 1024 fp16 = 64 rows × 16 cols ✓.
@@ -293,10 +169,15 @@ pub(crate) fn emit_load_b_tile(
 ///
 /// **Edge handling:** Caller pre-zeroes `tile_a` shared memory once at
 /// kernel start. OOB threads (`row_global >= M`) skip their 4 ld+st
-/// pairs entirely via `@!p bra A_SKIP_TILE_LOAD` — the shared slots
-/// stay zero from the pre-zero pass. No K-direction edge check —
+/// pairs entirely via `@!p bra A_SKIP_TILE_LOAD_<suffix>` — the shared
+/// slots stay zero from the pre-zero pass. No K-direction edge check —
 /// `K % 16 == 0` is enforced by validate.
-fn emit_mw_load_tile_a_64x16(
+///
+/// `label_suffix` makes the bra-skip label unique per call site.
+/// Multi-call kernels (e.g. matmul_tc_async's preamble + per-iter)
+/// must pass distinct suffixes to avoid duplicate-label ptxas errors.
+/// Single-call kernels (matmul_tc) can pass `""`.
+pub(crate) fn emit_mw_load_tile_a_64x16(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
     a_block_base_global: Register, // u64 — A[block_row, k_tile*16]
@@ -305,7 +186,13 @@ fn emit_mw_load_tile_a_64x16(
     block_row: Register,           // u32
     m: Register,                   // u32
     k_bytes: Register,             // u32 — K * 2
+    label_suffix: &str,
 ) {
+    let skip_label = if label_suffix.is_empty() {
+        "A_SKIP_TILE_LOAD".to_string()
+    } else {
+        format!("A_SKIP_TILE_LOAD_{label_suffix}")
+    };
     // lane_base = flat_tid * 4   (half2 index base)
     let lane_base = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mul {
@@ -346,7 +233,7 @@ fn emit_mw_load_tile_a_64x16(
     }));
     kernel.push(PtxInstruction::Control(ControlOp::BraPred {
         pred: p_row_in,
-        target: "A_SKIP_TILE_LOAD".to_string(),
+        target: skip_label.clone(),
         negate: true,
     }));
 
@@ -437,7 +324,7 @@ fn emit_mw_load_tile_a_64x16(
             ty: PtxType::U32,
         }));
     }
-    kernel.push(PtxInstruction::Label("A_SKIP_TILE_LOAD".to_string()));
+    kernel.push(PtxInstruction::Label(skip_label));
 }
 
 /// Multi-warp cooperative load of the 16×64 fp16 B block tile from
@@ -450,10 +337,13 @@ fn emit_mw_load_tile_a_64x16(
 ///
 /// **Edge handling:** Caller pre-zeroes `tile_b` shared memory once at
 /// kernel start. OOB threads (`col_global >= N`) skip their 8 ld+st
-/// pairs entirely via `@!p bra B_SKIP_TILE_LOAD` — the shared slots
-/// stay zero from the pre-zero pass. No K-direction edge check —
+/// pairs entirely via `@!p bra B_SKIP_TILE_LOAD_<suffix>` — the shared
+/// slots stay zero from the pre-zero pass. No K-direction edge check —
 /// `K % 16 == 0` is enforced by validate.
-fn emit_mw_load_tile_b_16x64(
+///
+/// `label_suffix` makes the bra-skip label unique per call site; same
+/// rules as `emit_mw_load_tile_a_64x16`.
+pub(crate) fn emit_mw_load_tile_b_16x64(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
     b_block_base_global: Register, // u64 — B[k_tile*16, block_col]
@@ -462,7 +352,13 @@ fn emit_mw_load_tile_b_16x64(
     block_col: Register,           // u32
     n: Register,                   // u32
     n_bytes: Register,             // u32 — N * 2
+    label_suffix: &str,
 ) {
+    let skip_label = if label_suffix.is_empty() {
+        "B_SKIP_TILE_LOAD".to_string()
+    } else {
+        format!("B_SKIP_TILE_LOAD_{label_suffix}")
+    };
     // lane_base = flat_tid * 8   (fp16 index base)
     let lane_base = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mul {
@@ -503,7 +399,7 @@ fn emit_mw_load_tile_b_16x64(
     }));
     kernel.push(PtxInstruction::Control(ControlOp::BraPred {
         pred: p_col_in,
-        target: "B_SKIP_TILE_LOAD".to_string(),
+        target: skip_label.clone(),
         negate: true,
     }));
 
@@ -609,7 +505,7 @@ fn emit_mw_load_tile_b_16x64(
             ty: PtxType::F16,
         }));
     }
-    kernel.push(PtxInstruction::Label("B_SKIP_TILE_LOAD".to_string()));
+    kernel.push(PtxInstruction::Label(skip_label));
 }
 
 /// Per-warp accumulation of one K-tile: 8 mma.sync.m16n8k16 calls in a
@@ -620,7 +516,7 @@ fn emit_mw_load_tile_b_16x64(
 ///
 /// The accumulator slice `&mut [FragmentC; 8]` is indexed as
 /// `accs[m_stripe * MMAS_PER_WARP_N + n_stripe]`.
-fn emit_warp_quadrant_mma(
+pub(crate) fn emit_warp_quadrant_mma(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
     tile_a_warp_base_shared: Register, // u32 — tile_a + warp_row_quad * 32 * TILE_A_ROW_STRIDE_BYTES
@@ -717,7 +613,7 @@ fn emit_warp_quadrant_mma(
 ///   d[3]: (row_start + groupID + 8, col_start + 2*tig + 1)
 /// where groupID = lane / 4, tig = lane % 4.
 #[allow(clippy::too_many_arguments)]
-fn emit_warp_quadrant_store(
+pub(crate) fn emit_warp_quadrant_store(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
     rd_d_block_base: Register, // u64 — D[block_row, block_col]
@@ -1029,6 +925,87 @@ fn emit_warp_quadrant_store(
     }
 }
 
+/// Cooperatively zero `tile_a` and `tile_b` shared regions across 128
+/// threads, then bar.sync. Each thread writes a contiguous slice of
+/// each tile via `st.shared.b32` of an immediate-zero register.
+///
+/// Per-tile size must be a multiple of `128 * 4 = 512` bytes (so each
+/// thread does an integer number of `b32` stores). Sprint 6.7 sync tile
+/// is 2048 B (128 × 16 → 4 stores/thread); async tile is 4096 B
+/// (128 × 32 → 8 stores/thread).
+///
+/// `pub(crate)` — `matmul_tc_async_kernel` reuses this for its 4 KB
+/// double-buffered tiles.
+pub(crate) fn emit_pre_zero_shared_tiles(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_a: Register,
+    tile_b: Register,
+    flat_tid: Register,
+    tile_a_bytes: u32,
+    tile_b_bytes: u32,
+) {
+    debug_assert!(
+        tile_a_bytes.is_multiple_of(THREADS_PER_BLOCK * 4),
+        "tile_a_bytes ({tile_a_bytes}) must be multiple of 128*4 (THREADS_PER_BLOCK * 4)"
+    );
+    debug_assert!(
+        tile_b_bytes.is_multiple_of(THREADS_PER_BLOCK * 4),
+        "tile_b_bytes ({tile_b_bytes}) must be multiple of 128*4"
+    );
+
+    let r_zero = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_zero,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+
+    for (tile_base, total_bytes) in [(tile_a, tile_a_bytes), (tile_b, tile_b_bytes)] {
+        let bytes_per_thread = total_bytes / THREADS_PER_BLOCK;
+        let issues_per_thread = bytes_per_thread / 4;
+
+        // base_off = tile_base + flat_tid * bytes_per_thread
+        let r_thread_off = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: r_thread_off,
+            lhs: Operand::Reg(flat_tid),
+            rhs: Operand::ImmU32(bytes_per_thread),
+            ty: PtxType::U32,
+        }));
+        let base_off = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: base_off,
+            lhs: Operand::Reg(tile_base),
+            rhs: Operand::Reg(r_thread_off),
+            ty: PtxType::U32,
+        }));
+
+        for i in 0..issues_per_thread {
+            let addr = if i == 0 {
+                base_off
+            } else {
+                let a = alloc.alloc(PtxType::U32);
+                kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                    dst: a,
+                    lhs: Operand::Reg(base_off),
+                    rhs: Operand::ImmU32(i * 4),
+                    ty: PtxType::U32,
+                }));
+                a
+            };
+            kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+                addr,
+                src: r_zero,
+                ty: PtxType::U32,
+            }));
+        }
+    }
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+        barrier_id: 0,
+    }));
+}
+
 /// Build the IR module for `matmul_tc` targeting the given SM.
 ///
 /// `sm` is a PTX target string such as `"sm_89"` — the caller is
@@ -1327,58 +1304,16 @@ pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
         ty: PtxType::U32,
     }));
 
-    // --- Pre-zero shared tiles cooperatively ---
-    // 128 threads × 8 b32 stores = 4 KB = full tile_a + tile_b.
-    // Each thread writes 16 contiguous bytes of tile_a, then 16 of tile_b.
-    // OOB threads in the per-K-iter loaders skip their st.shared via
-    // bra-pred, leaving these zeros in place — that's the edge-tile
-    // zero-padding contract the mma.sync invariant needs.
-    {
-        let r_zero = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Mov {
-            dst: r_zero,
-            src: Operand::ImmU32(0),
-            ty: PtxType::U32,
-        });
-        let r_thread_off_bytes = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-            dst: r_thread_off_bytes,
-            lhs: Operand::Reg(r_flat_tid),
-            rhs: Operand::ImmU32(16),
-            ty: PtxType::U32,
-        }));
-        for tile_base in [r_tile_a, r_tile_b] {
-            let base_off = alloc.alloc(PtxType::U32);
-            kernel.push(PtxInstruction::Arith(ArithOp::Add {
-                dst: base_off,
-                lhs: Operand::Reg(tile_base),
-                rhs: Operand::Reg(r_thread_off_bytes),
-                ty: PtxType::U32,
-            }));
-            for i in 0..4u32 {
-                let addr = if i == 0 {
-                    base_off
-                } else {
-                    let a = alloc.alloc(PtxType::U32);
-                    kernel.push(PtxInstruction::Arith(ArithOp::Add {
-                        dst: a,
-                        lhs: Operand::Reg(base_off),
-                        rhs: Operand::ImmU32(i * 4),
-                        ty: PtxType::U32,
-                    }));
-                    a
-                };
-                kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
-                    addr,
-                    src: r_zero,
-                    ty: PtxType::U32,
-                }));
-            }
-        }
-        kernel.push(PtxInstruction::Control(ControlOp::BarSync {
-            barrier_id: 0,
-        }));
-    }
+    // Pre-zero shared tiles. tile_a + tile_b = 2048 + 2048 = 4096 B.
+    emit_pre_zero_shared_tiles(
+        &mut alloc,
+        &mut kernel,
+        r_tile_a,
+        r_tile_b,
+        r_flat_tid,
+        TILE_A_BYTES,
+        TILE_B_BYTES,
+    );
 
     // Allocate 8 FragmentC accumulators, zero them.
     let mut accs: [FragmentC; 8] = [
@@ -1467,6 +1402,7 @@ pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
     }));
 
     // Cooperative load of A and B tiles with edge predication.
+    // Single call site each → empty label_suffix.
     emit_mw_load_tile_a_64x16(
         &mut alloc,
         &mut kernel,
@@ -1476,6 +1412,7 @@ pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
         r_block_row,
         r_m,
         r_k_bytes,
+        "",
     );
     emit_mw_load_tile_b_16x64(
         &mut alloc,
@@ -1486,6 +1423,7 @@ pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
         r_block_col,
         r_n,
         r_n_bytes,
+        "",
     );
 
     // bar.sync — all warps see consistent shared state.

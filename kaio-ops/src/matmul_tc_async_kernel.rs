@@ -1,57 +1,53 @@
-//! Tensor-core matrix multiply with cp.async double-buffering
-//! (Sprint 6.4).
+//! Tensor-core matrix multiply with cp.async double-buffering, multi-warp.
 //!
-//! Layered on top of Sprint 6.3's `matmul_tc`: same dimension constraints,
-//! same shared-memory layout contract (A row-major, B column-major), same
-//! fragment loaders from `kaio-core::fragment`. The difference is the
-//! staging path:
+//! Sprint 6.7 Gate B: layered on top of Gate A's multi-warp `matmul_tc`
+//! (64×64 block tile, 4 warps, 32×32 quadrant per warp, 8 mma per
+//! K-tile). Same shared-memory layout contract (A row-major in shared,
+//! B column-major in shared), same fragment loaders, same per-warp 8-mma
+//! accumulation, same edge-tile predication. Only the staging path
+//! differs:
 //!
-//! - **A** is staged via `cp.async.ca.shared.global` (16 bytes per thread,
-//!   one async issue per thread per K-tile). Next K-tile's A is issued
-//!   **before** the current K-tile's `mma.sync`, so the memory fetch
-//!   overlaps with compute.
+//! - **A** is staged via `cp.async.ca.shared.global` (16 bytes per
+//!   thread × 128 threads = 2,048 B = one full A buffer). Next K-tile's
+//!   A is issued **before** the current K-tile's `mma.sync` work, so
+//!   the memory fetch overlaps with compute.
 //! - **B** stays synchronous — the row-major → column-major transpose
 //!   during staging is a strided gather that `cp.async` cannot express
-//!   (source must be contiguous bytes). Revisiting B with async staging
-//!   is a Sprint 6.7 concern that will likely coincide with the multi-
-//!   warp restructure. See `docs/development/sprints/phase6/sprint_6_4.md`
-//!   §D3 for the full rationale.
-//!
-//! # Sprint 6.4 intent (correctness + pipeline-pattern soundness)
-//!
-//! Same one-warp-per-block, one 16×8 output tile per block structure as
-//! 6.3. This is **not** a performance sprint — at 1 warp with 1 small
-//! `mma.sync` per K-tile there's only ~16 cycles of compute to hide
-//! ~100+ cycles of memory latency, so async may perform at or slightly
-//! below sync on this workload. The goal is to prove the pipeline
-//! **pattern** is correct and has a reusable skeleton for 6.7 to scale.
+//!   (source must be contiguous bytes). Reuses Gate A's
+//!   `emit_mw_load_tile_b_16x64` from `matmul_tc_kernel`.
 //!
 //! # Dimension constraint
 //!
 //! Identical to `matmul_tc`: `M % 16 == 0 && N % 8 == 0 && K % 16 == 0`.
-//! Validation is shared via [`validate_dims_tc`](crate::matmul_tc_kernel::validate_dims_tc).
+//! Validation shared via [`validate_dims_tc`](crate::matmul_tc_kernel::validate_dims_tc).
+//! Edge tiles inside the 64×64 block are handled by per-warp/per-thread
+//! bra-skip on OOB — same mechanism as Gate A.
 //!
-//! # Shared-memory layout (2 buffers per tile)
+//! # Shared-memory layout (2 buffers per tile, multi-warp sized)
 //!
 //! ```text
-//! .shared .align 16 .b8 tile_a[1024];   // 2 × 512 B, row-major per buffer
-//! .shared .align 4  .b8 tile_b[512];    // 2 × 256 B, col-major per buffer
+//! .shared .align 16 .b8 tile_a[4096];   // 2 × 2048 B, row-major per buffer
+//! .shared .align 4  .b8 tile_b[4096];   // 2 × 2048 B, col-major per buffer
 //! ```
 //!
-//! `tile_a` is `align = 16` because `cp.async.ca.shared.global` with
-//! `size = 16` requires 16-byte shared alignment (PTX ISA §8.7.8.22.6).
-//! `tile_b` stays `align = 4` — no cp.async writes there.
+//! Per-buffer: `tile_a` 64×16 fp16 (2,048 B), `tile_b` 16×64 fp16
+//! (2,048 B). Total shared per block: **8 KB** — well under the 48 KB
+//! ceiling.
 //!
-//! Buffer selection at iteration `k_tile`: `cur = k_tile & 1`. Current
-//! buffer offsets are computed via [`buffer_offsets`] each iter as
-//! `(k_tile & 1) * buffer_size`. XOR-toggle is **not** used — it would
-//! require the shared base to be size-aligned, which `SharedDecl` does
-//! not guarantee.
+//! `tile_a` is `align = 16` because `cp.async.ca.shared.global` with
+//! `size = 16` requires 16-byte shared alignment. `tile_b` stays
+//! `align = 4` — sync-store path, no cp.async writes there.
+//!
+//! Buffer selection at iteration `k_tile`: `cur = k_tile % 2`. Buffer
+//! offsets computed via [`buffer_offsets`] each iter as
+//! `(k_tile & 1) * buffer_size`.
 //!
 //! # Pipeline ordering
 //!
 //! ```text
 //! preamble:
+//!     pre-zero tile_a + tile_b (all 8 KB cooperatively)
+//!     bar.sync
 //!     cp.async A[0] → tile_a[0]; commit_group
 //!     sync-store B[0] → tile_b[0]
 //!
@@ -61,71 +57,72 @@
 //!     if k + 1 < num_k_tiles:
 //!         cp.async A[k+1] → tile_a[nxt]; commit_group
 //!         sync-store B[k+1] → tile_b[nxt]
-//!     load frag_a, frag_b from tile_{a,b}[cur]
-//!     mma.sync                             ; D += A * B
-//!     cur, nxt = nxt, cur
+//!     emit_warp_quadrant_mma on tile_{a,b}[cur]   ; 8 mma per warp
+//!     cur, nxt = nxt, cur (implicit via k_tile + 1)
 //! ```
 //!
-//! **Loop-entry invariant:** at the top of each `K_LOOP` iteration,
-//! `tile_{a,b}_cur` name the tiles that have been *issued* (by the
-//! preamble at k=0 or by iter k-1). The `wait_group 0` + `bar.sync` at
-//! the top of the iter is what actually makes them *resident* and
-//! *visible* to the fragment loads. `tile_{a,b}_nxt` name the free
-//! buffers, ready to receive the next K-tile's issues.
+//! **Loop-entry invariant:** `tile_{a,b}_cur` name the buffers that
+//! have been *issued* (by the preamble at k=0 or by iter k-1). The
+//! `wait_group 0` + `bar.sync` at the top of each iter is what makes
+//! them *resident* and *visible* to the per-warp fragment loads.
+//! `tile_{a,b}_nxt` name the free buffers, ready to receive the next
+//! K-tile's issues.
 //!
-//! **No trailing `bar.sync` after `mma.sync`:** the mma reads from
-//! `tile_{a,b}_cur`; the next iter's cp.async/sync-store writes go to
-//! `tile_{a,b}_nxt`. Disjoint shared regions mean no race between
-//! iterations — the `bar.sync` at the **top** of the next iter is what
-//! fences the pending-A visibility. This differs from 6.3 intentionally:
-//! 6.3's single-buffer design required a post-mma bar.sync to delimit
-//! tile reuse; double-buffering removes that requirement.
-//!
-//! **B sync-store to `tile_b_nxt` is race-free by construction:** the
-//! mma reads `tile_b_cur`, and the sync-store writes `tile_b_nxt`
-//! (the other buffer). With one warp per block there is no
-//! inter-thread visibility concern; in 6.7's multi-warp restructure
-//! the top-of-iter `bar.sync` continues to handle that.
+//! **Multi-warp safety vs Sprint 6.4:** the same "no trailing bar.sync
+//! after mma" optimization holds — disjoint cur/nxt buffers + top-of-
+//! iter `bar.sync` together fence reads from writes. With 4 warps now
+//! all reading `tile_cur` simultaneously and all 4 warps' next-iter
+//! cp.async issues going to `tile_nxt`, no inter-warp race exists
+//! within a single K-iter, and the top-of-next-iter `bar.sync` covers
+//! cross-warp visibility before the next mma reads.
 
 use half::f16;
 use kaio::prelude::*;
-use kaio_core::fragment::{
-    alloc_c, load_fragment_a_m16n8k16_shared_row, load_fragment_b_m16n8k16_shared_col,
-};
+use kaio_core::fragment::FragmentC;
 use kaio_core::instr::control::{CmpOp, ControlOp};
 use kaio_core::instr::memory::MemoryOp;
 use kaio_core::instr::special;
-use kaio_core::instr::{ArithOp, MadMode, MmaShape, TensorCoreOp};
+use kaio_core::instr::{ArithOp, MadMode};
 use kaio_core::ir::{
     Operand, PtxInstruction, PtxKernel, PtxModule, PtxParam, Register, RegisterAllocator,
     SharedDecl, SpecialReg,
 };
 use kaio_core::types::PtxType;
 
-use crate::matmul_tc_kernel::{emit_load_b_tile, validate_dims_tc};
+use crate::matmul_tc_kernel::{
+    emit_mw_load_tile_b_16x64, emit_pre_zero_shared_tiles, emit_warp_quadrant_mma,
+    emit_warp_quadrant_store, validate_dims_tc,
+};
 
-const BM: u32 = 16;
-const BN: u32 = 8;
+// --- mma.sync.m16n8k16 instance shape (used for validate constraint
+// reference; BM/BN are also encoded in the matmul_tc_kernel module's
+// validate path which we share via `validate_dims_tc`) ---
 const BK: u32 = 16;
+
+// --- Multi-warp block tiling (Sprint 6.7) ---
+const BM_BLOCK: u32 = 64;
+const BN_BLOCK: u32 = 64;
+const WARP_QUAD_M: u32 = 32;
+const WARP_QUAD_N: u32 = 32;
+const WARPS_PER_BLOCK: u32 = 4;
+
+// --- Shared tile sizes (per buffer; 2 buffers each for double-buffering) ---
 const BYTES_PER_HALF: u32 = 2;
 const BYTES_PER_F32: u32 = 4;
 const TILE_A_ROW_STRIDE_BYTES: u32 = BK * BYTES_PER_HALF; // 32
 const TILE_B_COL_STRIDE_BYTES: u32 = BK * BYTES_PER_HALF; // 32
-const TILE_A_BYTES: u32 = BM * BK * BYTES_PER_HALF; // 512 per buffer
-const TILE_B_BYTES: u32 = BK * BN * BYTES_PER_HALF; // 256 per buffer
-const TILE_A_TOTAL_BYTES: u32 = 2 * TILE_A_BYTES; // 1024 (2 buffers)
-const TILE_B_TOTAL_BYTES: u32 = 2 * TILE_B_BYTES; // 512  (2 buffers)
+const TILE_A_BYTES: u32 = BM_BLOCK * BK * BYTES_PER_HALF; // 2048 per buffer
+const TILE_B_BYTES: u32 = BK * BN_BLOCK * BYTES_PER_HALF; // 2048 per buffer
+const TILE_A_TOTAL_BYTES: u32 = 2 * TILE_A_BYTES; // 4096 (2 buffers)
+const TILE_B_TOTAL_BYTES: u32 = 2 * TILE_B_BYTES; // 4096 (2 buffers)
 
 /// Pure helper: byte offsets of the (cur, nxt) buffer pair within
 /// `tile_a` and `tile_b` at iteration `k_tile`.
 ///
-/// Returns `(a_cur, a_nxt, b_cur, b_nxt)`, each a byte offset to add
-/// to the corresponding `.shared` symbol base. Extracted as a pure
-/// function so the toggle math is host-testable without a GPU — see
-/// the `buffer_offsets_toggle` test in this module. The kernel
-/// builder inlines equivalent arithmetic directly (it needs `Register`
-/// operands, not `u32`s), so this helper is test-only in production
-/// builds.
+/// Returns `(a_cur, a_nxt, b_cur, b_nxt)`. Sprint 6.7 multi-warp
+/// buffer sizes: tile_a per-buffer = 2048 B, tile_b per-buffer = 2048 B.
+/// Pure function so the toggle math is host-testable; the kernel
+/// builder inlines equivalent runtime arithmetic via register operands.
 #[allow(dead_code)]
 pub(crate) fn buffer_offsets(k_tile: u32) -> (u32, u32, u32, u32) {
     let cur = k_tile & 1;
@@ -138,69 +135,100 @@ pub(crate) fn buffer_offsets(k_tile: u32) -> (u32, u32, u32, u32) {
     )
 }
 
-/// Stage the 16×16 A tile via `cp.async.ca.shared.global` (size = 16).
+/// Multi-warp cooperative async-load of the 64×16 fp16 row-major A
+/// block tile via `cp.async.ca.shared.global` (size = 16). 128 threads
+/// × 1 issue per thread = 2,048 B = full A buffer.
 ///
-/// Per-thread: `flat_byte = lane * 16`, so each of 32 threads issues
-/// exactly one 16-byte async copy. 32 × 16 = 512 bytes = one full A
-/// tile.
+/// **Per-thread layout:** thread `t` writes 16 contiguous bytes (= 8
+/// fp16 = a half-row of 8 cols) at:
+/// - `row = t / 2`            (0..64 across all 128 threads ✓)
+/// - `col_byte = (t % 2) * 16`
+/// - `shared_off = row * 32 + col_byte`
+/// - `global_off = row * K_bytes + col_byte`
 ///
-/// Thread address layout:
-/// - `row          = lane / 2`           (0..16)
-/// - `col_pair_byte = (lane % 2) * 16`   (0 or 16)
-/// - `shared_byte_off = row * 32 + col_pair_byte`
-/// - `global_byte_off = row * K_bytes + col_pair_byte`
-///   (the K-tile's `k_tile * 32` term is rolled into
-///   `a_tile_src_global` by the caller, same pattern as
-///   `emit_load_a_tile` in 6.3.)
+/// **Edge handling:** Caller pre-zeros `tile_a` shared at kernel start.
+/// OOB threads (`row_global = block_row + row >= M`) skip the cp.async
+/// issue via `@!p bra A_ASYNC_SKIP_<suffix>` — the buffer slot stays
+/// zero. No K-direction edge check (`K % 16 == 0` enforced by validate).
 ///
-/// SAFETY: shared dst and global src are both 16-byte aligned — see
-/// sprint_6_4.md §D4. Invariant requires `BK = 16` (→ 32-byte row
-/// stride) and `K % 16 == 0` (→ `K_bytes % 32 == 0`). Violating either
-/// breaks this alignment contract silently.
+/// **Alignment safety:** shared dst is `align = 16` (decl) and
+/// per-thread byte offset = `t * 16` so each thread's address is also
+/// 16-byte aligned. Global src starts at `block_row * K_bytes + k_tile
+/// * 32`; since `K % 16 == 0` and `BK = 16`, `K_bytes = 2K` is a
+/// multiple of 32, and `t * 16` keeps each per-thread global address
+/// 16-byte aligned. Same alignment contract as Sprint 6.4's single-warp
+/// `emit_load_a_tile_async`.
 ///
 /// Does **not** emit `cp.async.commit_group` — caller owns the commit
-/// boundary so the preamble and the in-loop issue can each commit their
-/// own group independently.
+/// boundary so preamble and in-loop issues each commit independently.
+///
+/// `label_suffix` makes the bra-skip label unique per call site.
 #[allow(clippy::too_many_arguments)]
-fn emit_load_a_tile_async(
+fn emit_mw_load_tile_a_64x16_async(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
-    a_tile_src_global: Register, // u64: start of this block's K-tile's A
-    tile_a_shared: Register,     // u32: base of the chosen A buffer
-    tid_x: Register,
-    k_bytes: Register, // u32: K * 2
+    a_block_base_global: Register, // u64 — A[block_row, k_tile*16]
+    tile_a_shared: Register,       // u32 — base of the chosen A buffer
+    flat_tid: Register,            // u32 — 0..128
+    block_row: Register,           // u32
+    m: Register,                   // u32
+    k_bytes: Register,             // u32 — K * 2
+    label_suffix: &str,
 ) {
-    // row = lane / 2
+    let skip_label = format!("A_ASYNC_SKIP_{label_suffix}");
+
+    // row = flat_tid / 2; col_byte = (flat_tid % 2) * 16
     let row = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Div {
         dst: row,
-        lhs: Operand::Reg(tid_x),
+        lhs: Operand::Reg(flat_tid),
         rhs: Operand::ImmU32(2),
         ty: PtxType::U32,
     }));
-    // col_pair_byte = (lane % 2) * 16
     let lane_mod2 = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Rem {
         dst: lane_mod2,
-        lhs: Operand::Reg(tid_x),
+        lhs: Operand::Reg(flat_tid),
         rhs: Operand::ImmU32(2),
         ty: PtxType::U32,
     }));
-    let col_pair_byte = alloc.alloc(PtxType::U32);
+    let col_byte = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-        dst: col_pair_byte,
+        dst: col_byte,
         lhs: Operand::Reg(lane_mod2),
         rhs: Operand::ImmU32(16),
         ty: PtxType::U32,
     }));
 
-    // shared_addr = tile_a_shared + row * 32 + col_pair_byte
+    // p_row_in = block_row + row < M; if false, skip cp.async.
+    let row_global = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: row_global,
+        lhs: Operand::Reg(block_row),
+        rhs: Operand::Reg(row),
+        ty: PtxType::U32,
+    }));
+    let p_row_in = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_row_in,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(row_global),
+        rhs: Operand::Reg(m),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_row_in,
+        target: skip_label.clone(),
+        negate: true,
+    }));
+
+    // shared_addr = tile_a_shared + row * 32 + col_byte
     let shared_off = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mad {
         dst: shared_off,
         a: Operand::Reg(row),
         b: Operand::ImmU32(TILE_A_ROW_STRIDE_BYTES),
-        c: Operand::Reg(col_pair_byte),
+        c: Operand::Reg(col_byte),
         ty: PtxType::U32,
         mode: MadMode::Lo,
     }));
@@ -212,7 +240,7 @@ fn emit_load_a_tile_async(
         ty: PtxType::U32,
     }));
 
-    // global_addr = a_tile_src_global + row * K_bytes + col_pair_byte
+    // global_addr = a_block_base + row * K_bytes + col_byte
     let row_off64 = alloc.alloc(PtxType::U64);
     kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
         dst: row_off64,
@@ -220,10 +248,10 @@ fn emit_load_a_tile_async(
         rhs: Operand::Reg(k_bytes),
         src_ty: PtxType::U32,
     }));
-    let col_pair_byte64 = alloc.alloc(PtxType::U64);
+    let col_byte64 = alloc.alloc(PtxType::U64);
     kernel.push(PtxInstruction::Cvt {
-        dst: col_pair_byte64,
-        src: col_pair_byte,
+        dst: col_byte64,
+        src: col_byte,
         dst_ty: PtxType::U64,
         src_ty: PtxType::U32,
     });
@@ -231,37 +259,33 @@ fn emit_load_a_tile_async(
     kernel.push(PtxInstruction::Arith(ArithOp::Add {
         dst: per_thread_off64,
         lhs: Operand::Reg(row_off64),
-        rhs: Operand::Reg(col_pair_byte64),
+        rhs: Operand::Reg(col_byte64),
         ty: PtxType::U64,
     }));
     let global_addr = alloc.alloc(PtxType::U64);
     kernel.push(PtxInstruction::Arith(ArithOp::Add {
         dst: global_addr,
-        lhs: Operand::Reg(a_tile_src_global),
+        lhs: Operand::Reg(a_block_base_global),
         rhs: Operand::Reg(per_thread_off64),
         ty: PtxType::U64,
     }));
 
-    // SAFETY: shared dst and global src are 16-byte aligned.
-    // See sprint_6_4.md §D4: requires BK = 16 (→ 32-byte rows) and
-    // K % 16 == 0. Violating either breaks this invariant silently.
+    // Issue cp.async.ca size=16. Caller commits the group.
     kernel.push(PtxInstruction::Memory(MemoryOp::new_cp_async_ca(
         shared_addr,
         global_addr,
         16,
     )));
+
+    kernel.push(PtxInstruction::Label(skip_label));
 }
 
 /// Build the IR module for `matmul_tc_async` targeting the given SM.
 ///
-/// `sm` is a PTX target string such as `"sm_89"` — the caller is
-/// responsible for deriving it from `device.info()` (Sprint 6.5
-/// `matmul_tc_async` host API). Passing a sub-Ampere target (e.g.
-/// `sm_70`) is legal at build time; `PtxModule::validate()` inside
-/// `KaioDevice::load_module` then rejects the module cleanly with
-/// `ValidationError::SmTooLow` (naming either mma.sync or cp.async
-/// as the offending feature, whichever hits the target mismatch first
-/// during the walk).
+/// Multi-warp 64×64 block tile, 4 warps × 32×32 quadrant via 8 mma per
+/// K-tile, with double-buffered cp.async A staging and sync B staging.
+/// Same staging contracts as Sprint 6.4's single-warp variant — see
+/// the module docstring for the pipeline ordering.
 pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("matmul_tc_async");
@@ -273,7 +297,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
     kernel.add_param(PtxParam::scalar("n", PtxType::U32));
     kernel.add_param(PtxParam::scalar("k", PtxType::U32));
 
-    // tile_a: align 16 (required by cp.async.ca size=16 dst alignment).
+    // tile_a: align 16 (cp.async.ca size=16 dst alignment requirement).
     kernel.add_shared_decl(SharedDecl {
         name: "tile_a".to_string(),
         align: 16,
@@ -285,7 +309,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         size_bytes: TILE_B_TOTAL_BYTES,
     });
 
-    // --- Load params & convert pointers to global space ---
+    // --- Load params + cvta ---
     let rd_a_param = alloc.alloc(PtxType::U64);
     kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
         dst: rd_a_param,
@@ -303,6 +327,12 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         dst: rd_d_param,
         param_name: "d_ptr".to_string(),
         ty: PtxType::U64,
+    }));
+    let r_m = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_m,
+        param_name: "m".to_string(),
+        ty: PtxType::U32,
     }));
     let r_n = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
@@ -334,8 +364,25 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
     }));
 
     // --- Special registers ---
-    let (r_tid, tid_instr) = special::tid_x(&mut alloc);
+    let (r_tid_x, tid_instr) = special::tid_x(&mut alloc);
     kernel.push(tid_instr);
+    let r_warp_id = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_warp_id,
+        src: Operand::SpecialReg(SpecialReg::TidY),
+        ty: PtxType::U32,
+    });
+    // flat_tid = tid_y * 32 + tid_x   (used for cooperative tile loads)
+    let r_flat_tid = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: r_flat_tid,
+        a: Operand::Reg(r_warp_id),
+        b: Operand::ImmU32(32),
+        c: Operand::Reg(r_tid_x),
+        ty: PtxType::U32,
+        mode: MadMode::Lo,
+    }));
+
     let r_bidx = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Mov {
         dst: r_bidx,
@@ -349,23 +396,23 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         ty: PtxType::U32,
     });
 
-    // block_row = bidy * BM; block_col = bidx * BN
+    // block_row = bidy * BM_BLOCK; block_col = bidx * BN_BLOCK
     let r_block_row = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mul {
         dst: r_block_row,
         lhs: Operand::Reg(r_bidy),
-        rhs: Operand::ImmU32(BM),
+        rhs: Operand::ImmU32(BM_BLOCK),
         ty: PtxType::U32,
     }));
     let r_block_col = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mul {
         dst: r_block_col,
         lhs: Operand::Reg(r_bidx),
-        rhs: Operand::ImmU32(BN),
+        rhs: Operand::ImmU32(BN_BLOCK),
         ty: PtxType::U32,
     }));
 
-    // K and N in bytes (u32).
+    // K and N in bytes; N in fp32 stride.
     let r_k_bytes = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mul {
         dst: r_k_bytes,
@@ -378,6 +425,13 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         dst: r_n_bytes,
         lhs: Operand::Reg(r_n),
         rhs: Operand::ImmU32(BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+    let r_n_f32_stride = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_n_f32_stride,
+        lhs: Operand::Reg(r_n),
+        rhs: Operand::ImmU32(BYTES_PER_F32),
         ty: PtxType::U32,
     }));
 
@@ -420,55 +474,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         ty: PtxType::U64,
     }));
 
-    // d_block_base = rd_d + block_row * N * 4 + block_col * 4
-    let rd_d_row_off = alloc.alloc(PtxType::U64);
-    let r_n_f32_stride_outer;
-    {
-        let r_n_f32_stride = alloc.alloc(PtxType::U32);
-        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-            dst: r_n_f32_stride,
-            lhs: Operand::Reg(r_n),
-            rhs: Operand::ImmU32(BYTES_PER_F32),
-            ty: PtxType::U32,
-        }));
-        kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
-            dst: rd_d_row_off,
-            lhs: Operand::Reg(r_block_row),
-            rhs: Operand::Reg(r_n_f32_stride),
-            src_ty: PtxType::U32,
-        }));
-        r_n_f32_stride_outer = r_n_f32_stride;
-    }
-    let r_block_col_f32_bytes = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-        dst: r_block_col_f32_bytes,
-        lhs: Operand::Reg(r_block_col),
-        rhs: Operand::ImmU32(BYTES_PER_F32),
-        ty: PtxType::U32,
-    }));
-    let rd_block_col_f32_bytes64 = alloc.alloc(PtxType::U64);
-    kernel.push(PtxInstruction::Cvt {
-        dst: rd_block_col_f32_bytes64,
-        src: r_block_col_f32_bytes,
-        dst_ty: PtxType::U64,
-        src_ty: PtxType::U32,
-    });
-    let rd_d_block_base_pre = alloc.alloc(PtxType::U64);
-    kernel.push(PtxInstruction::Arith(ArithOp::Add {
-        dst: rd_d_block_base_pre,
-        lhs: Operand::Reg(rd_d),
-        rhs: Operand::Reg(rd_d_row_off),
-        ty: PtxType::U64,
-    }));
-    let rd_d_block_base = alloc.alloc(PtxType::U64);
-    kernel.push(PtxInstruction::Arith(ArithOp::Add {
-        dst: rd_d_block_base,
-        lhs: Operand::Reg(rd_d_block_base_pre),
-        rhs: Operand::Reg(rd_block_col_f32_bytes64),
-        ty: PtxType::U64,
-    }));
-
-    // Shared tile symbolic bases.
+    // Shared symbolic bases.
     let r_tile_a_sym = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Mov {
         dst: r_tile_a_sym,
@@ -482,17 +488,71 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         ty: PtxType::U32,
     });
 
-    // D accumulator — zeros.
-    let frag_d = alloc_c(&mut alloc);
-    for r in &frag_d.regs {
-        kernel.push(PtxInstruction::Mov {
-            dst: *r,
-            src: Operand::ImmF32(0.0),
-            ty: PtxType::F32,
-        });
+    // Pre-zero shared (all 8 KB: tile_a 4096 + tile_b 4096).
+    emit_pre_zero_shared_tiles(
+        &mut alloc,
+        &mut kernel,
+        r_tile_a_sym,
+        r_tile_b_sym,
+        r_flat_tid,
+        TILE_A_TOTAL_BYTES,
+        TILE_B_TOTAL_BYTES,
+    );
+
+    // Per-warp shared offset within a buffer (warp_row_quad ∈ {0,1},
+    // warp_col_quad ∈ {0,1}).
+    let r_warp_row_quad = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_warp_row_quad,
+        lhs: Operand::Reg(r_warp_id),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    let r_warp_col_quad = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_warp_col_quad,
+        lhs: Operand::Reg(r_warp_id),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    // tile_a_warp_off (within a buffer) = warp_row_quad * 32 * TILE_A_ROW_STRIDE_BYTES
+    let r_tile_a_warp_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_tile_a_warp_off,
+        lhs: Operand::Reg(r_warp_row_quad),
+        rhs: Operand::ImmU32(WARP_QUAD_M * TILE_A_ROW_STRIDE_BYTES),
+        ty: PtxType::U32,
+    }));
+    let r_tile_b_warp_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_tile_b_warp_off,
+        lhs: Operand::Reg(r_warp_col_quad),
+        rhs: Operand::ImmU32(WARP_QUAD_N * TILE_B_COL_STRIDE_BYTES),
+        ty: PtxType::U32,
+    }));
+
+    // 8 FragmentC accumulators, zeroed.
+    let mut accs: [FragmentC; 8] = [
+        kaio_core::fragment::alloc_c(&mut alloc),
+        kaio_core::fragment::alloc_c(&mut alloc),
+        kaio_core::fragment::alloc_c(&mut alloc),
+        kaio_core::fragment::alloc_c(&mut alloc),
+        kaio_core::fragment::alloc_c(&mut alloc),
+        kaio_core::fragment::alloc_c(&mut alloc),
+        kaio_core::fragment::alloc_c(&mut alloc),
+        kaio_core::fragment::alloc_c(&mut alloc),
+    ];
+    for acc in &accs {
+        for r in &acc.regs {
+            kernel.push(PtxInstruction::Mov {
+                dst: *r,
+                src: Operand::ImmF32(0.0),
+                ty: PtxType::F32,
+            });
+        }
     }
 
-    // num_k_tiles = k / BK
+    // num_k_tiles = K / 16
     let r_num_k_tiles = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Div {
         dst: r_num_k_tiles,
@@ -501,21 +561,21 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         ty: PtxType::U32,
     }));
 
-    // Helper closure: compute `a_tile_src = a_block_base + k_tile * 32`
-    // (global byte offset of A's K-tile start for this block).
+    // Helper closures (inline inside this builder; capture rd_*_block_base, r_*_bytes, r_tile_*_sym).
     let emit_a_tile_src =
         |alloc: &mut RegisterAllocator, kernel: &mut PtxKernel, k_tile: Register| -> Register {
-            let k_tile_x_32 = alloc.alloc(PtxType::U32);
+            // a_tile_src = rd_a_block_base + k_tile * 32
+            let k_x_32 = alloc.alloc(PtxType::U32);
             kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-                dst: k_tile_x_32,
+                dst: k_x_32,
                 lhs: Operand::Reg(k_tile),
                 rhs: Operand::ImmU32(BK * BYTES_PER_HALF), // 32
                 ty: PtxType::U32,
             }));
-            let k_tile_x_32_u64 = alloc.alloc(PtxType::U64);
+            let k_x_32_u64 = alloc.alloc(PtxType::U64);
             kernel.push(PtxInstruction::Cvt {
-                dst: k_tile_x_32_u64,
-                src: k_tile_x_32,
+                dst: k_x_32_u64,
+                src: k_x_32,
                 dst_ty: PtxType::U64,
                 src_ty: PtxType::U32,
             });
@@ -523,26 +583,25 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
             kernel.push(PtxInstruction::Arith(ArithOp::Add {
                 dst: a_src,
                 lhs: Operand::Reg(rd_a_block_base),
-                rhs: Operand::Reg(k_tile_x_32_u64),
+                rhs: Operand::Reg(k_x_32_u64),
                 ty: PtxType::U64,
             }));
             a_src
         };
 
-    // Helper closure: compute `b_tile_src = b_block_base + k_tile * 16 * N_bytes`.
     let emit_b_tile_src =
         |alloc: &mut RegisterAllocator, kernel: &mut PtxKernel, k_tile: Register| -> Register {
-            let k_tile_x_bk = alloc.alloc(PtxType::U32);
+            let k_x_bk = alloc.alloc(PtxType::U32);
             kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-                dst: k_tile_x_bk,
+                dst: k_x_bk,
                 lhs: Operand::Reg(k_tile),
-                rhs: Operand::ImmU32(BK),
+                rhs: Operand::ImmU32(BK), // 16
                 ty: PtxType::U32,
             }));
             let b_k_row_off = alloc.alloc(PtxType::U64);
             kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
                 dst: b_k_row_off,
-                lhs: Operand::Reg(k_tile_x_bk),
+                lhs: Operand::Reg(k_x_bk),
                 rhs: Operand::Reg(r_n_bytes),
                 src_ty: PtxType::U32,
             }));
@@ -556,7 +615,8 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
             b_src
         };
 
-    // Helper closure: runtime base = sym + (k_tile & 1) * buf_size
+    // Compute buffer base (cur or nxt) for tile_a / tile_b.
+    // toggle=false → cur = (k_tile & 1); toggle=true → nxt = 1 - cur.
     let emit_buf_base = |alloc: &mut RegisterAllocator,
                          kernel: &mut PtxKernel,
                          sym: Register,
@@ -572,7 +632,6 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
             ty: PtxType::U32,
         }));
         let sel_final = if toggle {
-            // nxt = (k_tile & 1) ^ 1  →  implement as 1 - sel
             let one_minus = alloc.alloc(PtxType::U32);
             kernel.push(PtxInstruction::Arith(ArithOp::Sub {
                 dst: one_minus,
@@ -608,7 +667,6 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         src: Operand::ImmU32(0),
         ty: PtxType::U32,
     });
-    // k_tile=0 → buffer 0 for both A and B.
     let tile_a_cur_pre = emit_buf_base(
         &mut alloc,
         &mut kernel,
@@ -627,22 +685,28 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
     );
     let a_tile_src_pre = emit_a_tile_src(&mut alloc, &mut kernel, r_k_zero);
     let b_tile_src_pre = emit_b_tile_src(&mut alloc, &mut kernel, r_k_zero);
-    emit_load_a_tile_async(
+    emit_mw_load_tile_a_64x16_async(
         &mut alloc,
         &mut kernel,
         a_tile_src_pre,
         tile_a_cur_pre,
-        r_tid,
+        r_flat_tid,
+        r_block_row,
+        r_m,
         r_k_bytes,
+        "PRE",
     );
     kernel.push(PtxInstruction::Memory(MemoryOp::CpAsyncCommitGroup));
-    emit_load_b_tile(
+    emit_mw_load_tile_b_16x64(
         &mut alloc,
         &mut kernel,
         b_tile_src_pre,
         tile_b_cur_pre,
-        r_tid,
+        r_flat_tid,
+        r_block_col,
+        r_n,
         r_n_bytes,
+        "PRE",
     );
 
     // --- K loop ---
@@ -655,13 +719,13 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
 
     kernel.push(PtxInstruction::Label("K_LOOP".to_string()));
 
-    // Wait for the A cp.async for this iter to land.
+    // Wait for A[k] to be resident.
     kernel.push(PtxInstruction::Memory(MemoryOp::CpAsyncWaitGroup { n: 0 }));
     kernel.push(PtxInstruction::Control(ControlOp::BarSync {
         barrier_id: 0,
     }));
 
-    // has_next = k_tile + 1 < num_k_tiles
+    // has_next = (k_tile + 1) < num_k_tiles
     let r_k_tile_plus1 = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Add {
         dst: r_k_tile_plus1,
@@ -683,7 +747,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         negate: true,
     }));
 
-    // Issue A[k+1] → tile_a[nxt]; commit.
+    // Issue A[k+1] async + sync-store B[k+1] into the *nxt* buffers.
     let tile_a_nxt = emit_buf_base(
         &mut alloc,
         &mut kernel,
@@ -702,27 +766,33 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
     );
     let a_tile_src_nxt = emit_a_tile_src(&mut alloc, &mut kernel, r_k_tile_plus1);
     let b_tile_src_nxt = emit_b_tile_src(&mut alloc, &mut kernel, r_k_tile_plus1);
-    emit_load_a_tile_async(
+    emit_mw_load_tile_a_64x16_async(
         &mut alloc,
         &mut kernel,
         a_tile_src_nxt,
         tile_a_nxt,
-        r_tid,
+        r_flat_tid,
+        r_block_row,
+        r_m,
         r_k_bytes,
+        "ITER",
     );
     kernel.push(PtxInstruction::Memory(MemoryOp::CpAsyncCommitGroup));
-    emit_load_b_tile(
+    emit_mw_load_tile_b_16x64(
         &mut alloc,
         &mut kernel,
         b_tile_src_nxt,
         tile_b_nxt,
-        r_tid,
+        r_flat_tid,
+        r_block_col,
+        r_n,
         r_n_bytes,
+        "ITER",
     );
 
     kernel.push(PtxInstruction::Label("SKIP_NEXT_ISSUE".to_string()));
 
-    // Compute on tile[cur].
+    // Compute on tile_{a,b}[cur]: per-warp shared base = sym + buf_cur_off + warp_off.
     let tile_a_cur = emit_buf_base(
         &mut alloc,
         &mut kernel,
@@ -739,33 +809,32 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         TILE_B_BYTES,
         false,
     );
-    let frag_a = load_fragment_a_m16n8k16_shared_row(
-        &mut alloc,
-        &mut kernel,
-        tile_a_cur,
-        r_tid,
-        TILE_A_ROW_STRIDE_BYTES,
-    );
-    let frag_b = load_fragment_b_m16n8k16_shared_col(
-        &mut alloc,
-        &mut kernel,
-        tile_b_cur,
-        r_tid,
-        TILE_B_COL_STRIDE_BYTES,
-    );
-    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
-        d: frag_d,
-        a: frag_a,
-        b: frag_b,
-        c: frag_d,
-        shape: MmaShape::M16N8K16,
-        d_ty: PtxType::F32,
-        a_ty: PtxType::F16,
-        b_ty: PtxType::F16,
-        c_ty: PtxType::F32,
+    let r_tile_a_warp_cur = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_tile_a_warp_cur,
+        lhs: Operand::Reg(tile_a_cur),
+        rhs: Operand::Reg(r_tile_a_warp_off),
+        ty: PtxType::U32,
+    }));
+    let r_tile_b_warp_cur = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_tile_b_warp_cur,
+        lhs: Operand::Reg(tile_b_cur),
+        rhs: Operand::Reg(r_tile_b_warp_off),
+        ty: PtxType::U32,
     }));
 
-    // k_tile = k_tile_plus1; continue if < num_k_tiles.
+    // Per-warp 8-mma accumulation. Same helper as Gate A.
+    emit_warp_quadrant_mma(
+        &mut alloc,
+        &mut kernel,
+        r_tile_a_warp_cur,
+        r_tile_b_warp_cur,
+        r_tid_x,
+        &mut accs,
+    );
+
+    // Advance k_tile and loop.
     kernel.push(PtxInstruction::Mov {
         dst: r_k_tile,
         src: Operand::Reg(r_k_tile_plus1),
@@ -785,99 +854,52 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         negate: false,
     }));
 
-    // --- Store D to global (inline, matches 6.3's layout) ---
-    let d_group_id = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Div {
-        dst: d_group_id,
-        lhs: Operand::Reg(r_tid),
-        rhs: Operand::ImmU32(4),
-        ty: PtxType::U32,
-    }));
-    let d_tig = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
-        dst: d_tig,
-        lhs: Operand::Reg(r_tid),
-        rhs: Operand::ImmU32(4),
-        ty: PtxType::U32,
-    }));
-
-    let r_n_f32_stride = r_n_f32_stride_outer;
-    let d_row_off32 = alloc.alloc(PtxType::U32);
+    // --- Per-warp output store (same helper + same address protocol as Gate A) ---
+    // Pass rd_d directly (NOT a per-block base) — warp_block_row /
+    // warp_block_col are absolute, so store helper computes global
+    // addresses from rd_d. (Gate A bug: double-counted block_row/col.)
+    let r_wq_row_start = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-        dst: d_row_off32,
-        lhs: Operand::Reg(d_group_id),
-        rhs: Operand::Reg(r_n_f32_stride),
+        dst: r_wq_row_start,
+        lhs: Operand::Reg(r_warp_row_quad),
+        rhs: Operand::ImmU32(WARP_QUAD_M),
         ty: PtxType::U32,
     }));
-    let d_base_off32 = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
-        dst: d_base_off32,
-        a: Operand::Reg(d_tig),
-        b: Operand::ImmU32(8),
-        c: Operand::Reg(d_row_off32),
-        ty: PtxType::U32,
-        mode: MadMode::Lo,
-    }));
-    let r_eight_rows = alloc.alloc(PtxType::U32);
+    let r_wq_col_start = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-        dst: r_eight_rows,
-        lhs: Operand::Reg(r_n_f32_stride),
-        rhs: Operand::ImmU32(8),
+        dst: r_wq_col_start,
+        lhs: Operand::Reg(r_warp_col_quad),
+        rhs: Operand::ImmU32(WARP_QUAD_N),
         ty: PtxType::U32,
     }));
-    let d_base_plus_8r32 = alloc.alloc(PtxType::U32);
+    let r_warp_block_row = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Add {
-        dst: d_base_plus_8r32,
-        lhs: Operand::Reg(d_base_off32),
-        rhs: Operand::Reg(r_eight_rows),
+        dst: r_warp_block_row,
+        lhs: Operand::Reg(r_block_row),
+        rhs: Operand::Reg(r_wq_row_start),
         ty: PtxType::U32,
     }));
-
-    let emit_store = |alloc: &mut RegisterAllocator,
-                      kernel: &mut PtxKernel,
-                      base_off32: Register,
-                      extra: u32,
-                      src_reg: Register| {
-        let off64 = alloc.alloc(PtxType::U64);
-        kernel.push(PtxInstruction::Cvt {
-            dst: off64,
-            src: base_off32,
-            dst_ty: PtxType::U64,
-            src_ty: PtxType::U32,
-        });
-        let addr = alloc.alloc(PtxType::U64);
-        if extra == 0 {
-            kernel.push(PtxInstruction::Arith(ArithOp::Add {
-                dst: addr,
-                lhs: Operand::Reg(rd_d_block_base),
-                rhs: Operand::Reg(off64),
-                ty: PtxType::U64,
-            }));
-        } else {
-            let tmp = alloc.alloc(PtxType::U64);
-            kernel.push(PtxInstruction::Arith(ArithOp::Add {
-                dst: tmp,
-                lhs: Operand::Reg(rd_d_block_base),
-                rhs: Operand::Reg(off64),
-                ty: PtxType::U64,
-            }));
-            kernel.push(PtxInstruction::Arith(ArithOp::Add {
-                dst: addr,
-                lhs: Operand::Reg(tmp),
-                rhs: Operand::ImmU32(extra),
-                ty: PtxType::U64,
-            }));
-        }
-        kernel.push(PtxInstruction::Memory(MemoryOp::StGlobal {
-            addr,
-            src: src_reg,
-            ty: PtxType::F32,
-        }));
-    };
-    emit_store(&mut alloc, &mut kernel, d_base_off32, 0, frag_d.regs[0]);
-    emit_store(&mut alloc, &mut kernel, d_base_off32, 4, frag_d.regs[1]);
-    emit_store(&mut alloc, &mut kernel, d_base_plus_8r32, 0, frag_d.regs[2]);
-    emit_store(&mut alloc, &mut kernel, d_base_plus_8r32, 4, frag_d.regs[3]);
+    let r_warp_block_col = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_warp_block_col,
+        lhs: Operand::Reg(r_block_col),
+        rhs: Operand::Reg(r_wq_col_start),
+        ty: PtxType::U32,
+    }));
+    emit_warp_quadrant_store(
+        &mut alloc,
+        &mut kernel,
+        rd_d,
+        &accs,
+        r_tid_x,
+        0,
+        0,
+        r_warp_block_row,
+        r_warp_block_col,
+        r_m,
+        r_n,
+        r_n_f32_stride,
+    );
 
     kernel.push(PtxInstruction::Control(ControlOp::Ret));
     kernel.set_registers(alloc.into_allocated());
@@ -888,19 +910,21 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
 }
 
 /// Double-buffered tensor-core matmul — f16 × f16 → f32 with fp32
-/// accumulation, cp.async-staged A tiles.
+/// accumulation, cp.async-staged A tiles, multi-warp 64×64 block tile.
 ///
+/// Sprint 6.7 Gate B: same 4-warp 32×32-quadrant restructure as
+/// `matmul_tc`, with cp.async double-buffering on the A staging path.
 /// Semantically equivalent to [`matmul_tc`](crate::matmul_tc) on the
-/// same inputs; differs only in the staging path. Ships alongside
-/// `matmul_tc` so Sprint 6.5's auto-tuner can dispatch between the
-/// two based on profile data.
+/// same inputs; ships alongside it so Sprint 6.5's auto-tuner can
+/// dispatch between the two based on profile data.
 ///
 /// # Dimension constraint
 ///
 /// Requires `M % 16 == 0`, `N % 8 == 0`, `K % 16 == 0`. Returns
-/// [`KaioError::InvalidConfig`] otherwise. Sprint 6.7 will relax this
-/// with edge-tile bounds checking and also promote this kernel from
-/// `#[doc(hidden)]` to stable `pub` API.
+/// [`KaioError::InvalidConfig`] otherwise. Sprint 6.7 Gate C will
+/// relax M, N to "any positive value" (K%16 stays — mma K dim is
+/// fixed) and promote this kernel from `#[doc(hidden)]` to stable
+/// `pub` API.
 ///
 /// # Hardware requirement
 ///
@@ -923,26 +947,18 @@ pub fn matmul_tc_async(
 
     validate_dims_tc(a, b, c, m, n, k)?;
 
-    // Derive the module's target SM from the actual device (Sprint 6.5
-    // D2). `PtxModule::validate()` inside `load_module` rejects
-    // pre-Ampere cleanly with `ValidationError::SmTooLow`, replacing
-    // the ad-hoc compute-capability check that lived here pre-6.5.
     let info = device.info()?;
     let (major, minor) = info.compute_capability;
     let sm = format!("sm_{major}{minor}");
     let module = build_matmul_tc_async_module(&sm);
 
-    // `?` here preserves the error variant — a sub-Ampere device
-    // surfaces as `KaioError::Validation` (from `ValidationError::SmTooLow`),
-    // distinct from `PtxLoad` which stays reserved for genuine ptxas
-    // syntax / driver failures.
     let kmodule = device.load_module(&module)?;
     let func = kmodule.function("matmul_tc_async")?;
 
-    let grid = (n.div_ceil(BN), m.div_ceil(BM), 1);
+    let grid = (n.div_ceil(BN_BLOCK), m.div_ceil(BM_BLOCK), 1);
     let cfg = LaunchConfig {
         grid_dim: grid,
-        block_dim: (32, 1, 1),
+        block_dim: (32, WARPS_PER_BLOCK, 1),
         shared_mem_bytes: 0,
     };
 
@@ -973,25 +989,21 @@ mod tests {
         w.finish()
     }
 
-    /// Buffer-offset toggle unit test. Pure host — catches off-by-one
-    /// bugs without needing a GPU or a full kernel build.
+    /// Sprint 6.7 multi-warp buffer toggle: each buffer is 2048 B.
     #[test]
     fn buffer_offsets_toggle() {
-        assert_eq!(buffer_offsets(0), (0, 512, 0, 256));
-        assert_eq!(buffer_offsets(1), (512, 0, 256, 0));
-        assert_eq!(buffer_offsets(2), (0, 512, 0, 256));
-        assert_eq!(buffer_offsets(3), (512, 0, 256, 0));
+        assert_eq!(buffer_offsets(0), (0, 2048, 0, 2048));
+        assert_eq!(buffer_offsets(1), (2048, 0, 2048, 0));
+        assert_eq!(buffer_offsets(2), (0, 2048, 0, 2048));
+        assert_eq!(buffer_offsets(3), (2048, 0, 2048, 0));
     }
 
-    /// Structural PTX check — instruction-centric, not label-centric.
-    /// Label spellings can change without semantic regression; instruction
-    /// presence and shared-decl sizing are the real invariants.
     #[test]
     fn build_matmul_tc_async_module_produces_valid_structure() {
         let module = build_matmul_tc_async_module("sm_89");
         let ptx = emit_module_to_string(&module);
 
-        // Instruction presence — the semantic content.
+        // Instruction presence.
         assert!(
             ptx.contains("cp.async.ca.shared.global"),
             "missing cp.async.ca"
@@ -1009,31 +1021,43 @@ mod tests {
             "missing mma.sync"
         );
 
-        // Two distinct shared decls, sized correctly.
+        // Multi-warp shared sizing: 4 KB tile_a (2× 2048 B), 4 KB tile_b.
         assert!(
-            ptx.contains(".shared .align 16 .b8 tile_a[1024]"),
-            "tile_a decl wrong or missing"
+            ptx.contains(".shared .align 16 .b8 tile_a[4096]"),
+            "tile_a should be 4096 B (2 buffers × 64×16 fp16)"
         );
         assert!(
-            ptx.contains(".shared .align 4 .b8 tile_b[512]"),
-            "tile_b decl wrong or missing"
+            ptx.contains(".shared .align 4 .b8 tile_b[4096]"),
+            "tile_b should be 4096 B (2 buffers × 16×64 fp16)"
         );
 
-        // Exactly one mma.sync in the kernel body (the inner-loop mma).
+        // 8 mma.sync per warp per K-tile (2 m_stripes × 4 n_stripes).
         let mma_count = ptx.matches("mma.sync.aligned.m16n8k16").count();
-        assert_eq!(mma_count, 1, "expected exactly one mma.sync in loop body");
+        assert_eq!(
+            mma_count, 8,
+            "expected 8 mma.sync per K-iter (multi-warp 2×4 stripe grid)"
+        );
 
-        // Exactly two cp.async.commit_group: preamble + loop-interior issue.
+        // 2 cp.async.commit_group: preamble + in-loop.
         let commit_count = ptx.matches("cp.async.commit_group").count();
         assert_eq!(
             commit_count, 2,
             "expected two commit_groups (preamble + in-loop)"
         );
+
+        // Edge-tile predication present.
+        assert!(
+            ptx.contains("setp.lt.and.u32"),
+            "missing combined edge-tile predicate emit"
+        );
+
+        // 32 predicated st.global.f32 per warp output (8 fragments × 4 stores).
+        let store_count = ptx.matches("st.global.f32").count();
+        assert_eq!(store_count, 32, "expected 32 predicated st.global.f32");
     }
 
     #[test]
     fn build_matmul_tc_async_module_declares_requested_sm_target() {
-        // Sprint 6.5 D2: module target round-trips verbatim, no floor.
         let module_70 = build_matmul_tc_async_module("sm_70");
         let ptx_70 = emit_module_to_string(&module_70);
         assert!(ptx_70.contains(".target sm_70"));
@@ -1043,13 +1067,6 @@ mod tests {
         assert!(ptx_89.contains(".target sm_89"));
     }
 
-    /// Host-only regression: `PtxModule::validate()` rejects the async
-    /// module at sub-Ampere targets. Both `mma.sync.m16n8k16` and
-    /// `cp.async.ca` require sm_80+; the walk raises on the first
-    /// offending instruction, so we only assert that `required=80`
-    /// and `actual=70` — the exact feature string (mma vs cp.async)
-    /// is emission-order-dependent and not something the test should
-    /// bind to.
     #[test]
     fn matmul_tc_async_module_rejects_sm_70_via_validate() {
         use kaio_core::ir::ValidationError;
@@ -1066,7 +1083,6 @@ mod tests {
             } => {
                 assert_eq!(required, 80);
                 assert_eq!(actual, 70);
-                // Either mma.sync or cp.async is fine — both gate at 80.
                 assert!(
                     feature.contains("mma.sync") || feature.contains("cp.async"),
                     "unexpected feature name: {feature}"
