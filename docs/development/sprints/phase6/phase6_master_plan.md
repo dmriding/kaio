@@ -69,8 +69,14 @@ and async pipeline simultaneously.
 Written via the IR API (PtxKernel, PtxInstruction), NOT the proc
 macro DSL.
 
-**Sprint 6.3 (SM 7.0+):** Basic tensor-core matmul. Start with
-manual shared memory loads, not ldmatrix. Correctness first.
+**Sprint 6.3 (SM 8.0+):** Basic tensor-core matmul using the
+`m16n8k16.f16.f16.f32` shape. Start with manual shared memory
+loads, not ldmatrix. Correctness first.
+
+*SM threshold note:* The `m16n8k16` shape is Ampere-only. Volta
+(SM 7.0) uses `m8n8k4` and Turing (SM 7.5) uses `m16n8k8`, each
+with a different fragment layout. Phase 6 targets Ampere+ only.
+Earlier shapes are out of scope.
 
 **Sprint 6.4 (SM 8.0+):** Add cp.async double buffering. Kernel
 works without cp.async; async pipeline is layered on top.
@@ -79,7 +85,7 @@ works without cp.async; async pipeline is layered on top.
 
 Explicit eligibility rules:
 - scalar: any SM
-- tensor core without cp.async: SM 7.0+ AND fp16 inputs
+- tensor core without cp.async: SM 8.0+ AND fp16 inputs (m16n8k16 shape)
 - tensor core with cp.async: SM 8.0+ AND fp16 inputs
 
 No implicit assumptions, no runtime failure as discovery mechanism.
@@ -95,7 +101,7 @@ No implicit assumptions, no runtime failure as discovery mechanism.
 
 | Feature | Minimum SM | Notes |
 |---------|-----------|-------|
-| mma.sync (fp16) | SM 7.0 (Volta) | Core tensor-core operation |
+| mma.sync m16n8k16 (fp16) | SM 8.0 (Ampere) | Shape used by Phase 6. Volta (SM 7.0) uses `m8n8k4`; Turing (SM 7.5) uses `m16n8k8` — both out of scope. |
 | cp.async | SM 8.0 (Ampere) | Async global→shared copy |
 | mma.sync (bf16) | SM 8.0 (Ampere) | bf16 support |
 
@@ -105,7 +111,7 @@ No implicit assumptions, no runtime failure as discovery mechanism.
 |--------|-------|-----------------|
 | 6.1 | fp16/bf16 types + conversions | PtxType::F16/BF16, RegKind::H/Hb, cvt, `half` crate |
 | 6.2 | mma.sync + cp.async in kaio-core | TensorCoreOp, CpAsync, typed fragments, standalone mma test |
-| 6.3 | Tensor-core matmul (IR API) | Basic mma.sync matmul, manual loads, SM 7.0+ |
+| 6.3 | Tensor-core matmul (IR API) | Basic mma.sync matmul, manual loads, SM 8.0+ (m16n8k16) |
 | 6.4 | Double-buffered matmul | cp.async pipeline, SM 8.0+ |
 | 6.5 | Integration + auto-tuner | 3-way dispatch (scalar / TC / TC+async) |
 | 6.6 | TC attention (optional) | mma.sync in FlashAttention inner loops — skip if unstable |
