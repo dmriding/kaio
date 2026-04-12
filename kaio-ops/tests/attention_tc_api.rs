@@ -13,7 +13,7 @@ use common::{
 };
 use half::f16;
 use kaio::prelude::*;
-use kaio_ops::{attention_tc_gate_a, attention_tc_gate_b};
+use kaio_ops::{attention_tc, attention_tc_gate_a, attention_tc_gate_b};
 
 // ---------------------------------------------------------------------
 // Gate A correctness — matmul1 only
@@ -184,6 +184,72 @@ fn gate_b_probs_32x32x32() {
 #[ignore = "requires NVIDIA GPU"]
 fn gate_b_probs_64x128x64() {
     check_gate_b(64, 128, 64, "gate_b_probs_64x128x64");
+}
+
+// ---------------------------------------------------------------------
+// Gate C correctness — full fused non-causal attention_tc
+// ---------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn check_attention_tc(seq_q: u32, seq_k: u32, d_k: u32, d_v: u32, label: &str) {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let q_host = patterned_f16_data((seq_q * d_k) as usize);
+    let k_host = patterned_f16_data((seq_k * d_k) as usize);
+    let v_host = patterned_f16_data((seq_k * d_v) as usize);
+
+    let q = device.alloc_from(&q_host).unwrap();
+    let k = device.alloc_from(&k_host).unwrap();
+    let v = device.alloc_from(&v_host).unwrap();
+    let mut out = device
+        .alloc_zeros::<f32>((seq_q * d_v) as usize)
+        .unwrap();
+
+    attention_tc(&device, &q, &k, &v, &mut out, seq_q, seq_k, d_k, d_v)
+        .expect("attention_tc launch failed");
+
+    let got = out.to_host(&device).unwrap();
+    let expected = cpu_attention_f16xf16_f32(
+        &q_host,
+        &k_host,
+        &v_host,
+        seq_q as usize,
+        seq_k as usize,
+        d_k as usize,
+        d_v as usize,
+        false,
+    );
+
+    assert_close_attention(&got, &expected, seq_q as usize, d_v as usize, label);
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_tc_smallest_16x16x16x8() {
+    check_attention_tc(16, 16, 16, 8, "attention_tc_smallest_16x16x16x8");
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_tc_32x32x32x32() {
+    check_attention_tc(32, 32, 32, 32, "attention_tc_32x32x32x32");
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_tc_64x128x64x64() {
+    check_attention_tc(64, 128, 64, 64, "attention_tc_64x128x64x64");
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_tc_hard_cap_64x384x64x64() {
+    check_attention_tc(64, 384, 64, 64, "attention_tc_hard_cap_64x384x64x64");
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_tc_small_shape_16x32x16x8() {
+    check_attention_tc(16, 32, 16, 8, "attention_tc_small_shape_16x32x16x8");
 }
 
 // Keep full attention CPU reference and tolerance helper in-scope so

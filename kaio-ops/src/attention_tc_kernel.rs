@@ -2415,6 +2415,975 @@ pub fn attention_tc_gate_b(
     Ok(())
 }
 
+// ---------------------------------------------------------------------
+// Gate C helpers — V staging + second mma.sync + output store.
+// ---------------------------------------------------------------------
+
+/// Stage a V chunk: 16 seq_k rows × 8 d_v cols of row-major V global
+/// → 16×8 column-major shared (B-fragment ready).
+///
+/// The flat → (row, col) mapping differs from K staging because V's
+/// slice is 16×8 (row-major, row stride = d_v_bytes) vs K's slice
+/// 8×16 (row-major, row stride = d_k_bytes, transposed when staging).
+/// For V we iterate row ∈ 0..16 = flat/8, col ∈ 0..8 = flat%8, and
+/// the global address is `row * d_v_bytes + col * 2`. Shared layout
+/// is the same col-major 16×8 as k_chunk (`col * 32 + row * 2`).
+fn emit_stage_v_chunk(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    v_chunk_src_global: Register, // u64: V + seq_k_start*d_v_bytes + d_v_start*2
+    tile_v_shared: Register,      // u32
+    tid_x: Register,
+    d_v_bytes: Register, // u32 runtime: d_v * 2
+) {
+    let r_lane_base = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_lane_base,
+        lhs: Operand::Reg(tid_x),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    for i in 0..4u32 {
+        let r_flat = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: r_flat,
+            lhs: Operand::Reg(r_lane_base),
+            rhs: Operand::ImmU32(i),
+            ty: PtxType::U32,
+        }));
+        let r_row = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Div {
+            dst: r_row,
+            lhs: Operand::Reg(r_flat),
+            rhs: Operand::ImmU32(8),
+            ty: PtxType::U32,
+        }));
+        let r_col = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+            dst: r_col,
+            lhs: Operand::Reg(r_flat),
+            rhs: Operand::ImmU32(8),
+            ty: PtxType::U32,
+        }));
+
+        // shared_off = col * 32 + row * 2
+        let r_row_bytes = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: r_row_bytes,
+            lhs: Operand::Reg(r_row),
+            rhs: Operand::ImmU32(BYTES_PER_HALF),
+            ty: PtxType::U32,
+        }));
+        let r_shared_off = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+            dst: r_shared_off,
+            a: Operand::Reg(r_col),
+            b: Operand::ImmU32(32),
+            c: Operand::Reg(r_row_bytes),
+            ty: PtxType::U32,
+            mode: MadMode::Lo,
+        }));
+        let r_shared_addr = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: r_shared_addr,
+            lhs: Operand::Reg(tile_v_shared),
+            rhs: Operand::Reg(r_shared_off),
+            ty: PtxType::U32,
+        }));
+
+        // global_off = row * d_v_bytes + col * 2
+        let rd_row_global_off = alloc.alloc(PtxType::U64);
+        kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+            dst: rd_row_global_off,
+            lhs: Operand::Reg(r_row),
+            rhs: Operand::Reg(d_v_bytes),
+            src_ty: PtxType::U32,
+        }));
+        let r_col_bytes = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: r_col_bytes,
+            lhs: Operand::Reg(r_col),
+            rhs: Operand::ImmU32(BYTES_PER_HALF),
+            ty: PtxType::U32,
+        }));
+        let rd_col_bytes = alloc.alloc(PtxType::U64);
+        kernel.push(PtxInstruction::Cvt {
+            dst: rd_col_bytes,
+            src: r_col_bytes,
+            dst_ty: PtxType::U64,
+            src_ty: PtxType::U32,
+        });
+        let rd_per_thread_off = alloc.alloc(PtxType::U64);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: rd_per_thread_off,
+            lhs: Operand::Reg(rd_row_global_off),
+            rhs: Operand::Reg(rd_col_bytes),
+            ty: PtxType::U64,
+        }));
+        let rd_global_addr = alloc.alloc(PtxType::U64);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: rd_global_addr,
+            lhs: Operand::Reg(v_chunk_src_global),
+            rhs: Operand::Reg(rd_per_thread_off),
+            ty: PtxType::U64,
+        }));
+        let r_tmp_h = alloc.alloc(PtxType::F16);
+        kernel.push(PtxInstruction::Memory(MemoryOp::LdGlobal {
+            dst: r_tmp_h,
+            addr: rd_global_addr,
+            ty: PtxType::F16,
+        }));
+        kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+            addr: r_shared_addr,
+            src: r_tmp_h,
+            ty: PtxType::F16,
+        }));
+    }
+}
+
+/// Emit the FragmentC → global output store for a 16×8 output tile,
+/// matching matmul_tc's inline store: each lane writes four fp32
+/// values at layout positions (group_id, 2*tig), (group_id, 2*tig+1),
+/// (group_id+8, 2*tig), (group_id+8, 2*tig+1) within the current
+/// 16×8 output-column chunk.
+#[allow(clippy::too_many_arguments)]
+fn emit_store_fragment_c_to_global_out(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    frag_d: kaio_core::fragment::FragmentC,
+    out_rowslab_global: Register, // u64: out + block_row * d_v_bytes (f32)
+    tid_x: Register,
+    d_v_chunk: Register,   // u32: current d_v-column-chunk index
+    d_v_bytes_f32: Register, // u32: d_v * 4 (output row stride)
+) {
+    let r_group_id = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_group_id,
+        lhs: Operand::Reg(tid_x),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    let r_tig = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_tig,
+        lhs: Operand::Reg(tid_x),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+
+    // d_v_start_bytes_f32 = d_v_chunk * 8 * 4 = d_v_chunk * 32
+    let r_d_v_start_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_d_v_start_bytes,
+        lhs: Operand::Reg(d_v_chunk),
+        rhs: Operand::ImmU32(BN * BYTES_PER_F32),
+        ty: PtxType::U32,
+    }));
+    let r_row0_part = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_row0_part,
+        lhs: Operand::Reg(r_group_id),
+        rhs: Operand::Reg(d_v_bytes_f32),
+        ty: PtxType::U32,
+    }));
+    let r_tig8 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_tig8,
+        lhs: Operand::Reg(r_tig),
+        rhs: Operand::ImmU32(8),
+        ty: PtxType::U32,
+    }));
+    let r_tmp0 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_tmp0,
+        lhs: Operand::Reg(r_row0_part),
+        rhs: Operand::Reg(r_d_v_start_bytes),
+        ty: PtxType::U32,
+    }));
+    let r_row0_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_row0_off,
+        lhs: Operand::Reg(r_tmp0),
+        rhs: Operand::Reg(r_tig8),
+        ty: PtxType::U32,
+    }));
+    let r_eight_rows = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_eight_rows,
+        lhs: Operand::Reg(d_v_bytes_f32),
+        rhs: Operand::ImmU32(8),
+        ty: PtxType::U32,
+    }));
+    let r_row8_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_row8_off,
+        lhs: Operand::Reg(r_row0_off),
+        rhs: Operand::Reg(r_eight_rows),
+        ty: PtxType::U32,
+    }));
+
+    let emit_st = |alloc: &mut RegisterAllocator,
+                   kernel: &mut PtxKernel,
+                   base_off32: Register,
+                   extra: u32,
+                   src_reg: Register| {
+        let rd_off = alloc.alloc(PtxType::U64);
+        kernel.push(PtxInstruction::Cvt {
+            dst: rd_off,
+            src: base_off32,
+            dst_ty: PtxType::U64,
+            src_ty: PtxType::U32,
+        });
+        let rd_addr = if extra == 0 {
+            let rd = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: rd,
+                lhs: Operand::Reg(out_rowslab_global),
+                rhs: Operand::Reg(rd_off),
+                ty: PtxType::U64,
+            }));
+            rd
+        } else {
+            let rd_tmp = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: rd_tmp,
+                lhs: Operand::Reg(out_rowslab_global),
+                rhs: Operand::Reg(rd_off),
+                ty: PtxType::U64,
+            }));
+            let rd = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: rd,
+                lhs: Operand::Reg(rd_tmp),
+                rhs: Operand::ImmU32(extra),
+                ty: PtxType::U64,
+            }));
+            rd
+        };
+        kernel.push(PtxInstruction::Memory(MemoryOp::StGlobal {
+            addr: rd_addr,
+            src: src_reg,
+            ty: PtxType::F32,
+        }));
+    };
+    emit_st(alloc, kernel, r_row0_off, 0, frag_d.regs[0]);
+    emit_st(alloc, kernel, r_row0_off, 4, frag_d.regs[1]);
+    emit_st(alloc, kernel, r_row8_off, 0, frag_d.regs[2]);
+    emit_st(alloc, kernel, r_row8_off, 4, frag_d.regs[3]);
+}
+
+// ---------------------------------------------------------------------
+// Gate C — full non-causal fused attention_tc.
+// Final kernel: matmul1 → scale → softmax → cvt → matmul2 → output.
+// ---------------------------------------------------------------------
+
+/// Build the IR module for the final `attention_tc` kernel (Gate C
+/// non-causal variant). Causal variant uses the same builder with
+/// the `causal: bool` flag flipped (6.6b).
+#[doc(hidden)]
+pub fn build_attention_tc_module(sm: &str) -> PtxModule {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("attention_tc");
+
+    kernel.add_param(PtxParam::pointer("q_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("k_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("v_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("out_ptr", PtxType::F32));
+    kernel.add_param(PtxParam::scalar("seq_q", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("seq_k", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("d_k", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("d_v", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("inv_sqrt_dk", PtxType::F32));
+
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_q".to_string(),
+        align: 4,
+        size_bytes: TILE_Q_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "k_chunk".to_string(),
+        align: 4,
+        size_bytes: K_CHUNK_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "scores_tile".to_string(),
+        align: 4,
+        size_bytes: SCORES_TILE_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "probs_tile".to_string(),
+        align: 4,
+        size_bytes: PROBS_TILE_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "v_chunk".to_string(),
+        align: 4,
+        size_bytes: V_CHUNK_BYTES,
+    });
+
+    // Params + cvta
+    let rd_q_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_q_param,
+        param_name: "q_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_k_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_k_param,
+        param_name: "k_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_v_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_v_param,
+        param_name: "v_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_out_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_out_param,
+        param_name: "out_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let r_seq_k = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_seq_k,
+        param_name: "seq_k".to_string(),
+        ty: PtxType::U32,
+    }));
+    let r_d_k = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_d_k,
+        param_name: "d_k".to_string(),
+        ty: PtxType::U32,
+    }));
+    let r_d_v = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_d_v,
+        param_name: "d_v".to_string(),
+        ty: PtxType::U32,
+    }));
+    let r_inv_sqrt_dk = alloc.alloc(PtxType::F32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_inv_sqrt_dk,
+        param_name: "inv_sqrt_dk".to_string(),
+        ty: PtxType::F32,
+    }));
+
+    let rd_q = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_q,
+        src: rd_q_param,
+    }));
+    let rd_k_global = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_k_global,
+        src: rd_k_param,
+    }));
+    let rd_v_global = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_v_global,
+        src: rd_v_param,
+    }));
+    let rd_out = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_out,
+        src: rd_out_param,
+    }));
+
+    let (r_tid, tid_instr) = special::tid_x(&mut alloc);
+    kernel.push(tid_instr);
+    let r_bidx = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_bidx,
+        src: Operand::SpecialReg(SpecialReg::CtaidX),
+        ty: PtxType::U32,
+    });
+
+    let r_block_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_block_row,
+        lhs: Operand::Reg(r_bidx),
+        rhs: Operand::ImmU32(BM),
+        ty: PtxType::U32,
+    }));
+
+    // Strides (in bytes).
+    let r_d_k_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_d_k_bytes,
+        lhs: Operand::Reg(r_d_k),
+        rhs: Operand::ImmU32(BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+    let r_d_v_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_d_v_bytes,
+        lhs: Operand::Reg(r_d_v),
+        rhs: Operand::ImmU32(BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+    let r_d_v_bytes_f32 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_d_v_bytes_f32,
+        lhs: Operand::Reg(r_d_v),
+        rhs: Operand::ImmU32(BYTES_PER_F32),
+        ty: PtxType::U32,
+    }));
+    let r_seq_k_bytes_f32 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_seq_k_bytes_f32,
+        lhs: Operand::Reg(r_seq_k),
+        rhs: Operand::ImmU32(BYTES_PER_F32),
+        ty: PtxType::U32,
+    }));
+    let r_seq_k_bytes_f16 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_seq_k_bytes_f16,
+        lhs: Operand::Reg(r_seq_k),
+        rhs: Operand::ImmU32(BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+
+    // Base global pointers adjusted for block_row.
+    let rd_q_rowslab_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_q_rowslab_off,
+        lhs: Operand::Reg(r_block_row),
+        rhs: Operand::Reg(r_d_k_bytes),
+        src_ty: PtxType::U32,
+    }));
+    let rd_q_rowslab = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_q_rowslab,
+        lhs: Operand::Reg(rd_q),
+        rhs: Operand::Reg(rd_q_rowslab_off),
+        ty: PtxType::U64,
+    }));
+    let rd_out_rowslab_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_out_rowslab_off,
+        lhs: Operand::Reg(r_block_row),
+        rhs: Operand::Reg(r_d_v_bytes_f32),
+        src_ty: PtxType::U32,
+    }));
+    let rd_out_rowslab = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_out_rowslab,
+        lhs: Operand::Reg(rd_out),
+        rhs: Operand::Reg(rd_out_rowslab_off),
+        ty: PtxType::U64,
+    }));
+
+    // Shared bases.
+    let r_tile_q = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_q,
+        src: Operand::SharedAddr("tile_q".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_k_chunk = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_k_chunk,
+        src: Operand::SharedAddr("k_chunk".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_scores_tile = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_scores_tile,
+        src: Operand::SharedAddr("scores_tile".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_probs_tile = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_probs_tile,
+        src: Operand::SharedAddr("probs_tile".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_v_chunk = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_v_chunk,
+        src: Operand::SharedAddr("v_chunk".to_string()),
+        ty: PtxType::U32,
+    });
+
+    // Stage Q once.
+    emit_stage_q(
+        &mut alloc,
+        &mut kernel,
+        rd_q_rowslab,
+        r_tile_q,
+        r_tid,
+        r_d_k,
+    );
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    // ------------ MATMUL1: Q · Kᵀ · inv_sqrt_dk → scores_tile ------------
+
+    let r_num_n_chunks = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_num_n_chunks,
+        lhs: Operand::Reg(r_seq_k),
+        rhs: Operand::ImmU32(BN),
+        ty: PtxType::U32,
+    }));
+    let r_num_k_chunks = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_num_k_chunks,
+        lhs: Operand::Reg(r_d_k),
+        rhs: Operand::ImmU32(BK),
+        ty: PtxType::U32,
+    }));
+
+    let r_n_chunk = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_n_chunk,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("ATTN_TC_M1_N_LOOP".to_string()));
+
+    let frag_s = alloc_c(&mut alloc);
+    for r in &frag_s.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmF32(0.0),
+            ty: PtxType::F32,
+        });
+    }
+
+    let r_n_start = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_n_start,
+        lhs: Operand::Reg(r_n_chunk),
+        rhs: Operand::ImmU32(BN),
+        ty: PtxType::U32,
+    }));
+    let rd_n_start_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_n_start_off,
+        lhs: Operand::Reg(r_n_start),
+        rhs: Operand::Reg(r_d_k_bytes),
+        src_ty: PtxType::U32,
+    }));
+    let rd_k_n_base = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_k_n_base,
+        lhs: Operand::Reg(rd_k_global),
+        rhs: Operand::Reg(rd_n_start_off),
+        ty: PtxType::U64,
+    }));
+
+    let r_k_chunk_idx = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_k_chunk_idx,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("ATTN_TC_M1_K_LOOP".to_string()));
+
+    let r_k_start_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_start_bytes,
+        lhs: Operand::Reg(r_k_chunk_idx),
+        rhs: Operand::ImmU32(BK * BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+    let rd_k_start_bytes = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_k_start_bytes,
+        src: r_k_start_bytes,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+    let rd_k_chunk_src = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_k_chunk_src,
+        lhs: Operand::Reg(rd_k_n_base),
+        rhs: Operand::Reg(rd_k_start_bytes),
+        ty: PtxType::U64,
+    }));
+    emit_stage_k_chunk(
+        &mut alloc,
+        &mut kernel,
+        rd_k_chunk_src,
+        r_k_chunk,
+        r_tid,
+        r_d_k_bytes,
+    );
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    let r_q_frag_base = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_q_frag_base,
+        lhs: Operand::Reg(r_tile_q),
+        rhs: Operand::Reg(r_k_start_bytes),
+        ty: PtxType::U32,
+    }));
+    let frag_q = emit_load_fragment_a_runtime_stride(
+        &mut alloc,
+        &mut kernel,
+        r_q_frag_base,
+        r_tid,
+        r_d_k_bytes,
+    );
+    let frag_kt = load_fragment_b_m16n8k16_shared_col(
+        &mut alloc,
+        &mut kernel,
+        r_k_chunk,
+        r_tid,
+        32,
+    );
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+        d: frag_s,
+        a: frag_q,
+        b: frag_kt,
+        c: frag_s,
+        shape: MmaShape::M16N8K16,
+        d_ty: PtxType::F32,
+        a_ty: PtxType::F16,
+        b_ty: PtxType::F16,
+        c_ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_k_chunk_idx,
+        lhs: Operand::Reg(r_k_chunk_idx),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_k_loop = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_k_loop,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(r_k_chunk_idx),
+        rhs: Operand::Reg(r_num_k_chunks),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_k_loop,
+        target: "ATTN_TC_M1_K_LOOP".to_string(),
+        negate: false,
+    }));
+
+    // Scale.
+    for r in &frag_s.regs {
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: *r,
+            lhs: Operand::Reg(*r),
+            rhs: Operand::Reg(r_inv_sqrt_dk),
+            ty: PtxType::F32,
+        }));
+    }
+
+    // Store scores tile chunk.
+    emit_store_fragment_c_to_scores_tile(
+        &mut alloc,
+        &mut kernel,
+        frag_s,
+        r_scores_tile,
+        r_tid,
+        r_n_chunk,
+        r_seq_k_bytes_f32,
+    );
+
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_n_chunk,
+        lhs: Operand::Reg(r_n_chunk),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_n_loop = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_n_loop,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(r_n_chunk),
+        rhs: Operand::Reg(r_num_n_chunks),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_n_loop,
+        target: "ATTN_TC_M1_N_LOOP".to_string(),
+        negate: false,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    // ------------ Softmax → probs_tile ------------
+
+    emit_softmax_rows(
+        &mut alloc,
+        &mut kernel,
+        r_scores_tile,
+        r_probs_tile,
+        r_tid,
+        r_seq_k,
+        r_seq_k_bytes_f32,
+        r_seq_k_bytes_f16,
+    );
+
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    // ------------ MATMUL2: probs · V → out ------------
+
+    let r_num_dv_chunks = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_num_dv_chunks,
+        lhs: Operand::Reg(r_d_v),
+        rhs: Operand::ImmU32(BN),
+        ty: PtxType::U32,
+    }));
+    let r_num_sk_chunks = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_num_sk_chunks,
+        lhs: Operand::Reg(r_seq_k),
+        rhs: Operand::ImmU32(BK),
+        ty: PtxType::U32,
+    }));
+
+    let r_dv_chunk = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_dv_chunk,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("ATTN_TC_M2_N_LOOP".to_string()));
+
+    let frag_o = alloc_c(&mut alloc);
+    for r in &frag_o.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmF32(0.0),
+            ty: PtxType::F32,
+        });
+    }
+
+    // d_v_start_bytes_f16 = dv_chunk * 8 * 2
+    let r_dv_start_bytes_f16 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_dv_start_bytes_f16,
+        lhs: Operand::Reg(r_dv_chunk),
+        rhs: Operand::ImmU32(BN * BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+    let rd_dv_start_bytes_f16 = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_dv_start_bytes_f16,
+        src: r_dv_start_bytes_f16,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+
+    let r_sk_chunk = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_sk_chunk,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+    kernel.push(PtxInstruction::Label("ATTN_TC_M2_K_LOOP".to_string()));
+
+    // v_chunk source base: V + (sk_chunk * 16) * d_v_bytes + dv_chunk*8*2
+    let r_sk_start = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_sk_start,
+        lhs: Operand::Reg(r_sk_chunk),
+        rhs: Operand::ImmU32(BK),
+        ty: PtxType::U32,
+    }));
+    let rd_sk_row_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_sk_row_off,
+        lhs: Operand::Reg(r_sk_start),
+        rhs: Operand::Reg(r_d_v_bytes),
+        src_ty: PtxType::U32,
+    }));
+    let rd_v_base = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_v_base,
+        lhs: Operand::Reg(rd_v_global),
+        rhs: Operand::Reg(rd_sk_row_off),
+        ty: PtxType::U64,
+    }));
+    let rd_v_chunk_src = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_v_chunk_src,
+        lhs: Operand::Reg(rd_v_base),
+        rhs: Operand::Reg(rd_dv_start_bytes_f16),
+        ty: PtxType::U64,
+    }));
+
+    emit_stage_v_chunk(
+        &mut alloc,
+        &mut kernel,
+        rd_v_chunk_src,
+        r_v_chunk,
+        r_tid,
+        r_d_v_bytes,
+    );
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    // probs fragment base: probs_tile + (sk_chunk * 16) * 2
+    // (probs_tile has row stride = seq_k * 2 bytes; we address column
+    // offset sk_chunk * 16 * 2 bytes within each row.)
+    let r_sk_start_bytes_f16 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_sk_start_bytes_f16,
+        lhs: Operand::Reg(r_sk_chunk),
+        rhs: Operand::ImmU32(BK * BYTES_PER_HALF),
+        ty: PtxType::U32,
+    }));
+    let r_probs_frag_base = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_probs_frag_base,
+        lhs: Operand::Reg(r_probs_tile),
+        rhs: Operand::Reg(r_sk_start_bytes_f16),
+        ty: PtxType::U32,
+    }));
+    let frag_p = emit_load_fragment_a_runtime_stride(
+        &mut alloc,
+        &mut kernel,
+        r_probs_frag_base,
+        r_tid,
+        r_seq_k_bytes_f16,
+    );
+    let frag_v = load_fragment_b_m16n8k16_shared_col(
+        &mut alloc,
+        &mut kernel,
+        r_v_chunk,
+        r_tid,
+        32,
+    );
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+        d: frag_o,
+        a: frag_p,
+        b: frag_v,
+        c: frag_o,
+        shape: MmaShape::M16N8K16,
+        d_ty: PtxType::F32,
+        a_ty: PtxType::F16,
+        b_ty: PtxType::F16,
+        c_ty: PtxType::F32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_sk_chunk,
+        lhs: Operand::Reg(r_sk_chunk),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_sk_loop = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_sk_loop,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(r_sk_chunk),
+        rhs: Operand::Reg(r_num_sk_chunks),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_sk_loop,
+        target: "ATTN_TC_M2_K_LOOP".to_string(),
+        negate: false,
+    }));
+
+    emit_store_fragment_c_to_global_out(
+        &mut alloc,
+        &mut kernel,
+        frag_o,
+        rd_out_rowslab,
+        r_tid,
+        r_dv_chunk,
+        r_d_v_bytes_f32,
+    );
+
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_dv_chunk,
+        lhs: Operand::Reg(r_dv_chunk),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_dv_loop = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_dv_loop,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(r_dv_chunk),
+        rhs: Operand::Reg(r_num_dv_chunks),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_dv_loop,
+        target: "ATTN_TC_M2_N_LOOP".to_string(),
+        negate: false,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new(sm);
+    module.add_kernel(kernel);
+    module
+}
+
+/// Fused TC attention host API (non-causal). Sprint 6.6 internal
+/// preview — promotes to stable `pub` at Phase 7 when FlashAttention-TC
+/// lands and `attention_auto_tc` becomes the real user-facing
+/// dispatcher.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_tc(
+    device: &KaioDevice,
+    q: &GpuBuffer<f16>,
+    k: &GpuBuffer<f16>,
+    v: &GpuBuffer<f16>,
+    out: &mut GpuBuffer<f32>,
+    seq_q: u32,
+    seq_k: u32,
+    d_k: u32,
+    d_v: u32,
+) -> Result<()> {
+    use cudarc::driver::{LaunchConfig, PushKernelArg};
+
+    validate_attention_tc_dims(q, k, v, out, seq_q, seq_k, d_k, d_v)?;
+
+    let info = device.info()?;
+    let (major, minor) = info.compute_capability;
+    let sm = format!("sm_{major}{minor}");
+    let module = build_attention_tc_module(&sm);
+    // ? propagates KaioError::Validation cleanly on pre-Ampere —
+    // PtxModule::validate catches mma.sync's SM requirement before
+    // any driver interaction. Distinct from KaioError::PtxLoad
+    // which stays reserved for genuine ptxas / driver failures.
+    let kmodule = device.load_module(&module)?;
+    let func = kmodule.function("attention_tc")?;
+
+    let inv_sqrt_dk: f32 = 1.0f32 / (d_k as f32).sqrt();
+
+    let cfg = LaunchConfig {
+        grid_dim: (seq_q / BM, 1, 1),
+        block_dim: (32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(func.inner())
+            .arg(q.inner())
+            .arg(k.inner())
+            .arg(v.inner())
+            .arg(out.inner_mut())
+            .arg(&seq_q)
+            .arg(&seq_k)
+            .arg(&d_k)
+            .arg(&d_v)
+            .arg(&inv_sqrt_dk)
+            .launch(cfg)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
