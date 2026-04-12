@@ -39,7 +39,6 @@
 
 use half::f16;
 use kaio::prelude::*;
-use kaio_core::emit::{Emit, PtxWriter};
 use kaio_core::fragment::{
     alloc_c, load_fragment_a_m16n8k16_shared_row, load_fragment_b_m16n8k16_shared_col,
 };
@@ -372,10 +371,18 @@ pub(crate) fn emit_load_b_tile(
     }
 }
 
-/// Build the IR kernel text for `matmul_tc`.
+/// Build the IR module for `matmul_tc` targeting the given SM.
 ///
-/// See module docstring for the kernel algorithm.
-fn build_matmul_tc_ptx() -> String {
+/// `sm` is a PTX target string such as `"sm_89"` — the caller is
+/// responsible for deriving it from `device.info()` (see Sprint 6.5
+/// `matmul_tc` host API). Passing a sub-Ampere target (e.g. `sm_70`)
+/// is legal at build time; `PtxModule::validate()` inside
+/// `KaioDevice::load_module` then rejects the module cleanly with
+/// `ValidationError::SmTooLow` before the driver ever sees it.
+///
+/// `pub(crate)` so the tuner and the in-crate host SM-validation
+/// regression test can reach it without going through string emission.
+pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("matmul_tc");
 
@@ -878,21 +885,9 @@ fn build_matmul_tc_ptx() -> String {
     kernel.push(PtxInstruction::Control(ControlOp::Ret));
     kernel.set_registers(alloc.into_allocated());
 
-    // m16n8k16 requires SM 8.0+. Floor at sm_80.
-    let requested = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
-    let sm = match requested
-        .strip_prefix("sm_")
-        .and_then(|s| s.parse::<u32>().ok())
-    {
-        Some(v) if v >= 80 => requested,
-        _ => "sm_80".to_string(),
-    };
-    let mut module = PtxModule::new(&sm);
+    let mut module = PtxModule::new(sm);
     module.add_kernel(kernel);
-
-    let mut w = PtxWriter::new();
-    module.emit(&mut w).unwrap();
-    w.finish()
+    module
 }
 
 /// Tensor-core matmul kernel — f16 × f16 → f32 with fp32 accumulation.
@@ -925,29 +920,19 @@ pub fn matmul_tc(
 
     validate_dims_tc(a, b, c, m, n, k)?;
 
-    let ptx = build_matmul_tc_ptx();
-
-    // Runtime SM check via device.info() — early clean rejection if
-    // someone tries to run this on pre-Ampere hardware. Technically
-    // redundant with `PtxModule::validate()` (which would catch the
-    // same case on the IR tree), but the IR tree is built and consumed
-    // as a string inside `build_matmul_tc_ptx`. The device-info path is
-    // simpler and avoids a round-trip. See tech-debt note on
-    // `load_ptx(&str)` bypassing `validate()`.
+    // Derive the module's target SM from the actual device — NOT from
+    // `KAIO_SM_TARGET` and NOT floored to sm_80. `PtxModule::validate()`
+    // inside `device.load_module` then compares the module's declared
+    // target against the SM required by each feature (mma.sync →
+    // sm_80). On a pre-Ampere device this surfaces a clean
+    // `ValidationError::SmTooLow` error, replacing Sprint 6.3/6.4's
+    // ad-hoc `device.info().compute_capability` check.
     let info = device.info()?;
-    let (major, _minor) = info.compute_capability;
-    if major < 8 {
-        return Err(KaioError::InvalidConfig(format!(
-            "matmul_tc requires SM 8.0+ (Ampere). GPU compute capability is {}.{}",
-            info.compute_capability.0, info.compute_capability.1,
-        )));
-    }
+    let (major, minor) = info.compute_capability;
+    let sm = format!("sm_{major}{minor}");
+    let module = build_matmul_tc_module(&sm);
 
-    let kmodule = device.load_ptx(&ptx).map_err(|e| {
-        KaioError::PtxLoad(format!(
-            "matmul_tc PTX load failed: {e}\n\n=== PTX ===\n{ptx}"
-        ))
-    })?;
+    let kmodule = device.load_module(&module)?;
     let func = kmodule.function("matmul_tc")?;
 
     let grid = (n.div_ceil(BN), m.div_ceil(BM), 1);
@@ -976,6 +961,7 @@ pub fn matmul_tc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kaio_core::emit::{Emit, PtxWriter};
 
     // --- Host-only validate_dims_tc tests (no GPU required) ---
     //
@@ -1087,17 +1073,91 @@ mod tests {
         assert!(validate_dims_raw(128, 8, 16, 128 * 16, 16 * 8, 128 * 8).is_ok());
     }
 
+    /// Emit the built module to a string — test helper for structural
+    /// checks that want to grep mnemonics.
+    fn emit_module_to_string(module: &PtxModule) -> String {
+        let mut w = PtxWriter::new();
+        module.emit(&mut w).unwrap();
+        w.finish()
+    }
+
     #[test]
-    fn build_matmul_tc_ptx_produces_valid_structure() {
-        let ptx = build_matmul_tc_ptx();
-        // Sanity: check for expected tokens.
+    fn build_matmul_tc_module_produces_valid_structure() {
+        // Instruction-centric structural assertions — label spellings
+        // (`K_LOOP:` etc.) are internal and can change without a
+        // semantic regression, so we don't bind to them.
+        let module = build_matmul_tc_module("sm_89");
+        let ptx = emit_module_to_string(&module);
+
         assert!(ptx.contains(".visible .entry matmul_tc("));
         assert!(ptx.contains(".shared .align 4 .b8 tile_a[512]"));
         assert!(ptx.contains(".shared .align 4 .b8 tile_b[256]"));
         assert!(ptx.contains("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"));
         assert!(ptx.contains("bar.sync"));
-        // Has a K loop (label + branch)
-        assert!(ptx.contains("K_LOOP:"));
-        assert!(ptx.contains("bra K_LOOP"));
+
+        let mma_count = ptx.matches("mma.sync.aligned.m16n8k16").count();
+        assert_eq!(mma_count, 1, "expected exactly one mma.sync in the loop");
+    }
+
+    #[test]
+    fn build_matmul_tc_module_declares_requested_sm_target() {
+        // Round-trip: the module's target SM should be exactly what we
+        // passed, with no env-var flooring or substitution (Sprint 6.5 D2).
+        let module_70 = build_matmul_tc_module("sm_70");
+        let ptx_70 = emit_module_to_string(&module_70);
+        assert!(
+            ptx_70.contains(".target sm_70"),
+            "sm_70 should round-trip verbatim (no flooring); PTX target line: {}",
+            ptx_70
+                .lines()
+                .find(|l| l.contains(".target"))
+                .unwrap_or("(none)")
+        );
+
+        let module_89 = build_matmul_tc_module("sm_89");
+        let ptx_89 = emit_module_to_string(&module_89);
+        assert!(ptx_89.contains(".target sm_89"));
+    }
+
+    /// Host-only regression test: `PtxModule::validate()` rejects the
+    /// matmul_tc module cleanly when the declared target SM is below
+    /// what `mma.sync.m16n8k16` requires (sm_80). Locks in Sprint 6.5's
+    /// migration claim — the validation pathway replaces the ad-hoc
+    /// `device.info().compute_capability` check that lived in the host
+    /// API pre-6.5.
+    #[test]
+    fn matmul_tc_module_rejects_sm_70_via_validate() {
+        use kaio_core::ir::ValidationError;
+
+        let module = build_matmul_tc_module("sm_70");
+        let err = module
+            .validate()
+            .expect_err("matmul_tc module at sm_70 must fail validation");
+        match err {
+            ValidationError::SmTooLow {
+                required,
+                actual,
+                feature,
+            } => {
+                assert_eq!(required, 80, "mma.sync.m16n8k16 requires sm_80");
+                assert_eq!(actual, 70);
+                assert!(
+                    feature.contains("mma.sync"),
+                    "feature string should name mma.sync; got: {feature}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matmul_tc_module_validates_at_sm_80_and_above() {
+        // Sanity: sm_80, sm_89, sm_90 all pass validation since mma.sync
+        // requires only sm_80+ and the module contains no cp.async.
+        for sm in ["sm_80", "sm_89", "sm_90"] {
+            let module = build_matmul_tc_module(sm);
+            module
+                .validate()
+                .unwrap_or_else(|e| panic!("{sm} should validate; got error: {e}"));
+        }
     }
 }

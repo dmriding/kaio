@@ -89,7 +89,6 @@
 
 use half::f16;
 use kaio::prelude::*;
-use kaio_core::emit::{Emit, PtxWriter};
 use kaio_core::fragment::{
     alloc_c, load_fragment_a_m16n8k16_shared_row, load_fragment_b_m16n8k16_shared_col,
 };
@@ -253,10 +252,17 @@ fn emit_load_a_tile_async(
     )));
 }
 
-/// Build the IR kernel text for `matmul_tc_async`.
+/// Build the IR module for `matmul_tc_async` targeting the given SM.
 ///
-/// See module docstring for algorithm + pipeline diagram.
-pub(crate) fn build_matmul_tc_async_ptx() -> String {
+/// `sm` is a PTX target string such as `"sm_89"` — the caller is
+/// responsible for deriving it from `device.info()` (Sprint 6.5
+/// `matmul_tc_async` host API). Passing a sub-Ampere target (e.g.
+/// `sm_70`) is legal at build time; `PtxModule::validate()` inside
+/// `KaioDevice::load_module` then rejects the module cleanly with
+/// `ValidationError::SmTooLow` (naming either mma.sync or cp.async
+/// as the offending feature, whichever hits the target mismatch first
+/// during the walk).
+pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("matmul_tc_async");
 
@@ -876,21 +882,9 @@ pub(crate) fn build_matmul_tc_async_ptx() -> String {
     kernel.push(PtxInstruction::Control(ControlOp::Ret));
     kernel.set_registers(alloc.into_allocated());
 
-    // cp.async + mma.sync.m16n8k16 require SM 8.0+.
-    let requested = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
-    let sm = match requested
-        .strip_prefix("sm_")
-        .and_then(|s| s.parse::<u32>().ok())
-    {
-        Some(v) if v >= 80 => requested,
-        _ => "sm_80".to_string(),
-    };
-    let mut module = PtxModule::new(&sm);
+    let mut module = PtxModule::new(sm);
     module.add_kernel(kernel);
-
-    let mut w = PtxWriter::new();
-    module.emit(&mut w).unwrap();
-    w.finish()
+    module
 }
 
 /// Double-buffered tensor-core matmul — f16 × f16 → f32 with fp32
@@ -911,7 +905,11 @@ pub(crate) fn build_matmul_tc_async_ptx() -> String {
 /// # Hardware requirement
 ///
 /// SM 8.0+ (Ampere) — required by both `mma.sync.m16n8k16` and
-/// `cp.async.ca`. Returns [`KaioError::InvalidConfig`] on lower SM.
+/// `cp.async.ca`. On a sub-Ampere device, returns
+/// [`KaioError::Validation`] (wrapping
+/// [`ValidationError::SmTooLow`](kaio_core::ir::ValidationError::SmTooLow))
+/// via the `PtxModule::validate()` pass inside
+/// [`KaioDevice::load_module`].
 pub fn matmul_tc_async(
     device: &KaioDevice,
     a: &GpuBuffer<f16>,
@@ -925,23 +923,20 @@ pub fn matmul_tc_async(
 
     validate_dims_tc(a, b, c, m, n, k)?;
 
-    let ptx = build_matmul_tc_async_ptx();
-
+    // Derive the module's target SM from the actual device (Sprint 6.5
+    // D2). `PtxModule::validate()` inside `load_module` rejects
+    // pre-Ampere cleanly with `ValidationError::SmTooLow`, replacing
+    // the ad-hoc compute-capability check that lived here pre-6.5.
     let info = device.info()?;
-    let (major, _minor) = info.compute_capability;
-    if major < 8 {
-        return Err(KaioError::InvalidConfig(format!(
-            "matmul_tc_async requires SM 8.0+ (cp.async + mma.sync.m16n8k16). \
-             GPU compute capability is {}.{}",
-            info.compute_capability.0, info.compute_capability.1,
-        )));
-    }
+    let (major, minor) = info.compute_capability;
+    let sm = format!("sm_{major}{minor}");
+    let module = build_matmul_tc_async_module(&sm);
 
-    let kmodule = device.load_ptx(&ptx).map_err(|e| {
-        KaioError::PtxLoad(format!(
-            "matmul_tc_async PTX load failed: {e}\n\n=== PTX ===\n{ptx}"
-        ))
-    })?;
+    // `?` here preserves the error variant — a sub-Ampere device
+    // surfaces as `KaioError::Validation` (from `ValidationError::SmTooLow`),
+    // distinct from `PtxLoad` which stays reserved for genuine ptxas
+    // syntax / driver failures.
+    let kmodule = device.load_module(&module)?;
     let func = kmodule.function("matmul_tc_async")?;
 
     let grid = (n.div_ceil(BN), m.div_ceil(BM), 1);
@@ -970,6 +965,13 @@ pub fn matmul_tc_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kaio_core::emit::{Emit, PtxWriter};
+
+    fn emit_module_to_string(module: &PtxModule) -> String {
+        let mut w = PtxWriter::new();
+        module.emit(&mut w).unwrap();
+        w.finish()
+    }
 
     /// Buffer-offset toggle unit test. Pure host — catches off-by-one
     /// bugs without needing a GPU or a full kernel build.
@@ -985,8 +987,9 @@ mod tests {
     /// Label spellings can change without semantic regression; instruction
     /// presence and shared-decl sizing are the real invariants.
     #[test]
-    fn build_matmul_tc_async_ptx_produces_valid_structure() {
-        let ptx = build_matmul_tc_async_ptx();
+    fn build_matmul_tc_async_module_produces_valid_structure() {
+        let module = build_matmul_tc_async_module("sm_89");
+        let ptx = emit_module_to_string(&module);
 
         // Instruction presence — the semantic content.
         assert!(
@@ -1026,5 +1029,59 @@ mod tests {
             commit_count, 2,
             "expected two commit_groups (preamble + in-loop)"
         );
+    }
+
+    #[test]
+    fn build_matmul_tc_async_module_declares_requested_sm_target() {
+        // Sprint 6.5 D2: module target round-trips verbatim, no floor.
+        let module_70 = build_matmul_tc_async_module("sm_70");
+        let ptx_70 = emit_module_to_string(&module_70);
+        assert!(ptx_70.contains(".target sm_70"));
+
+        let module_89 = build_matmul_tc_async_module("sm_89");
+        let ptx_89 = emit_module_to_string(&module_89);
+        assert!(ptx_89.contains(".target sm_89"));
+    }
+
+    /// Host-only regression: `PtxModule::validate()` rejects the async
+    /// module at sub-Ampere targets. Both `mma.sync.m16n8k16` and
+    /// `cp.async.ca` require sm_80+; the walk raises on the first
+    /// offending instruction, so we only assert that `required=80`
+    /// and `actual=70` — the exact feature string (mma vs cp.async)
+    /// is emission-order-dependent and not something the test should
+    /// bind to.
+    #[test]
+    fn matmul_tc_async_module_rejects_sm_70_via_validate() {
+        use kaio_core::ir::ValidationError;
+
+        let module = build_matmul_tc_async_module("sm_70");
+        let err = module
+            .validate()
+            .expect_err("matmul_tc_async module at sm_70 must fail validation");
+        match err {
+            ValidationError::SmTooLow {
+                required,
+                actual,
+                feature,
+            } => {
+                assert_eq!(required, 80);
+                assert_eq!(actual, 70);
+                // Either mma.sync or cp.async is fine — both gate at 80.
+                assert!(
+                    feature.contains("mma.sync") || feature.contains("cp.async"),
+                    "unexpected feature name: {feature}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matmul_tc_async_module_validates_at_sm_80_and_above() {
+        for sm in ["sm_80", "sm_89", "sm_90"] {
+            let module = build_matmul_tc_async_module(sm);
+            module
+                .validate()
+                .unwrap_or_else(|e| panic!("{sm} should validate; got error: {e}"));
+        }
     }
 }

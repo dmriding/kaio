@@ -186,6 +186,7 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 | Attention       | `kaio_ops::attention()`, `attention_causal()`              | Supported |
 | FlashAttention  | `kaio_ops::attention_flash()` — O(d_k) memory             | Supported |
 | Auto-tuner      | `kaio_ops::tune_matmul()`, `matmul_auto()`                | Supported |
+| TC auto-tuner   | `kaio_ops::matmul_auto_tc()` (f16, SM 8.0+, preview)      | Sprint 6.5 |
 
 ## Limitations
 
@@ -314,6 +315,14 @@ for a complete end-to-end example.
     `cp.async.ca`; B stays synchronous. Four correctness tests bit-
     close-to-zero on RTX 4090. Overlap gains wait on 6.7's multi-warp
     restructure.
+  - [x] **6.5** — Tensor-core auto-tuner `kaio_ops::matmul_auto_tc`
+    (first Phase 6 public API — f16×f16→f32, SM 8.0+, dispatches
+    between sync and `cp.async` variants). All internal TC kernel
+    loads migrated to `device.load_module(&PtxModule)` so
+    `PtxModule::validate()` catches SM mismatches cleanly instead of
+    ad-hoc per-kernel checks. Narrow contract: temporary
+    `M%16=N%8=K%16=0` constraint, production performance targets land
+    in Sprint 6.7.
 - [ ] **Phase 7** — Quantized kernels (INT8/INT4), training integration
   (`kaio-candle` bridge)
 - [ ] **Phase 8** — PyO3 bindings (Python access to kaio-ops)

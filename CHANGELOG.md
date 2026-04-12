@@ -125,6 +125,70 @@ Branch: `phase6`. In progress toward v0.2.0.
   in CI output. Current baseline: async is ~7% slower than sync at
   1 warp / block — as predicted, overlap gains require 6.7.
 
+### Added — Sprint 6.5 (TC auto-tuner + `load_module` migration)
+- **`kaio_ops::matmul_auto_tc`** — **first Phase 6 user-facing API**.
+  Tensor-core auto-tuner for f16 × f16 → f32 matmul. Dispatches
+  between `matmul_tc` (sync) and `matmul_tc_async` (`cp.async`
+  double-buffered) based on cached benchmark data. Conservative
+  default on cache miss: sync variant (matches 6.4's observation
+  that async is ~7% slower at 1 warp/block; Sprint 6.7 will likely
+  invert this default).
+  - **Narrow contract, deliberately temporary.** This is a preview
+    surface landing in 6.5 to unblock users who want TC dispatch
+    today; production performance (60%+ cuBLAS) ships in Sprint
+    6.7's multi-warp restructure — *not* here.
+  - **Hardware:** NVIDIA Ampere or newer (SM 8.0+). Pre-Ampere
+    callers get a clean `KaioError::InvalidConfig` naming both real
+    fallback options (pad/convert inputs, or use the f32
+    `matmul_auto` path if f16 precision is not required).
+  - **Shape:** `M % 16 == 0 && N % 8 == 0 && K % 16 == 0` —
+    **temporary**. Sprint 6.7 will relax via edge-tile handling.
+  - **Performance:** single-warp-per-block under the hood.
+    Correctness-validated, not yet at the Phase 6 target.
+- **`kaio_ops::tune_matmul_tc`** — benchmarks both TC variants at
+  the given dimensions, caches the faster one to the shared tuner
+  cache file (`~/.cache/kaio/tune_cache.json` or the `KAIO_TUNE_CACHE`
+  override). Entries are keyed by `(kernel="matmul_tc", sm_target,
+  dims)`, coexisting with scalar `matmul` cache entries.
+- **`matmul_tc` and `matmul_tc_async` migrated to `load_module`.**
+  Both kernels now emit a `PtxModule` via
+  `build_matmul_tc_module(sm)` / `build_matmul_tc_async_module(sm)`
+  (replacing the older `build_*_ptx() -> String`) and call
+  `device.load_module(&module)`. `PtxModule::validate()` inside
+  `load_module` catches sub-Ampere targets cleanly with
+  `ValidationError::SmTooLow`, surfaced as `KaioError::Validation`.
+  The ad-hoc `device.info().compute_capability` checks in both host
+  APIs are deleted.
+- New shared test helpers at `kaio-ops/tests/common/mod.rs`
+  (`patterned_f16_data`, `cpu_matmul_f16xf16_f32`,
+  `assert_close_with_k_scaled_tol`) consolidate what 6.3 / 6.4 /
+  6.5 test files were duplicating.
+- Host regression tests for `load_module` behavior: four new unit
+  tests per kernel asserting sub-Ampere targets produce
+  `ValidationError::SmTooLow` with `required=80` and the correct
+  feature name; plus a cache-coexistence unit test proving
+  `matmul` and `matmul_tc` entries don't collide on shared cache
+  keys.
+
+### Breaking — Sprint 6.5
+- **`KAIO_SM_TARGET` no longer affects tensor-core kernels.** Both
+  `matmul_tc` and `matmul_tc_async` (and therefore `matmul_auto_tc`)
+  now derive the emitted module's target SM from
+  `device.info().compute_capability` at call time rather than from
+  the `KAIO_SM_TARGET` env var. The env var continues to be honored
+  by scalar `#[gpu_kernel]` kernels where cross-SM testing and
+  pre-Ampere support genuinely matter; for tensor-core kernels it
+  was always "lie to the kernel about the GPU," which is the
+  problem `load_module` validation was built to solve.
+  - **User impact:** near-zero — both kernels are still
+    `#[doc(hidden)]` until Sprint 6.7, and public-API users only
+    reach them through `matmul_auto_tc` which derives SM from the
+    device regardless.
+  - **Migration:** if you were setting `KAIO_SM_TARGET` specifically
+    to target a TC kernel, stop — the kernel will pick the right
+    SM based on the actual device. For scalar kernels, the env var
+    still works as before.
+
 ## [0.1.0] — Phase 5: Fused Attention & Community Release
 
 ### Added — Phase 5

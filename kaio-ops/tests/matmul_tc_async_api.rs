@@ -4,45 +4,18 @@
 //! async kernel is held to the same correctness bar as the sync kernel.
 //! Same K-scaled tolerance (`K * 2^-10 * max_abs_input_product`),
 //! same patterned inputs scaled to `|x| ≤ 1.0`, same full-diagnostic
-//! panic on tolerance miss.
+//! panic on tolerance miss — now via the shared `common` module
+//! (extracted in Sprint 6.5).
 //!
 //! Sprint 6.4 is **not** a performance sprint. The optional `medium`
 //! test logs an elapsed-ms line when `KAIO_SPRINT_6_4_TIMING=1` is set,
 //! which gives situational awareness without adding a CI benchmark.
-//! Expected outcome at 1 warp / block: async ≈ sync, or slightly
-//! slower — overlap wins require 6.7's multi-warp restructure.
 
-use half::f16;
 use kaio::prelude::*;
 use kaio_ops::{matmul_tc, matmul_tc_async};
 
-/// CPU reference: promote f16 to f32, multiply, accumulate in f32.
-fn cpu_matmul_f16xf16_f32(a: &[f16], b: &[f16], m: usize, n: usize, k: usize) -> Vec<f32> {
-    let mut c = vec![0.0f32; m * n];
-    for i in 0..m {
-        for j in 0..n {
-            let mut sum = 0.0f32;
-            for p in 0..k {
-                let av = a[i * k + p].to_f32();
-                let bv = b[p * n + j].to_f32();
-                sum += av * bv;
-            }
-            c[i * n + j] = sum;
-        }
-    }
-    c
-}
-
-/// Generate patterned f16 data scaled to |x| ≤ 1.0. Same generator as
-/// the 6.3 suite so cross-kernel comparisons are apples-to-apples.
-fn patterned_f16_data(len: usize) -> Vec<f16> {
-    (0..len)
-        .map(|i| {
-            let v = ((i % 17) as f32) / 17.0 - 0.5;
-            f16::from_f32(v)
-        })
-        .collect()
-}
+mod common;
+use common::{assert_close_with_k_scaled_tol, cpu_matmul_f16xf16_f32, patterned_f16_data};
 
 fn run_matmul_tc_async_test(m: usize, n: usize, k: usize, label: &str) {
     let device = KaioDevice::new(0).expect("GPU required");
@@ -66,70 +39,8 @@ fn run_matmul_tc_async_test(m: usize, n: usize, k: usize, label: &str) {
 
     let got = c.to_host(&device).expect("C to host");
     let expected = cpu_matmul_f16xf16_f32(&a_host, &b_host, m, n, k);
-
-    let max_abs_a = a_host
-        .iter()
-        .map(|x| x.to_f32().abs())
-        .fold(0.0f32, f32::max);
-    let max_abs_b = b_host
-        .iter()
-        .map(|x| x.to_f32().abs())
-        .fold(0.0f32, f32::max);
-    let max_abs_input_product = max_abs_a * max_abs_b;
-    let abs_tol = (k as f32) * 2f32.powi(-10) * max_abs_input_product;
-
-    let mut worst_idx: Option<(usize, usize)> = None;
-    let mut worst_abs_err = 0.0f32;
-    let mut worst_got = 0.0f32;
-    let mut worst_expected = 0.0f32;
-    for i in 0..m {
-        for j in 0..n {
-            let idx = i * n + j;
-            let g = got[idx];
-            let e = expected[idx];
-            let abs_err = (g - e).abs();
-            if abs_err > worst_abs_err {
-                worst_abs_err = abs_err;
-                worst_idx = Some((i, j));
-                worst_got = g;
-                worst_expected = e;
-            }
-        }
-    }
-
-    if worst_abs_err >= abs_tol {
-        let (wi, wj) = worst_idx.unwrap_or((0, 0));
-        let rel = if worst_expected.abs() > 1e-6 {
-            (worst_got - worst_expected) / worst_expected
-        } else {
-            worst_got - worst_expected
-        };
-        panic!(
-            "{label} ({m}×{k} × {k}×{n}) FAILED bit-close tolerance:\n\
-             \n\
-             K                    = {k}\n\
-             max_abs_input_product = {max_abs_input_product:e}\n\
-             abs_tol (= K * 2^-10 * max_abs_input_product) = {abs_tol:e}\n\
-             worst_abs_err        = {worst_abs_err:e}\n\
-             worst_abs_err / tol  = {:.3}\n\
-             worst index (i, j)   = ({wi}, {wj})\n\
-             CPU reference value  = {worst_expected}\n\
-             GPU value            = {worst_got}\n\
-             (got - expected)     = {}\n\
-             relative error       = {rel:e}\n",
-            worst_abs_err / abs_tol,
-            worst_got - worst_expected,
-        );
-    }
-
-    eprintln!(
-        "{label} ({m}×{k} × {k}×{n}): max_abs_err = {worst_abs_err:e}, \
-         abs_tol = {abs_tol:e}, usage = {:.1}% of tolerance",
-        100.0 * worst_abs_err / abs_tol
-    );
+    assert_close_with_k_scaled_tol(&got, &expected, &a_host, &b_host, m, n, k, label);
 }
-
-// --- GPU correctness tests ---
 
 #[test]
 #[ignore] // requires NVIDIA GPU (SM 8.0+)

@@ -129,7 +129,24 @@ internal callers to `load_module(&PtxModule)` there, then deprecating
 `load_ptx(&str)`, should be one of the **first** cleanup targets
 after 6.5 or during post-Phase-6 stabilization.
 
-**Added:** Sprint 6.2 | **Elevated:** Sprint 6.4 | **Sprint:** target 6.5 / post-Phase-6
+**Partial resolution (Sprint 6.5):** The two TC kernels
+(`matmul_tc` and `matmul_tc_async`) are migrated to
+`device.load_module(&PtxModule)`. Their module target SM is derived
+from `device.info()` at call time, and `PtxModule::validate()`
+catches sub-Ampere cleanly via `ValidationError::SmTooLow` (surfaced
+as `KaioError::Validation`, distinct from `KaioError::PtxLoad`). The
+ad-hoc `device.info().compute_capability < 8` checks in both host
+APIs are deleted.
+
+**Remaining work:** the `#[gpu_kernel]` proc-macro codegen in
+`kaio-macros/src/codegen/launch_wrapper.rs` still emits
+`device.load_ptx(&str)` calls. That path covers every user-authored
+scalar kernel plus the scalar `matmul_kernel::matmul` family. After
+that migration, `KaioDevice::load_ptx(&str)` can be `#[deprecated]`
+with a migration guide. Until then, deprecating it would emit a
+warning at every user macro call site — unacceptable noise.
+
+**Added:** Sprint 6.2 | **Elevated:** Sprint 6.4 | **Partial resolution:** Sprint 6.5 (TC kernels migrated) | **Remaining:** macro-codegen migration, then `#[deprecated]` on `load_ptx(&str)`
 
 ### No GPU runtime test for scalar f16 kernel execution
 

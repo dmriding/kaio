@@ -7,6 +7,20 @@
 //! Provides high-level functions for common GPU compute operations.
 //! Users don't need to write kernels — just call the operation.
 //!
+//! # Operations
+//!
+//! - [`matmul`] / [`matmul_auto`] — scalar f32 × f32 → f32 matmul,
+//!   works on any NVIDIA GPU (SM 7.0+).
+//! - [`matmul_auto_tc`] — tensor-core f16 × f16 → f32 matmul with
+//!   auto-tuner dispatch between the synchronous and `cp.async`
+//!   double-buffered variants. **Sprint 6.5 preview surface**:
+//!   requires SM 8.0+ (Ampere) and `M%16 = N%8 = K%16 = 0`.
+//!   Production performance lands in Sprint 6.7's multi-warp
+//!   restructure; see the `matmul_auto_tc` rustdoc for the full
+//!   contract.
+//! - [`attention`] / [`attention_auto`] and causal variants —
+//!   fused attention for f32.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -29,8 +43,8 @@ mod tuner;
 pub use attention_kernel::{attention, attention_causal, attention_flash, attention_flash_causal};
 pub use matmul_kernel::matmul;
 pub use tuner::{
-    attention_auto, attention_auto_causal, matmul_auto, tune_attention, tune_attention_causal,
-    tune_matmul,
+    attention_auto, attention_auto_causal, matmul_auto, matmul_auto_tc, tune_attention,
+    tune_attention_causal, tune_matmul, tune_matmul_tc,
 };
 
 // Expose naive kernel for benchmarking (not public API)
@@ -48,7 +62,7 @@ pub use matmul_tc_kernel::matmul_tc;
 // double-buffered variant of matmul_tc. Same dimension constraints
 // and promotion trigger as matmul_tc above (Sprint 6.7 lifts
 // divisibility + promotes to stable `pub` with README/CHANGELOG
-// announcement). Sprint 6.5's auto-tuner will dispatch between
-// `matmul`, `matmul_tc`, and `matmul_tc_async` internally.
+// announcement). Sprint 6.5's `matmul_auto_tc` tuner dispatches
+// between this and `matmul_tc` based on benchmarked latency.
 #[doc(hidden)]
 pub use matmul_tc_async_kernel::matmul_tc_async;
