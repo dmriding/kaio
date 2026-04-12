@@ -35,6 +35,7 @@
 //! ```
 
 mod attention_kernel;
+mod attention_tc_kernel;
 mod matmul_kernel;
 mod matmul_tc_async_kernel;
 mod matmul_tc_kernel;
@@ -66,3 +67,11 @@ pub use matmul_tc_kernel::matmul_tc;
 // between this and `matmul_tc` based on benchmarked latency.
 #[doc(hidden)]
 pub use matmul_tc_async_kernel::matmul_tc_async;
+
+// TEMP / DEV: Sprint 6.6 Gate A dev entrypoint — matmul1-only
+// (Q·Kᵀ·inv_sqrt_dk → scores). Exists solely to validate the first
+// mma.sync in isolation during 6.6 development. Deleted before the
+// final Sprint 6.6 commit — any production code reaching this symbol
+// is a regression gate failure.
+#[doc(hidden)]
+pub use attention_tc_kernel::attention_tc_gate_a;

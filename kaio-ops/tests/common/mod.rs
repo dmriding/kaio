@@ -130,3 +130,207 @@ pub fn assert_close_with_k_scaled_tol(
         100.0 * worst_abs_err / abs_tol
     );
 }
+
+// ============================================================================
+// Sprint 6.6 — TC attention helpers
+// ============================================================================
+//
+// Extracted alongside the matmul helpers above. The CPU reference uses
+// the same mixed-precision promotion contract (f16 inputs → f32 accumulate)
+// plus a row-wise softmax in f32 to match the TC kernel's intermediate
+// shape, then a second f32-accumulate matmul into f32 output. Reference
+// does NOT do a mid-pipeline f32→f16 cvt on probs — that's a precision
+// concession the GPU kernel makes because mma.sync requires f16 inputs.
+// The assertion tolerance below is widened to account for the resulting
+// drift.
+
+/// Scaled dot-product attention reference: `out = softmax(Q·Kᵀ / √d_k) · V`.
+///
+/// Optionally applies a causal mask (`scores[i,j] = -inf for j > i`) before
+/// softmax, matching the scalar `attention_causal` semantics (mask cells
+/// contribute 0 to softmax, so row sums stay normalized over the allowed
+/// columns).
+///
+/// Inputs are `half::f16`, promoted to f32 for all arithmetic. Output is
+/// f32 (matches the TC kernel's fp32 accumulator contract).
+#[allow(clippy::too_many_arguments)]
+pub fn cpu_attention_f16xf16_f32(
+    q: &[f16],
+    k: &[f16],
+    v: &[f16],
+    seq_q: usize,
+    seq_k: usize,
+    d_k: usize,
+    d_v: usize,
+    causal: bool,
+) -> Vec<f32> {
+    let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
+
+    // scores[i, j] = Σ_d q[i,d] * k[j,d] * inv_sqrt_dk
+    let mut scores = vec![0.0f32; seq_q * seq_k];
+    for i in 0..seq_q {
+        for j in 0..seq_k {
+            let mut dot = 0.0f32;
+            for d in 0..d_k {
+                dot += q[i * d_k + d].to_f32() * k[j * d_k + d].to_f32();
+            }
+            scores[i * seq_k + j] = dot * inv_sqrt_dk;
+        }
+    }
+
+    if causal {
+        for i in 0..seq_q {
+            for j in 0..seq_k {
+                if j > i {
+                    scores[i * seq_k + j] = f32::NEG_INFINITY;
+                }
+            }
+        }
+    }
+
+    // Row-wise softmax (max-subtract for numerical stability).
+    let mut probs = vec![0.0f32; seq_q * seq_k];
+    for i in 0..seq_q {
+        let row = &scores[i * seq_k..(i + 1) * seq_k];
+        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for j in 0..seq_k {
+            let e = if row[j] == f32::NEG_INFINITY {
+                0.0
+            } else {
+                (row[j] - max).exp()
+            };
+            probs[i * seq_k + j] = e;
+            sum += e;
+        }
+        // Sum is >0 unless the entire row is masked (all -inf); that's
+        // a valid degenerate case (causal row before position 0) but
+        // doesn't occur for the causal patterns we test (row 0 always
+        // has at least the diagonal entry alive).
+        if sum > 0.0 {
+            for j in 0..seq_k {
+                probs[i * seq_k + j] /= sum;
+            }
+        }
+    }
+
+    // out[i, d] = Σ_j probs[i, j] * v[j, d]
+    let mut out = vec![0.0f32; seq_q * d_v];
+    for i in 0..seq_q {
+        for d in 0..d_v {
+            let mut sum = 0.0f32;
+            for j in 0..seq_k {
+                sum += probs[i * seq_k + j] * v[j * d_v + d].to_f32();
+            }
+            out[i * d_v + d] = sum;
+        }
+    }
+    out
+}
+
+/// CPU reference for just the scaled-and-optionally-masked scores
+/// matrix (Q·Kᵀ·inv_sqrt_dk, plus optional causal mask). Gate A (matmul1
+/// only) tests against this; Gate B tests against a scores+softmax+cvt
+/// reference built on top.
+#[allow(clippy::too_many_arguments)]
+pub fn cpu_attention_scores_f16xf16_f32(
+    q: &[f16],
+    k: &[f16],
+    seq_q: usize,
+    seq_k: usize,
+    d_k: usize,
+    causal: bool,
+) -> Vec<f32> {
+    let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
+    let mut scores = vec![0.0f32; seq_q * seq_k];
+    for i in 0..seq_q {
+        for j in 0..seq_k {
+            let mut dot = 0.0f32;
+            for d in 0..d_k {
+                dot += q[i * d_k + d].to_f32() * k[j * d_k + d].to_f32();
+            }
+            let s = dot * inv_sqrt_dk;
+            scores[i * seq_k + j] = if causal && j > i { f32::NEG_INFINITY } else { s };
+        }
+    }
+    scores
+}
+
+/// CPU reference for the f32 softmax output (probs before the f16 cvt).
+/// Gate B tests against this.
+pub fn cpu_attention_probs_f32(
+    scores: &[f32],
+    seq_q: usize,
+    seq_k: usize,
+) -> Vec<f32> {
+    let mut probs = vec![0.0f32; seq_q * seq_k];
+    for i in 0..seq_q {
+        let row = &scores[i * seq_k..(i + 1) * seq_k];
+        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for j in 0..seq_k {
+            let e = if row[j] == f32::NEG_INFINITY {
+                0.0
+            } else {
+                (row[j] - max).exp()
+            };
+            probs[i * seq_k + j] = e;
+            sum += e;
+        }
+        if sum > 0.0 {
+            for j in 0..seq_k {
+                probs[i * seq_k + j] /= sum;
+            }
+        }
+    }
+    probs
+}
+
+/// Attention-tolerance comparator. Absolute OR relative — the `OR` is
+/// **load-bearing**, not defensive: near-zero outputs (masked-out
+/// positions, attention weights far from the dominant key) have
+/// exploding `rel_err` on any noise, and failing on that is a false
+/// positive. If tests flake on specific shapes, tighten `abs_err`
+/// first; only adjust `rel_err` if the offending shape has large
+/// outputs. Do not remove the OR.
+///
+/// Tolerance is slightly looser than scalar attention's `1e-3 / 1e-2`
+/// to account for the f32→f16 cvt on probs (correct per D8 but adds
+/// up to ~1 ULP of f16 per prob element) plus compound error through
+/// two matmuls + one nonlinear softmax.
+pub fn assert_close_attention(
+    got: &[f32],
+    expected: &[f32],
+    seq_q: usize,
+    d_v: usize,
+    label: &str,
+) {
+    let abs_tol = 5e-3f32;
+    let rel_tol = 2e-2f32;
+    let mut max_abs = 0.0f32;
+    let mut max_rel = 0.0f32;
+    for idx in 0..seq_q * d_v {
+        let g = got[idx];
+        let e = expected[idx];
+        let abs_err = (g - e).abs();
+        let rel_err = if e.abs() > 1e-6 {
+            abs_err / e.abs()
+        } else {
+            abs_err
+        };
+        if abs_err > max_abs {
+            max_abs = abs_err;
+        }
+        if rel_err > max_rel {
+            max_rel = rel_err;
+        }
+        assert!(
+            abs_err < abs_tol || rel_err < rel_tol,
+            "{label}: error at idx {idx}: got {g}, expected {e}, abs={abs_err:.2e}, rel={rel_err:.2e}"
+        );
+    }
+    eprintln!(
+        "{label} ({seq_q}×{d_v}): max_abs={max_abs:.2e}, max_rel={max_rel:.2e}, \
+         abs_tol={abs_tol:.0e}, rel_tol={rel_tol:.0e}"
+    );
+}
