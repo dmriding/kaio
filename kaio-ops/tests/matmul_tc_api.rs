@@ -70,6 +70,59 @@ fn tc_matmul_medium_64_64_64() {
     run_matmul_tc_test(64, 64, 64, "medium");
 }
 
+// ---------------------------------------------------------------------------
+// Sprint 6.7 Gate C — pathological edge-tile shapes (M and N ragged).
+// K stays %16=0 (mma K-tile is structural; kernel does not edge-pad K).
+// ---------------------------------------------------------------------------
+
+/// Sub-tile dim: M=7, N=5 are smaller than even one mma output tile
+/// (16×8). Most lanes are OOB; only 7 rows × 5 cols survive. Stresses
+/// "all-but-one-lane OOB" degenerate behavior. K=16 = exactly one mma
+/// K-iteration.
+#[test]
+#[ignore]
+fn tc_matmul_subtile_7_5_16() {
+    run_matmul_tc_test(7, 5, 16, "subtile_7_5_16");
+}
+
+/// Sub-tile dim: M=15, N=7 — just below the mma output tile in both
+/// dims. Catches off-by-one against the 16/8 mma boundary.
+#[test]
+#[ignore]
+fn tc_matmul_subtile_15_7_16() {
+    run_matmul_tc_test(15, 7, 16, "subtile_15_7_16");
+}
+
+/// Off-by-one against mma output tile: M=17 = 16 + 1, N=9 = 8 + 1.
+#[test]
+#[ignore]
+fn tc_matmul_offbyone_17_9_16() {
+    run_matmul_tc_test(17, 9, 16, "offbyone_17_9_16");
+}
+
+/// Larger off-by-one: M=33, N=17 = 2× the mma boundary + 1.
+#[test]
+#[ignore]
+fn tc_matmul_offbyone_33_17_16() {
+    run_matmul_tc_test(33, 17, 16, "offbyone_33_17_16");
+}
+
+/// Mid-range mixed-divisibility: M=100 (not %16, not %64), N=50
+/// (not %8, not %64), K=64.
+#[test]
+#[ignore]
+fn tc_matmul_mid_100_50_64() {
+    run_matmul_tc_test(100, 50, 64, "mid_100_50_64");
+}
+
+/// Large-with-off-by-one: M=N=1023 = 1024-1 (off-by-one against the
+/// natural 1024 / 64-block boundary). K=1024 stays divisible.
+#[test]
+#[ignore]
+fn tc_matmul_large_offbyone_1023_1023_1024() {
+    run_matmul_tc_test(1023, 1023, 1024, "large_offbyone_1023_1023_1024");
+}
+
 /// Sprint 6.7 Gate A canary — per-warp distinguishable input pattern at
 /// 64×64×64 (one block, all 4 warps in-bounds). A is row-index-folded
 /// (`A[i,j] = (i+1) * 0.01`), B is col-index-folded (`B[i,j] = (j+1) *

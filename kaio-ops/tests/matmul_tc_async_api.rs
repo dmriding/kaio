@@ -62,6 +62,48 @@ fn tc_async_matmul_rect_128_8_16() {
     run_matmul_tc_async_test(128, 8, 16, "async rect");
 }
 
+// ---------------------------------------------------------------------------
+// Sprint 6.7 Gate C — pathological edge-tile shapes for the async kernel.
+// Same shapes as matmul_tc_api.rs Gate C tests; cp.async double-buffered
+// path must produce identical correctness across ragged dims.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn tc_async_matmul_subtile_7_5_16() {
+    run_matmul_tc_async_test(7, 5, 16, "async_subtile_7_5_16");
+}
+
+#[test]
+#[ignore]
+fn tc_async_matmul_subtile_15_7_16() {
+    run_matmul_tc_async_test(15, 7, 16, "async_subtile_15_7_16");
+}
+
+#[test]
+#[ignore]
+fn tc_async_matmul_offbyone_17_9_16() {
+    run_matmul_tc_async_test(17, 9, 16, "async_offbyone_17_9_16");
+}
+
+#[test]
+#[ignore]
+fn tc_async_matmul_offbyone_33_17_16() {
+    run_matmul_tc_async_test(33, 17, 16, "async_offbyone_33_17_16");
+}
+
+#[test]
+#[ignore]
+fn tc_async_matmul_mid_100_50_64() {
+    run_matmul_tc_async_test(100, 50, 64, "async_mid_100_50_64");
+}
+
+#[test]
+#[ignore]
+fn tc_async_matmul_large_offbyone_1023_1023_1024() {
+    run_matmul_tc_async_test(1023, 1023, 1024, "async_large_offbyone_1023_1023_1024");
+}
+
 #[test]
 #[ignore]
 fn tc_async_matmul_medium_64_64_64() {

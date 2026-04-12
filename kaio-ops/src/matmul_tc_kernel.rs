@@ -98,14 +98,13 @@ const TILE_B_BYTES: u32 = BK * BN_BLOCK * BYTES_PER_HALF; // 2048
 
 /// Validate dimension constraints for [`matmul_tc`].
 ///
-/// `pub(crate)` so Sprint 6.4's `matmul_tc_async_kernel` can reuse —
-/// the dim constraints are identical (M%16 = N%8 = K%16 = 0).
+/// `pub(crate)` so `matmul_tc_async_kernel` can reuse — the dim
+/// constraints are identical.
 ///
-/// Sprint 6.7 Gate A keeps the divisibility constraint at the mma shape
-/// (16/8/16). Gate C lifts M, N to "any positive value" while keeping
-/// `K % 16 == 0` (mma K dim is fixed). The 6.7 multi-warp kernel
-/// already handles non-multiple-of-64 M, N via edge-tile predication;
-/// the validate here remains conservative for backward compatibility.
+/// Sprint 6.7 Gate C: M and N may be any positive value (edge-tile
+/// predication in the kernel handles non-multiple-of-64 cases). K
+/// remains a multiple of 16 — the mma K dim is structural and the
+/// kernel does not pad K within a K-tile.
 pub(crate) fn validate_dims_tc(
     a: &GpuBuffer<f16>,
     b: &GpuBuffer<f16>,
@@ -119,19 +118,10 @@ pub(crate) fn validate_dims_tc(
             "matmul_tc dimensions must be non-zero".to_string(),
         ));
     }
-    if !m.is_multiple_of(BM) {
-        return Err(KaioError::InvalidConfig(format!(
-            "matmul_tc: M must be a multiple of {BM} (got {m}). Sprint 6.7 Gate C will relax."
-        )));
-    }
-    if !n.is_multiple_of(BN) {
-        return Err(KaioError::InvalidConfig(format!(
-            "matmul_tc: N must be a multiple of {BN} (got {n}). Sprint 6.7 Gate C will relax."
-        )));
-    }
     if !k.is_multiple_of(BK) {
         return Err(KaioError::InvalidConfig(format!(
-            "matmul_tc: K must be a multiple of {BK} (got {k})."
+            "matmul_tc: K must be a multiple of {BK} (got {k}). The mma.sync.m16n8k16 \
+             instance shape requires K-tile size 16; K is not edge-padded inside a K-tile."
         )));
     }
     let mk = (m as usize) * (k as usize);
@@ -1600,7 +1590,8 @@ mod tests {
     use super::*;
     use kaio_core::emit::{Emit, PtxWriter};
 
-    // --- Host-only validate_dims_tc tests ---
+    // --- Host-only validate_dims_tc tests (Gate C: M, N can be any
+    // positive value; only K is constrained to a multiple of 16) ---
     fn validate_dims_raw(
         m: u32,
         n: u32,
@@ -1614,19 +1605,10 @@ mod tests {
                 "matmul_tc dimensions must be non-zero".to_string(),
             ));
         }
-        if !m.is_multiple_of(BM) {
-            return Err(KaioError::InvalidConfig(format!(
-                "matmul_tc: M must be a multiple of {BM} (got {m}). Sprint 6.7 Gate C will relax."
-            )));
-        }
-        if !n.is_multiple_of(BN) {
-            return Err(KaioError::InvalidConfig(format!(
-                "matmul_tc: N must be a multiple of {BN} (got {n}). Sprint 6.7 Gate C will relax."
-            )));
-        }
         if !k.is_multiple_of(BK) {
             return Err(KaioError::InvalidConfig(format!(
-                "matmul_tc: K must be a multiple of {BK} (got {k})."
+                "matmul_tc: K must be a multiple of {BK} (got {k}). The mma.sync.m16n8k16 \
+                 instance shape requires K-tile size 16; K is not edge-padded inside a K-tile."
             )));
         }
         let mk = (m as usize) * (k as usize);
@@ -1656,20 +1638,22 @@ mod tests {
         assert!(matches!(err, KaioError::InvalidConfig(ref m) if m.contains("non-zero")));
     }
 
+    /// Gate C: M no longer needs to be a multiple of 16 — edge-tile
+    /// predication handles ragged M. Validate accepts non-divisible M.
     #[test]
-    fn validate_dims_rejects_m_not_multiple_of_16() {
-        let err = validate_dims_raw(17, 8, 16, 1000, 1000, 1000).unwrap_err();
-        assert!(
-            matches!(err, KaioError::InvalidConfig(ref m) if m.contains("M must be a multiple of 16"))
-        );
+    fn validate_dims_accepts_non_divisible_m() {
+        // 17 rows: edge-tile path inside the 64×64 block tile handles
+        // the OOB rows. Buffer sizing follows the full M×K shape.
+        assert!(validate_dims_raw(17, 8, 16, 17 * 16, 16 * 8, 17 * 8).is_ok());
+        assert!(validate_dims_raw(7, 5, 16, 7 * 16, 16 * 5, 7 * 5).is_ok());
+        assert!(validate_dims_raw(1023, 1023, 1024, 1023 * 1024, 1024 * 1023, 1023 * 1023).is_ok());
     }
 
+    /// Gate C: N no longer needs to be a multiple of 8 — same reason.
     #[test]
-    fn validate_dims_rejects_n_not_multiple_of_8() {
-        let err = validate_dims_raw(16, 5, 16, 1000, 1000, 1000).unwrap_err();
-        assert!(
-            matches!(err, KaioError::InvalidConfig(ref m) if m.contains("N must be a multiple of 8"))
-        );
+    fn validate_dims_accepts_non_divisible_n() {
+        assert!(validate_dims_raw(16, 5, 16, 16 * 16, 16 * 5, 16 * 5).is_ok());
+        assert!(validate_dims_raw(64, 9, 16, 64 * 16, 16 * 9, 64 * 9).is_ok());
     }
 
     #[test]
@@ -1691,6 +1675,7 @@ mod tests {
 
     #[test]
     fn validate_dims_accepts_valid_shapes() {
+        // Original divisible shapes still pass.
         assert!(validate_dims_raw(16, 8, 16, 256, 128, 128).is_ok());
         assert!(validate_dims_raw(64, 64, 64, 64 * 64, 64 * 64, 64 * 64).is_ok());
         assert!(validate_dims_raw(128, 8, 16, 128 * 16, 16 * 8, 128 * 8).is_ok());

@@ -510,18 +510,13 @@ fn resolve_attention_variant(
 // Tensor-core matmul tuner (Sprint 6.5)
 // ---------------------------------------------------------------------------
 
-/// Dimension constraints shared by `matmul_tc` and `matmul_tc_async`.
-/// Kept in sync with `matmul_tc_kernel::validate_dims_tc`.
-const TC_M_STEP: u32 = 16;
-const TC_N_STEP: u32 = 8;
+/// K-dimension constraint, shared with `matmul_tc_kernel::validate_dims_tc`.
+/// Sprint 6.7 Gate C: M and N are unconstrained (edge-tile predication
+/// inside the kernel handles ragged dims). K stays %16=0 because the
+/// mma.sync.m16n8k16 instance shape has a fixed K-tile of 16.
 const TC_K_STEP: u32 = 16;
 
-/// Pre-dispatch eligibility gate for the TC tuner. Returns
-/// `KaioError::InvalidConfig` with a message that names both real
-/// options (pad/convert before dispatch, or switch to the f32
-/// `matmul_auto` path) — per Sprint 6.5 D4 / Codex review, "use
-/// matmul_auto" as a blanket fallback is only actionable for users
-/// willing to change buffer types.
+/// Pre-dispatch eligibility gate for the TC tuner.
 fn check_tc_eligibility(device: &KaioDevice, m: u32, n: u32, k: u32) -> Result<()> {
     let info = device.info()?;
     let (major, minor) = info.compute_capability;
@@ -538,13 +533,11 @@ fn check_tc_eligibility(device: &KaioDevice, m: u32, n: u32, k: u32) -> Result<(
             "matmul_auto_tc dimensions must be non-zero".to_string(),
         ));
     }
-    if !m.is_multiple_of(TC_M_STEP) || !n.is_multiple_of(TC_N_STEP) || !k.is_multiple_of(TC_K_STEP)
-    {
+    if !k.is_multiple_of(TC_K_STEP) {
         return Err(KaioError::InvalidConfig(format!(
-            "matmul_auto_tc requires M%{TC_M_STEP}=N%{TC_N_STEP}=K%{TC_K_STEP}=0 \
-             (got M={m}, N={n}, K={k}). For unsupported shapes, either pad/convert \
-             inputs before dispatch, or use the f32 matmul path (matmul_auto) if \
-             f16 precision is not required. Sprint 6.7 will relax this constraint."
+            "matmul_auto_tc requires K%{TC_K_STEP}=0 (got K={k}). The mma.sync.m16n8k16 \
+             instance shape has a fixed K-tile of 16; the kernel does not edge-pad K. \
+             Pad K to the next multiple of 16, or use the f32 matmul path (matmul_auto)."
         )));
     }
     Ok(())
