@@ -107,14 +107,15 @@ const WARP_QUAD_N: u32 = 32;
 const WARPS_PER_BLOCK: u32 = 4;
 
 // --- Shared tile sizes (per buffer; 2 buffers each for double-buffering) ---
+// Sprint 6.7b: tile constants are shared with the sync kernel (matmul_tc_kernel.rs)
+// to guarantee the layout stored by the cooperative load is identical to what
+// the fragment-B loader reads. Async kernel's Tile B per-buffer inherits the
+// padded col stride (36 B) + rounded data size (2560 B).
 const BYTES_PER_HALF: u32 = 2;
 const BYTES_PER_F32: u32 = 4;
-const TILE_A_ROW_STRIDE_BYTES: u32 = BK * BYTES_PER_HALF; // 32
-const TILE_B_COL_STRIDE_BYTES: u32 = BK * BYTES_PER_HALF; // 32
-const TILE_A_BYTES: u32 = BM_BLOCK * BK * BYTES_PER_HALF; // 2048 per buffer
-const TILE_B_BYTES: u32 = BK * BN_BLOCK * BYTES_PER_HALF; // 2048 per buffer
+use crate::matmul_tc_kernel::{TILE_A_BYTES, TILE_A_ROW_STRIDE_BYTES, TILE_B_BYTES, TILE_B_COL_STRIDE_BYTES};
 const TILE_A_TOTAL_BYTES: u32 = 2 * TILE_A_BYTES; // 4096 (2 buffers)
-const TILE_B_TOTAL_BYTES: u32 = 2 * TILE_B_BYTES; // 4096 (2 buffers)
+const TILE_B_TOTAL_BYTES: u32 = 2 * TILE_B_BYTES; // 2 × 2560 = 5120 per async (was 4096 pre-6.7b)
 
 /// Pure helper: byte offsets of the (cur, nxt) buffer pair within
 /// `tile_a` and `tile_b` at iteration `k_tile`.
@@ -381,6 +382,25 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         c: Operand::Reg(r_tid_x),
         ty: PtxType::U32,
         mode: MadMode::Lo,
+    }));
+
+    // Sprint 6.7b D10 hoist: compute fragment-layout (group_id, tig) ONCE at
+    // kernel start, reuse across every emit_warp_quadrant_mma call. Saves
+    // 6 × div/rem pairs per K-iter that the fragment loaders would otherwise
+    // recompute internally (2 FragmentA + 4 FragmentB per K-iter).
+    let r_hoisted_group_id = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_hoisted_group_id,
+        lhs: Operand::Reg(r_tid_x),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    let r_hoisted_tig = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_hoisted_tig,
+        lhs: Operand::Reg(r_tid_x),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
     }));
 
     let r_bidx = alloc.alloc(PtxType::U32);
@@ -831,6 +851,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         r_tile_a_warp_cur,
         r_tile_b_warp_cur,
         r_tid_x,
+        (r_hoisted_group_id, r_hoisted_tig),
         &mut accs,
     );
 
@@ -989,13 +1010,16 @@ mod tests {
         w.finish()
     }
 
-    /// Sprint 6.7 multi-warp buffer toggle: each buffer is 2048 B.
+    /// Sprint 6.7 multi-warp buffer toggle.
+    /// A per-buffer is 2048 B (unchanged in 6.7b). B per-buffer is 2560 B
+    /// post-6.7b (col-stride padded 32→36, rounded up to multiple of 512
+    /// for the cooperative pre-zero pass).
     #[test]
     fn buffer_offsets_toggle() {
-        assert_eq!(buffer_offsets(0), (0, 2048, 0, 2048));
-        assert_eq!(buffer_offsets(1), (2048, 0, 2048, 0));
-        assert_eq!(buffer_offsets(2), (0, 2048, 0, 2048));
-        assert_eq!(buffer_offsets(3), (2048, 0, 2048, 0));
+        assert_eq!(buffer_offsets(0), (0, 2048, 0, 2560));
+        assert_eq!(buffer_offsets(1), (2048, 0, 2560, 0));
+        assert_eq!(buffer_offsets(2), (0, 2048, 0, 2560));
+        assert_eq!(buffer_offsets(3), (2048, 0, 2560, 0));
     }
 
     #[test]
@@ -1021,14 +1045,15 @@ mod tests {
             "missing mma.sync"
         );
 
-        // Multi-warp shared sizing: 4 KB tile_a (2× 2048 B), 4 KB tile_b.
+        // Multi-warp shared sizing: 4 KB tile_a (2× 2048 B), 5 KB tile_b
+        // (Sprint 6.7b: 2× 2560 B per buffer — padded col stride).
         assert!(
             ptx.contains(".shared .align 16 .b8 tile_a[4096]"),
             "tile_a should be 4096 B (2 buffers × 64×16 fp16)"
         );
         assert!(
-            ptx.contains(".shared .align 4 .b8 tile_b[4096]"),
-            "tile_b should be 4096 B (2 buffers × 16×64 fp16)"
+            ptx.contains(".shared .align 4 .b8 tile_b[5120]"),
+            "tile_b should be 5120 B (2 buffers × 2560 B padded col-stride)"
         );
 
         // 8 mma.sync per warp per K-tile (2 m_stripes × 4 n_stripes).

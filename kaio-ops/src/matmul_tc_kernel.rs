@@ -91,10 +91,25 @@ const THREADS_PER_BLOCK: u32 = WARPS_PER_BLOCK * 32; // 128
 // --- Shared tile sizes ---
 const BYTES_PER_HALF: u32 = 2;
 const BYTES_PER_F32: u32 = 4;
-const TILE_A_ROW_STRIDE_BYTES: u32 = BK * BYTES_PER_HALF; // 32
-const TILE_A_BYTES: u32 = BM_BLOCK * BK * BYTES_PER_HALF; // 2048
-const TILE_B_COL_STRIDE_BYTES: u32 = BK * BYTES_PER_HALF; // 32
-const TILE_B_BYTES: u32 = BK * BN_BLOCK * BYTES_PER_HALF; // 2048
+pub(crate) const TILE_A_ROW_STRIDE_BYTES: u32 = BK * BYTES_PER_HALF; // 32
+pub(crate) const TILE_A_BYTES: u32 = BM_BLOCK * BK * BYTES_PER_HALF; // 2048
+/// Sprint 6.7b: col-stride padded to 36 B (32 B data + 4 B pad) to break
+/// bank conflicts on fragment-B reads. Pre-pad (stride 32 = 8 banks) had
+/// `group_id·8 + tig mod 32` collapse to only 16 distinct banks across a
+/// warp → 2-way conflict on every fragment-B access. Stride 36 (s=9) gives
+/// `group_id·9 + tig mod 32` with most banks 1-way and only 3 banks 2-way
+/// — a large net reduction in serialization. Fragment B loader already
+/// accepts this stride via its `col_stride_bytes` parameter; no loader
+/// code changed.
+pub(crate) const TILE_B_COL_STRIDE_BYTES: u32 = BK * BYTES_PER_HALF + 4; // 32 + 4 pad = 36
+/// Data region is `64 cols × 36 B = 2304 B`. The pre-zero cooperative pass
+/// requires the allocation to be a multiple of `THREADS_PER_BLOCK * 4 =
+/// 512 B` so we round up to the next multiple. The tail beyond the data
+/// region (byte `2304..2560`) is never read by the kernel — it only
+/// exists to satisfy the cooperative-zero divisibility requirement.
+pub(crate) const TILE_B_BYTES: u32 = BN_BLOCK * TILE_B_COL_STRIDE_BYTES
+    + (THREADS_PER_BLOCK * 4 - (BN_BLOCK * TILE_B_COL_STRIDE_BYTES) % (THREADS_PER_BLOCK * 4))
+        % (THREADS_PER_BLOCK * 4);
 
 /// Validate dimension constraints for [`matmul_tc`].
 ///
@@ -512,6 +527,7 @@ pub(crate) fn emit_warp_quadrant_mma(
     tile_a_warp_base_shared: Register, // u32 — tile_a + warp_row_quad * 32 * TILE_A_ROW_STRIDE_BYTES
     tile_b_warp_base_shared: Register, // u32 — tile_b + warp_col_quad * 32 * TILE_B_COL_STRIDE_BYTES
     warp_lane: Register,               // u32 — tid_x ∈ [0, 32)
+    warp_group_tig: (Register, Register), // Sprint 6.7b D10 hoist: (group_id, tig) for this warp lane
     accs: &mut [FragmentC; 8],
 ) {
     // Load 2 FragmentA's, one per m_stripe.
@@ -536,6 +552,7 @@ pub(crate) fn emit_warp_quadrant_mma(
             a_stripe_base,
             warp_lane,
             TILE_A_ROW_STRIDE_BYTES,
+            Some(warp_group_tig),
         );
         frags_a[m_stripe as usize] = Some(frag);
     }
@@ -543,7 +560,7 @@ pub(crate) fn emit_warp_quadrant_mma(
     // Load 4 FragmentB's, one per n_stripe.
     let mut frags_b: [Option<FragmentB>; MMAS_PER_WARP_N as usize] = [None, None, None, None];
     for n_stripe in 0..MMAS_PER_WARP_N {
-        let col_off_bytes = n_stripe * BN * TILE_B_COL_STRIDE_BYTES; // n_stripe * 8 * 32
+        let col_off_bytes = n_stripe * BN * TILE_B_COL_STRIDE_BYTES; // n_stripe * 8 * padded_col_stride
         let b_stripe_base = if col_off_bytes == 0 {
             tile_b_warp_base_shared
         } else {
@@ -562,6 +579,7 @@ pub(crate) fn emit_warp_quadrant_mma(
             b_stripe_base,
             warp_lane,
             TILE_B_COL_STRIDE_BYTES,
+            Some(warp_group_tig),
         );
         frags_b[n_stripe as usize] = Some(frag);
     }
@@ -1102,6 +1120,26 @@ pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
         mode: MadMode::Lo,
     }));
 
+    // Sprint 6.7b D10 hoist: compute fragment-layout (group_id, tig) ONCE at
+    // kernel start and reuse across every emit_warp_quadrant_mma call. Saves
+    // 6 × div/rem pairs per K-iter that the fragment loaders would otherwise
+    // recompute internally (2 FragmentA + 4 FragmentB = 6 calls per K-iter).
+    // group_id = tid_x / 4, tig = tid_x % 4.
+    let r_hoisted_group_id = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_hoisted_group_id,
+        lhs: Operand::Reg(r_tid_x),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    let r_hoisted_tig = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_hoisted_tig,
+        lhs: Operand::Reg(r_tid_x),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+
     let r_bidx = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Mov {
         dst: r_bidx,
@@ -1428,6 +1466,7 @@ pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
         r_tile_a_warp,
         r_tile_b_warp,
         r_tid_x,
+        (r_hoisted_group_id, r_hoisted_tig),
         &mut accs,
     );
 
@@ -1690,8 +1729,10 @@ mod tests {
     #[test]
     fn build_matmul_tc_module_produces_valid_structure() {
         // Sprint 6.7 multi-warp: 64×64 block tile, 4 warps, 8 mma per warp
-        // per K-tile (2 m_stripes × 4 n_stripes). Tile sizes are 2048 B
-        // each (64×16 fp16 = 16×64 fp16 = 1024 fp16 × 2 B).
+        // per K-tile (2 m_stripes × 4 n_stripes). Tile A = 2048 B (64×16
+        // fp16, row-major). Tile B = 2560 B per Sprint 6.7b (64×36 data
+        // with col-stride padding for bank-conflict relief, rounded up to
+        // next multiple of THREADS_PER_BLOCK*4 for cooperative-zero).
         let module = build_matmul_tc_module("sm_89");
         let ptx = emit_module_to_string(&module);
 
@@ -1701,8 +1742,8 @@ mod tests {
             "tile_a should be 2048 B (64×16 fp16)"
         );
         assert!(
-            ptx.contains(".shared .align 4 .b8 tile_b[2048]"),
-            "tile_b should be 2048 B (16×64 fp16)"
+            ptx.contains(".shared .align 4 .b8 tile_b[2560]"),
+            "tile_b should be 2560 B (Sprint 6.7b: 64 cols × 36 B padded + round-up tail)"
         );
         assert!(ptx.contains("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"));
         assert!(ptx.contains("bar.sync"));

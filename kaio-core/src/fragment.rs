@@ -522,27 +522,41 @@ fn u32_shared_addr_from_offset(
 /// Load one A-fragment for `mma.sync.m16n8k16.f16` from a 16×16
 /// row-major fp16 tile in **shared** memory.
 ///
-/// Emits `div.u32` + `rem.u32` to derive groupID / tig, followed by
-/// four `ld.shared.b32` at the per-thread fragment offsets derived above.
+/// Emits `div.u32` + `rem.u32` to derive groupID / tig (unless
+/// `group_tig_override` is `Some`), followed by four `ld.shared.b32`
+/// at the per-thread fragment offsets derived above.
 ///
 /// # Parameters
 ///
 /// - `tile_base_shared` — `.u32` register holding the shared-memory
 ///   offset of the tile's row-0 column-0 element. Must already be
 ///   computed (typically via `mov.u32 %r, tile_symbol + block_offset`).
-/// - `tid_x` — `.u32` register holding `%tid.x`.
+/// - `tid_x` — `.u32` register holding `%tid.x`. Unused when
+///   `group_tig_override` is `Some`.
 /// - `row_stride_bytes` — number of bytes between consecutive rows of
 ///   the A tile in shared memory. For the Sprint 6.3 kernel
 ///   (BM=16, BK=16, fp16), pass `32`. Future kernels with wider shared
 ///   tiles pass their actual row stride.
+/// - `group_tig_override` — Sprint 6.7b D10 hoist. When `Some((g, t))`,
+///   skip the internal `div.u32`/`rem.u32` emit and use the caller-
+///   supplied `group_id` and `thread_id_in_group` registers instead.
+///   Callers that invoke multiple fragment loads per warp per K-tile
+///   (e.g. the multi-warp matmul_tc kernel's 2 FragmentA + 4 FragmentB
+///   per K-iter) can compute these once at block start and pass them
+///   here, saving 2 div/rem pairs per extra call. Pass `None` to keep
+///   the pre-6.7b behaviour (loader computes them internally).
 pub fn load_fragment_a_m16n8k16_shared_row(
     alloc: &mut crate::ir::RegisterAllocator,
     kernel: &mut PtxKernel,
     tile_base_shared: crate::ir::Register,
     tid_x: crate::ir::Register,
     row_stride_bytes: u32,
+    group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
 ) -> FragmentA {
-    let (group_id, tig) = compute_group_thread_ids(alloc, kernel, tid_x);
+    let (group_id, tig) = match group_tig_override {
+        Some(pair) => pair,
+        None => compute_group_thread_ids(alloc, kernel, tid_x),
+    };
 
     // row_off = groupID * row_stride_bytes
     let row_off = alloc.alloc(PtxType::U32);
@@ -610,18 +624,28 @@ pub fn load_fragment_a_m16n8k16_shared_row(
 ///
 /// - `tile_base_shared` — `.u32` register holding the shared offset of
 ///   the tile's column-0 row-0 element.
-/// - `tid_x` — `.u32` register holding `%tid.x`.
+/// - `tid_x` — `.u32` register holding `%tid.x`. Unused when
+///   `group_tig_override` is `Some`.
 /// - `col_stride_bytes` — number of bytes between consecutive columns
-///   of the B tile in shared memory. For Sprint 6.3 (BK=16 rows × 2
-///   bytes = 32 bytes/column), pass `32`.
+///   of the B tile in shared memory. Sprint 6.3 used `32` (BK=16 rows
+///   × 2 bytes, tightly packed). Sprint 6.7b's multi-warp matmul_tc
+///   passes `36` for bank-conflict relief — the extra 4-byte pad per
+///   column breaks the 2-way bank conflict on fragment-B reads that
+///   col stride 32 produces across a warp.
+/// - `group_tig_override` — Sprint 6.7b D10 hoist. See docstring on
+///   [`load_fragment_a_m16n8k16_shared_row`] for the rationale.
 pub fn load_fragment_b_m16n8k16_shared_col(
     alloc: &mut crate::ir::RegisterAllocator,
     kernel: &mut PtxKernel,
     tile_base_shared: crate::ir::Register,
     tid_x: crate::ir::Register,
     col_stride_bytes: u32,
+    group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
 ) -> FragmentB {
-    let (group_id, tig) = compute_group_thread_ids(alloc, kernel, tid_x);
+    let (group_id, tig) = match group_tig_override {
+        Some(pair) => pair,
+        None => compute_group_thread_ids(alloc, kernel, tid_x),
+    };
 
     // col_off = groupID * col_stride_bytes
     let col_off = alloc.alloc(PtxType::U32);
@@ -792,7 +816,8 @@ mod tests {
         let mut kernel = PtxKernel::new("test");
         let base = alloc.alloc(PtxType::U32); // shared-memory offset
         let tid = alloc.alloc(PtxType::U32);
-        let frag = load_fragment_a_m16n8k16_shared_row(&mut alloc, &mut kernel, base, tid, 32);
+        let frag =
+            load_fragment_a_m16n8k16_shared_row(&mut alloc, &mut kernel, base, tid, 32, None);
         assert_eq!(frag.regs.len(), 4);
 
         // Exactly four ld.shared.b32 (= ld.shared.u32) loads.
@@ -827,7 +852,8 @@ mod tests {
         let mut kernel = PtxKernel::new("test");
         let base = alloc.alloc(PtxType::U32);
         let tid = alloc.alloc(PtxType::U32);
-        let frag = load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, base, tid, 32);
+        let frag =
+            load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, base, tid, 32, None);
         assert_eq!(frag.regs.len(), 2);
 
         let n_loads = kernel
@@ -856,7 +882,8 @@ mod tests {
         let mut kernel = PtxKernel::new("test");
         let base = alloc.alloc(PtxType::U32);
         let tid = alloc.alloc(PtxType::U32);
-        let _ = load_fragment_a_m16n8k16_shared_row(&mut alloc, &mut kernel, base, tid, 128);
+        let _ =
+            load_fragment_a_m16n8k16_shared_row(&mut alloc, &mut kernel, base, tid, 128, None);
 
         // Expect a Mul with ImmU32(128) (row stride) and an Add with
         // ImmU32(1024) (8 * 128 = 8 rows' worth of bytes).
@@ -895,7 +922,8 @@ mod tests {
         let mut kernel = PtxKernel::new("test");
         let base = alloc.alloc(PtxType::U32);
         let tid = alloc.alloc(PtxType::U32);
-        let _ = load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, base, tid, 96);
+        let _ =
+            load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, base, tid, 96, None);
 
         let mut saw_stride_mul = false;
         for instr in &kernel.body {

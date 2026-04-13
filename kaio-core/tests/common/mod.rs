@@ -429,8 +429,10 @@ pub fn build_mma_sync_shared_ptx() -> String {
     });
 
     // Fragment loads from shared.
-    let frag_a = load_fragment_a_m16n8k16_shared_row(&mut alloc, &mut kernel, r_tile_a, r_tid, 32);
-    let frag_b = load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, r_tile_b, r_tid, 32);
+    let frag_a =
+        load_fragment_a_m16n8k16_shared_row(&mut alloc, &mut kernel, r_tile_a, r_tid, 32, None);
+    let frag_b =
+        load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, r_tile_b, r_tid, 32, None);
 
     // Zero C fragment.
     let frag_c = alloc_c(&mut alloc);
