@@ -301,18 +301,12 @@ fn benchmark_matmul_tc() {
     }
 
     eprintln!();
-    eprintln!(
-        "Sprint 6.7 D11 gate: 4096-squared TC matmul ratio vs cuBLAS sgemm should be >= 50%."
-    );
+    eprintln!("Summary at 4096-squared vs cuBLAS sgemm:");
     let sync_4096_pct = tflops(4096, 4096, 4096, sync_ms_at_4096 / 1000.0)
         / tflops(4096, 4096, 4096, cublas_ms_at_4096 / 1000.0)
         * 100.0;
     let async_4096_pct = tflops(4096, 4096, 4096, async_ms_at_4096 / 1000.0)
         / tflops(4096, 4096, 4096, cublas_ms_at_4096 / 1000.0)
         * 100.0;
-    eprintln!(
-        "  TC sync at 4096-sq: {sync_4096_pct:.1}% | TC async at 4096-sq: {async_4096_pct:.1}%"
-    );
-    eprintln!();
-    eprintln!("Path to 60-70%: Sprint 6.7b (vectorized loads LDG.128, bank-conflict padding).");
+    eprintln!("  TC sync: {sync_4096_pct:.1}% | TC async: {async_4096_pct:.1}%");
 }
