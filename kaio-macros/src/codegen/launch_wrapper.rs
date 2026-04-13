@@ -96,8 +96,16 @@ pub fn generate_launch_fn(sig: &KernelSignature) -> syn::Result<TokenStream> {
         pub fn launch(#(#launch_params),*) -> Result<(), kaio::runtime::KaioError> {
             use kaio::runtime::PushKernelArg;
 
-            let ptx = PTX_CACHE.get_or_init(build_ptx);
-            let module = device.load_ptx(ptx)?;
+            // Derive the SM target from the device's compute capability
+            // so PtxModule::validate() can gate SM-specific features
+            // (mma.sync, cp.async, etc.) before ptxas sees the PTX.
+            // Sprint 6.10 D1a: closes the trust-boundary gap where
+            // load_ptx(&str) bypassed PtxModule::validate().
+            let info = device.info()?;
+            let (major, minor) = info.compute_capability;
+            let sm = format!("sm_{major}{minor}");
+            let ptx_module = build_module(&sm);
+            let module = device.load_module(&ptx_module)?;
             let func = module.function(#kernel_name)?;
             let cfg = #launch_config_expr;
 
@@ -242,25 +250,19 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Activated once D1a macro migration lands — tests behavior D1a introduces"]
     fn launch_wrapper_threads_compute_capability_into_module_build() {
-        // Regression canary: after D1a migration, the launch wrapper must
-        // structurally:
+        // Regression canary: the launch wrapper must structurally:
         //   1. Obtain device.info().compute_capability
         //   2. Format it as sm_XX (e.g. sm_80)
         //   3. Pass that SM target into the module build function
         //   4. Call device.load_module(&module) (not device.load_ptx(&str))
         //
         // If any of those steps is missing or hardcoded to a fixed SM, the
-        // trust-boundary fix from Sprint 6.10 D1 is broken and user-authored
+        // trust-boundary fix from Sprint 6.10 D1a is broken and user-authored
         // kernels with Ampere-gated features fall back to driver-level
         // ptxas errors instead of structured PtxModule::validate() failures.
         //
-        // Currently ignored because D2 lands before D1a (see Sprint 6.10
-        // plan). D1a's acceptance criterion includes removing this #[ignore]
-        // and verifying the test passes.
-        //
-        // Once D1a lands, assertions should verify:
+        // Activated Sprint 6.10 D1a. Assertions verify:
         //   - output contains "compute_capability" (source of SM)
         //   - output contains "load_module" (correct loader)
         //   - output does NOT contain "load_ptx" (old loader gone from macro)

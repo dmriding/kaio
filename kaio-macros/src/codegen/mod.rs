@@ -15,27 +15,29 @@ use crate::kernel_ir::stmt::KernelStmt;
 /// Produces:
 /// ```ignore
 /// mod kernel_name {
-///     static PTX_CACHE: OnceLock<String> = OnceLock::new();
-///     fn build_ptx() -> String { ... }
+///     fn build_module(sm: &str) -> PtxModule { ... }
 ///     pub fn launch(device, params...) -> Result<(), KaioError> { ... }
 /// }
 /// ```
+///
+/// Sprint 6.10 D1a: the `PTX_CACHE: OnceLock<String>` cache is removed.
+/// Each `launch()` call rebuilds the `PtxModule` fresh, using the device's
+/// own compute capability as the SM target. Per-call rebuild cost is
+/// microseconds (IR construction, not compilation); if it later becomes
+/// hot, a cache-design sprint can re-introduce caching deliberately.
 pub fn generate_kernel_module(
     sig: &KernelSignature,
     body: &[KernelStmt],
 ) -> syn::Result<TokenStream> {
     let mod_name = Ident::new(&sig.name, sig.name_span);
 
-    let build_ptx_fn = ptx_builder::generate_build_ptx(sig, body)?;
+    let build_module_fn = ptx_builder::generate_build_module(sig, body)?;
     let launch_fn = launch_wrapper::generate_launch_fn(sig)?;
 
     Ok(quote! {
         #[allow(non_snake_case, unused_imports, dead_code)]
         mod #mod_name {
-            use std::sync::OnceLock;
-            static PTX_CACHE: OnceLock<String> = OnceLock::new();
-
-            #build_ptx_fn
+            #build_module_fn
             #launch_fn
         }
     })

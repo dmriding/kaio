@@ -1,4 +1,4 @@
-//! Generate the `build_ptx()` function body.
+//! Generate the `build_module()` function body.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -8,16 +8,23 @@ use crate::kernel_ir::stmt::KernelStmt;
 use crate::lower;
 use crate::lower::LoweringContext;
 
-/// Generate the `build_ptx() -> String` function.
+/// Generate the `build_module(sm: &str) -> PtxModule` function.
 ///
-/// This produces a function that, at runtime:
+/// Produces a function that, at runtime:
 /// 1. Creates a `RegisterAllocator` and `PtxKernel`
 /// 2. Declares and loads all parameters
 /// 3. Executes the lowered kernel body
 /// 4. Adds `Ret`, finalizes registers
-/// 5. Emits PTX via `PtxWriter`
+/// 5. Wraps the `PtxKernel` in a `PtxModule` targeting the caller's SM
+///    (or `KAIO_SM_TARGET` env var if set, for debugging/cross-compile)
 /// 6. Optionally dumps PTX if `KAIO_DUMP_PTX` is set
-pub fn generate_build_ptx(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Result<TokenStream> {
+///
+/// Sprint 6.10 D1a migration: returns `PtxModule` instead of a PTX text
+/// string. The launch wrapper passes `sm_XX` derived from
+/// `device.info().compute_capability`, so the driver call path hits
+/// `PtxModule::validate()` before ptxas — closing the trust-boundary gap
+/// flagged in tech_debt.md:129.
+pub fn generate_build_module(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Result<TokenStream> {
     let kernel_name = &sig.name;
     let mut ctx = LoweringContext::new();
     let total_threads = sig.config.block_size * sig.config.block_size_y.unwrap_or(1);
@@ -62,7 +69,7 @@ pub fn generate_build_ptx(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Re
     };
 
     Ok(quote! {
-        fn build_ptx() -> String {
+        fn build_module(sm: &str) -> kaio::core::ir::PtxModule {
             use kaio::core::emit::{Emit, PtxWriter};
             use kaio::core::instr::ArithOp;
             use kaio::core::instr::control::{CmpOp, ControlOp};
@@ -99,18 +106,21 @@ pub fn generate_build_ptx(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Re
                 eprintln!("  Shared mem:   {} bytes", _s.shared_bytes);
             }
 
+            // Caller passes `sm` from device.info().compute_capability.
+            // KAIO_SM_TARGET env var still overrides (debugging / cross-compile).
             let sm_target = std::env::var("KAIO_SM_TARGET")
-                .unwrap_or_else(|_| "sm_70".to_string());
+                .unwrap_or_else(|_| sm.to_string());
             let mut module = PtxModule::new(&sm_target);
             module.add_kernel(kernel);
-
-            let mut w = PtxWriter::new();
-            module.emit(&mut w).unwrap();
-            let ptx = w.finish();
 
             #shared_mem_diagnostic
 
             if std::env::var("KAIO_DUMP_PTX").is_ok() {
+                // Emit PTX text for dump purposes; the runtime load_module path
+                // will re-emit on its own, which is cheap.
+                let mut w = PtxWriter::new();
+                module.emit(&mut w).unwrap();
+                let ptx = w.finish();
                 let dump_dir = std::env::var("OUT_DIR")
                     .unwrap_or_else(|_| ".".to_string());
                 let dump_path = format!("{}/{}.ptx", dump_dir, #kernel_name);
@@ -120,7 +130,7 @@ pub fn generate_build_ptx(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Re
                 }
             }
 
-            ptx
+            module
         }
     })
 }
