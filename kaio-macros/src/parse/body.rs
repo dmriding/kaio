@@ -316,8 +316,13 @@ fn parse_expr_stmt(expr: &Expr) -> syn::Result<KernelStmt> {
     }
 }
 
-/// Map a compound assignment operator to its base arithmetic operator.
+/// Map a compound assignment operator to its base binary operator.
 /// Returns `None` for non-compound operators.
+///
+/// Sprint 7.0 D3: added bitwise compound variants (`&=`, `|=`, `^=`, `<<=`,
+/// `>>=`). These ride the same IndexAssign / Assign desugaring path as the
+/// arithmetic ones — no new AST node. Once the base op is a `BinOpKind::Bit*`
+/// / `Shl` / `Shr`, the D2 bitwise lowering handles the rest.
 fn desugar_compound_op(op: &BinOp) -> Option<BinOpKind> {
     match op {
         BinOp::AddAssign(_) => Some(BinOpKind::Add),
@@ -325,6 +330,11 @@ fn desugar_compound_op(op: &BinOp) -> Option<BinOpKind> {
         BinOp::MulAssign(_) => Some(BinOpKind::Mul),
         BinOp::DivAssign(_) => Some(BinOpKind::Div),
         BinOp::RemAssign(_) => Some(BinOpKind::Rem),
+        BinOp::BitAndAssign(_) => Some(BinOpKind::BitAnd),
+        BinOp::BitOrAssign(_) => Some(BinOpKind::BitOr),
+        BinOp::BitXorAssign(_) => Some(BinOpKind::BitXor),
+        BinOp::ShlAssign(_) => Some(BinOpKind::Shl),
+        BinOp::ShrAssign(_) => Some(BinOpKind::Shr),
         _ => None,
     }
 }
