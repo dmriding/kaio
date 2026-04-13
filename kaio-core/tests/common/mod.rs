@@ -469,3 +469,53 @@ pub fn build_mma_sync_shared_ptx() -> String {
     module.emit(&mut w).unwrap();
     w.finish()
 }
+
+/// Build a minimal kernel that exercises `MemoryOp::LdGlobalB128`:
+/// loads a pointer parameter, converts to global-space, and issues
+/// one `ld.global.v4.b32` into 4 freshly-allocated b32 registers.
+///
+/// Used by `ptxas_verify_ld_global_b128` (Sprint 6.7b Gate A) to
+/// confirm the emitted vectorized-load instruction is accepted by
+/// ptxas. The kernel doesn't do anything with the loaded values —
+/// ptxas only verifies PTX syntax / ISA legality, not runtime
+/// behavior. LDG.128 is not Ampere-gated (vectorized loads have
+/// been part of PTX since sm_30-era); uses the base SM target.
+#[allow(dead_code)]
+pub fn build_ld_global_b128_ptx() -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("ld_global_b128_smoke");
+
+    kernel.add_param(PtxParam::pointer("src", PtxType::F32));
+
+    let rd_src_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_src_param,
+        param_name: "src".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_src_global = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_src_global,
+        src: rd_src_param,
+    }));
+
+    let r0 = alloc.alloc(PtxType::U32);
+    let r1 = alloc.alloc(PtxType::U32);
+    let r2 = alloc.alloc(PtxType::U32);
+    let r3 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::new_ld_global_b128(
+        [r0, r1, r2, r3],
+        rd_src_global,
+    )));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_70".to_string());
+    let mut module = PtxModule::new(&sm);
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}

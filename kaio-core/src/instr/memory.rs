@@ -68,6 +68,39 @@ pub enum MemoryOp {
         /// When `true`, negate the predicate (`@!pred`).
         negate: bool,
     },
+    /// 128-bit vectorized load from global memory:
+    /// `ld.global.v4.b32 {%r_i, %r_j, %r_k, %r_l}, [addr];`
+    ///
+    /// Single-instruction 128-bit transfer into 4 independent b32
+    /// destination registers. Halves (or more) the global-load
+    /// instruction count vs scalar b32 loads for bandwidth-bound
+    /// kernels. Requires the `addr` register to hold a **16-byte
+    /// aligned global-space address** — unaligned access will fault
+    /// at runtime; PTX does not catch this statically.
+    ///
+    /// Destinations are NOT required to be consecutive registers in
+    /// the allocator — PTX `ld.global.v4.b32` accepts any 4 b32 regs
+    /// in the vector brace list. In practice, allocating 4 regs in
+    /// sequence produces consecutive indices, which is what callers
+    /// typically do.
+    ///
+    /// No predicate variant in Sprint 6.7b — edge tiles stay on the
+    /// existing [`LdGlobalPred`](Self::LdGlobalPred) scalar path. A
+    /// future `LdGlobalB128Pred` would be additive.
+    ///
+    /// Sprint 6.7b (multi-warp matmul_tc Tile B fast path) is the
+    /// first user. Construct via
+    /// [`MemoryOp::new_ld_global_b128`](Self::new_ld_global_b128),
+    /// which validates that all 4 destinations are b32-class registers.
+    ///
+    /// Example: `ld.global.v4.b32 {%r0, %r1, %r2, %r3}, [%rd8];`
+    LdGlobalB128 {
+        /// Four b32 destination registers — receive bytes 0-3, 4-7,
+        /// 8-11, 12-15 of the loaded 128-bit value respectively.
+        dsts: [Register; 4],
+        /// Register holding a 16-B aligned global-space address.
+        addr: Register,
+    },
     /// Store to global memory: `st.global{ty} [addr], src;`
     ///
     /// **Operand order is reversed in PTX** — address comes first,
@@ -210,6 +243,28 @@ impl MemoryOp {
             size_bytes,
         }
     }
+
+    /// Construct an [`LdGlobalB128`](Self::LdGlobalB128), validating
+    /// that all 4 destinations are b32-class registers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any destination register is not [`RegKind::R`] (b32).
+    /// `ld.global.v4.b32` requires 4× 32-bit-wide integer-class
+    /// destinations; `.f` / `.rd` / `.h` / `.hb` / `.p` registers are
+    /// invalid and ptxas's error message is cryptic. Fail loudly at
+    /// construction.
+    pub fn new_ld_global_b128(dsts: [Register; 4], addr: Register) -> Self {
+        use crate::types::RegKind;
+        for (i, d) in dsts.iter().enumerate() {
+            assert!(
+                d.kind == RegKind::R,
+                "ld.global.v4.b32 destination {i} must be a b32 register (RegKind::R); got {:?}",
+                d.kind
+            );
+        }
+        Self::LdGlobalB128 { dsts, addr }
+    }
 }
 
 impl Emit for MemoryOp {
@@ -240,6 +295,13 @@ impl Emit for MemoryOp {
                 w.line(&format!(
                     "@{neg}{pred} ld.global{} {dst}, [{addr}];",
                     ty.ptx_memory_suffix()
+                ))
+            }
+            MemoryOp::LdGlobalB128 { dsts, addr } => {
+                // ld.global.v4.b32 {d0, d1, d2, d3}, [addr];
+                w.line(&format!(
+                    "ld.global.v4.b32 {{{}, {}, {}, {}}}, [{addr}];",
+                    dsts[0], dsts[1], dsts[2], dsts[3]
                 ))
             }
             MemoryOp::StGlobal { addr, src, ty } => {
@@ -397,6 +459,119 @@ mod tests {
         };
         op.emit(&mut w).unwrap();
         assert_eq!(w.finish(), "    @!%p2 ld.global.u32 %r5, [%rd9];\n");
+    }
+
+    #[test]
+    fn emit_ld_global_b128() {
+        // Sprint 6.7b vectorized load — 128-bit global load into 4 b32 regs.
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::new_ld_global_b128(
+            [
+                reg(RegKind::R, 0, PtxType::U32),
+                reg(RegKind::R, 1, PtxType::U32),
+                reg(RegKind::R, 2, PtxType::U32),
+                reg(RegKind::R, 3, PtxType::U32),
+            ],
+            reg(RegKind::Rd, 8, PtxType::U64),
+        );
+        op.emit(&mut w).unwrap();
+        assert_eq!(
+            w.finish(),
+            "    ld.global.v4.b32 {%r0, %r1, %r2, %r3}, [%rd8];\n"
+        );
+    }
+
+    #[test]
+    fn emit_ld_global_b128_non_consecutive_regs() {
+        // PTX accepts any 4 b32 regs in the brace list — not required
+        // to be consecutive. Validates that emit just writes what it's given.
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::new_ld_global_b128(
+            [
+                reg(RegKind::R, 5, PtxType::U32),
+                reg(RegKind::R, 9, PtxType::U32),
+                reg(RegKind::R, 2, PtxType::U32),
+                reg(RegKind::R, 14, PtxType::U32),
+            ],
+            reg(RegKind::Rd, 3, PtxType::U64),
+        );
+        op.emit(&mut w).unwrap();
+        assert_eq!(
+            w.finish(),
+            "    ld.global.v4.b32 {%r5, %r9, %r2, %r14}, [%rd3];\n"
+        );
+    }
+
+    #[test]
+    fn ld_global_b128_emits_single_instruction() {
+        // D1 promise: LDG.128 emits ONE PTX instruction, not four.
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = MemoryOp::new_ld_global_b128(
+            [
+                reg(RegKind::R, 0, PtxType::U32),
+                reg(RegKind::R, 1, PtxType::U32),
+                reg(RegKind::R, 2, PtxType::U32),
+                reg(RegKind::R, 3, PtxType::U32),
+            ],
+            reg(RegKind::Rd, 0, PtxType::U64),
+        );
+        op.emit(&mut w).unwrap();
+        let out = w.finish();
+        // Exactly one `ld.global.v4.b32` + exactly one newline = one line.
+        assert_eq!(out.matches("ld.global").count(), 1);
+        assert_eq!(out.matches('\n').count(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ld.global.v4.b32 destination 0 must be a b32 register")]
+    fn ld_global_b128_rejects_f32_destination() {
+        MemoryOp::new_ld_global_b128(
+            [
+                reg(RegKind::F, 0, PtxType::F32), // wrong kind
+                reg(RegKind::R, 1, PtxType::U32),
+                reg(RegKind::R, 2, PtxType::U32),
+                reg(RegKind::R, 3, PtxType::U32),
+            ],
+            reg(RegKind::Rd, 0, PtxType::U64),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ld.global.v4.b32 destination 2 must be a b32 register")]
+    fn ld_global_b128_rejects_h_destination() {
+        MemoryOp::new_ld_global_b128(
+            [
+                reg(RegKind::R, 0, PtxType::U32),
+                reg(RegKind::R, 1, PtxType::U32),
+                reg(RegKind::H, 0, PtxType::F16), // wrong kind (fp16)
+                reg(RegKind::R, 3, PtxType::U32),
+            ],
+            reg(RegKind::Rd, 0, PtxType::U64),
+        );
+    }
+
+    #[test]
+    fn ld_global_b128_via_ptx_instruction() {
+        use crate::ir::PtxInstruction;
+        let mut w = PtxWriter::new();
+        w.indent();
+        let instr = PtxInstruction::Memory(MemoryOp::new_ld_global_b128(
+            [
+                reg(RegKind::R, 0, PtxType::U32),
+                reg(RegKind::R, 1, PtxType::U32),
+                reg(RegKind::R, 2, PtxType::U32),
+                reg(RegKind::R, 3, PtxType::U32),
+            ],
+            reg(RegKind::Rd, 5, PtxType::U64),
+        ));
+        instr.emit(&mut w).unwrap();
+        assert_eq!(
+            w.finish(),
+            "    ld.global.v4.b32 {%r0, %r1, %r2, %r3}, [%rd5];\n"
+        );
     }
 
     #[test]
