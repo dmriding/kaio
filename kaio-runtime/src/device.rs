@@ -1,11 +1,48 @@
 //! CUDA device management.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use cudarc::driver::{CudaContext, CudaStream, DeviceRepr, ValidAsZeroBits};
 
 use crate::buffer::GpuBuffer;
 use crate::error::Result;
+
+/// Process-wide latch for the debug-build performance note.
+///
+/// Sprint 7.0.5 A2: emit a one-time stderr note on first `KaioDevice::new`
+/// when the binary is built in debug mode. Prevents the common "benchmarked
+/// in debug, bounced" adoption failure where new users run a showcase example
+/// with `cargo run` (defaulting to debug) and conclude KAIO is slow. The note
+/// is performance-framed only — debug-mode does not affect correctness, and a
+/// `cargo test`-in-debug user checking kernel output should not see their
+/// correctness results cast into doubt.
+static DEBUG_WARNED: OnceLock<()> = OnceLock::new();
+
+/// Performance-framed debug-mode note body. `const` so tests can assert on
+/// its content without re-typing the message.
+const DEBUG_WARNING_MESSAGE: &str = "[kaio] Note: debug build — GPU kernel performance is ~10-20x slower than --release. Use `cargo run --release` / `cargo test --release` for representative performance numbers. Correctness is unaffected. Set KAIO_SUPPRESS_DEBUG_WARNING=1 to silence.";
+
+/// Pure decision function: should the debug-mode note fire on this
+/// process? Split out from [`maybe_warn_debug_build`] so the env-var
+/// logic is testable without the static `OnceLock` interfering.
+fn should_emit_debug_warning() -> bool {
+    cfg!(debug_assertions) && std::env::var("KAIO_SUPPRESS_DEBUG_WARNING").is_err()
+}
+
+/// Emit the debug-mode performance note to stderr once per process, if
+/// [`should_emit_debug_warning`] returns true.
+///
+/// Called from [`KaioDevice::new`] — every KAIO program hits this path on
+/// first launch, so the note surfaces exactly when a user would first
+/// benefit from knowing. In release builds, `cfg!(debug_assertions)` folds
+/// to `false` and the whole body compiles out.
+fn maybe_warn_debug_build() {
+    if should_emit_debug_warning() {
+        DEBUG_WARNED.get_or_init(|| {
+            eprintln!("{DEBUG_WARNING_MESSAGE}");
+        });
+    }
+}
 
 /// A KAIO GPU device — wraps a CUDA context and its default stream.
 ///
@@ -38,6 +75,7 @@ impl KaioDevice {
     /// Ordinal 0 is the first GPU. Returns an error if no GPU exists at
     /// that ordinal or if the CUDA driver fails to initialize.
     pub fn new(ordinal: usize) -> Result<Self> {
+        maybe_warn_debug_build();
         let ctx = CudaContext::new(ordinal)?;
         let stream = ctx.default_stream();
         Ok(Self { ctx, stream })
@@ -203,6 +241,70 @@ mod tests {
     static DEVICE: OnceLock<KaioDevice> = OnceLock::new();
     fn device() -> &'static KaioDevice {
         DEVICE.get_or_init(|| KaioDevice::new(0).expect("GPU required for tests"))
+    }
+
+    // Sprint 7.0.5 A2: debug-mode performance note tests.
+    //
+    // These verify the pure-function half of the warning logic. The
+    // once-per-process behavior mediated by the static `DEBUG_WARNED`
+    // OnceLock is not testable in-process without restructuring (the
+    // latch is set for the lifetime of the test binary); manual/subprocess
+    // verification is in sprint_7_0_5.md.
+
+    #[test]
+    fn debug_warning_message_is_performance_framed_not_correctness_framed() {
+        // Regression canary (Sprint 7.0.5 A2 message framing): if the
+        // wording ever drifts to imply correctness is affected ("results
+        // are not meaningful," "output is invalid," etc.) this test
+        // fails. The whole point of the message is to prevent perf
+        // misunderstandings WITHOUT scaring off correctness testing.
+        let msg = DEBUG_WARNING_MESSAGE;
+        assert!(
+            msg.contains("performance"),
+            "debug warning must mention performance: {msg}"
+        );
+        assert!(
+            msg.contains("Correctness is unaffected")
+                || msg.contains("correctness is unaffected"),
+            "debug warning must explicitly state correctness is unaffected: {msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("not meaningful")
+                && !msg.to_lowercase().contains("invalid"),
+            "debug warning must NOT imply results are invalid/not meaningful: {msg}"
+        );
+        assert!(
+            msg.contains("KAIO_SUPPRESS_DEBUG_WARNING"),
+            "debug warning must document the opt-out env var: {msg}"
+        );
+    }
+
+    #[test]
+    fn debug_warning_opt_out_env_var_suppresses() {
+        // SAFETY: single-threaded env-var manipulation inside a test.
+        // Restore the prior value (if any) before returning so other
+        // tests in the same binary don't observe stale state.
+        let prev = std::env::var("KAIO_SUPPRESS_DEBUG_WARNING").ok();
+        unsafe {
+            std::env::set_var("KAIO_SUPPRESS_DEBUG_WARNING", "1");
+        }
+        assert!(
+            !should_emit_debug_warning(),
+            "KAIO_SUPPRESS_DEBUG_WARNING=1 must suppress the warning"
+        );
+        unsafe {
+            std::env::remove_var("KAIO_SUPPRESS_DEBUG_WARNING");
+        }
+        // In debug builds the warning should now be allowed; in release
+        // builds cfg!(debug_assertions) is false so it's suppressed either
+        // way. Assert the cfg-consistent expectation.
+        assert_eq!(should_emit_debug_warning(), cfg!(debug_assertions));
+        // Restore
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var("KAIO_SUPPRESS_DEBUG_WARNING", v);
+            }
+        }
     }
 
     #[test]
