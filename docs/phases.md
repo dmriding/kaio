@@ -281,7 +281,7 @@ would be *repelled* by rough ergonomics are exactly the ones Phase 7
 is trying to attract. Phase 7 interleaves small ergonomics sprints
 (7.0.5) with the quant milestones (7.1, 7.2) rather than delivering
 quant into an ecosystem where the first-run experience is rough. See
-the convergence-doc sequencing section of
+the adoption-ergonomics sequencing section of
 [phase7_master_plan.md](development/sprints/phase7/phase7_master_plan.md)
 for which ergonomics items land where, and why.
 

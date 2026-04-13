@@ -26,9 +26,9 @@ targets = [
 ]
 
 [dependencies]
-kaio-core = { version = "0.2.1", path = "../kaio-core" }
-kaio-runtime = { version = "0.2.1", path = "../kaio-runtime" }
-kaio-macros = { version = "0.2.1", path = "../kaio-macros" }
+kaio-core = { version = "0.2.2", path = "../kaio-core" }
+kaio-runtime = { version = "0.2.2", path = "../kaio-runtime" }
+kaio-macros = { version = "0.2.2", path = "../kaio-macros" }
 
 [dev-dependencies]
 cudarc = { workspace = true }
