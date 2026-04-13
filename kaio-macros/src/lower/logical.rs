@@ -53,7 +53,10 @@ pub fn lower_logical_expr(
     lhs: &KernelExpr,
     rhs: &KernelExpr,
 ) -> syn::Result<(Ident, TokenStream)> {
-    debug_assert!(op.is_logical(), "lower_logical_expr called with non-logical op: {op:?}");
+    debug_assert!(
+        op.is_logical(),
+        "lower_logical_expr called with non-logical op: {op:?}"
+    );
 
     let (lhs_reg, lhs_ty, lhs_tokens) = lower_expr(ctx, lhs)?;
     ensure_bool(&lhs_ty, lhs, op)?;
@@ -126,7 +129,10 @@ pub fn lower_logical_if(
     rhs: &KernelExpr,
     skip_label: &str,
 ) -> syn::Result<TokenStream> {
-    debug_assert!(op.is_logical(), "lower_logical_if called with non-logical op: {op:?}");
+    debug_assert!(
+        op.is_logical(),
+        "lower_logical_if called with non-logical op: {op:?}"
+    );
 
     let (lhs_reg, lhs_ty, lhs_tokens) = lower_expr(ctx, lhs)?;
     ensure_bool(&lhs_ty, lhs, op)?;

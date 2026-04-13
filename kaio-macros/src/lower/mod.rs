@@ -414,10 +414,7 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             //    short-circuit paths. Any other condition shape falls through
             //    to the general expression lowering (which still correctly
             //    materializes logical ops when they're nested).
-            let cond_and_branch_tokens = if let KernelExpr::BinOp {
-                op, lhs, rhs, ..
-            } = condition
-            {
+            let cond_and_branch_tokens = if let KernelExpr::BinOp { op, lhs, rhs, .. } = condition {
                 if op.is_logical() {
                     logical::lower_logical_if(ctx, op, lhs, rhs, skip_target)?
                 } else {

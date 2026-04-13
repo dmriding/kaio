@@ -258,16 +258,18 @@ KAIO is pre-1.0 software. Current engineering constraints:
   (`kaio-candle` bridge) is planned for Phase 7.
 - **DSL is a Rust subset.** No closures, traits, generics, method
   calls, or string operations inside `#[gpu_kernel]` function bodies.
-  No `&&` / `||` (use nested `if`). No compound shared-memory
-  assignment (`sdata[i] += val` must be `sdata[i] = sdata[i] + val`).
+  Arithmetic, comparisons, bitwise operators (`&` `|` `^` `<<` `>>`
+  `!`), short-circuit `&&` / `||`, and compound assignment (including
+  bitwise `&=` / `|=` / `<<=` / etc.) all supported as of v0.2.1.
 - **FlashAttention d_k limit.** `attention_flash()` requires
   d_k ≤ 256 (one thread per output dimension).
 - **Single-device.** No multi-GPU support.
-- **First-call PTX compilation.** The `#[gpu_kernel]` macro generates
-  PTX at Rust compile time, but kernel-module loading still happens
-  lazily at first call (cached via `OnceLock` for the process
-  lifetime). First launch pays the module-load latency once per
-  kernel; subsequent launches are dispatch-only.
+- **First-call PTX module load.** The `#[gpu_kernel]` macro generates
+  PTX at Rust compile time, but CUDA-driver module loading still
+  happens at first launch. First call pays the module-load latency;
+  subsequent launches are dispatch-only. (The in-process PTX cache
+  was removed in v0.2.1 to simplify the load path and run kernels
+  through `PtxModule::validate()` on every launch.)
 - **API will change** before 1.0. Breaking changes documented in
   CHANGELOG per release.
 

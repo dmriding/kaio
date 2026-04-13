@@ -534,6 +534,7 @@ pub fn build_ld_global_b128_ptx() -> String {
 ///
 /// Takes `sm` as a parameter (D3-style clean contract) — no internal
 /// `KAIO_SM_TARGET` mutation.
+#[allow(dead_code)]
 pub fn build_bitops_ptx(sm: &str) -> String {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("bitops_smoke");

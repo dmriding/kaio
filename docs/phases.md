@@ -269,7 +269,7 @@ operation every local LLM runner currently reaches for through CUDA C++
 (GGUF / GPTQ / AWQ). Training integration via a `kaio-candle` bridge
 crate layered on top of the forward kernels.
 
-**Status:** In progress (7.0 DSL completeness complete, v0.2.2)
+**Status:** In progress (7.0 DSL completeness complete, v0.2.1)
 
 **Depends on:** Phase 6 complete (v0.2.1, 2026-04-14).
 
@@ -280,7 +280,7 @@ for the detailed sprint breakdown, architectural decisions, and risks.
 
 | Sprint | Scope | Status |
 |--------|-------|--------|
-| 7.0 | DSL completeness (bitops + short-circuit `&&` / `\|\|` + compound bitwise assign) + Phase 6 closeout + Phase 7 scaffold | Complete (v0.2.2) |
+| 7.0 | DSL completeness (bitops + short-circuit `&&` / `\|\|` + compound bitwise assign) + Phase 6 closeout + Phase 7 scaffold | Complete (v0.2.1, combined with Sprint 6.10) |
 | 7.1 | INT8 dequantize-matmul (forward) | Planned |
 | 7.2 | INT4 dequantize-matmul (GPTQ-style packed 4-bit) | Planned |
 | 7.3 | Quant + attention integration | Planned |

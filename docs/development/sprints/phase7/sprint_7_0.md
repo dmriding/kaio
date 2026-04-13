@@ -1,6 +1,6 @@
 # Sprint 7.0 — DSL completeness + Phase 6 closeout + Phase 7 scaffold
 
-**Status:** Complete (v0.2.2, 2026-04-14)
+**Status:** Complete (v0.2.1, 2026-04-14 — combined release with Sprint 6.10)
 **Branch:** `phase7` off `main` (post v0.2.1)
 **Master plan:** [phase7_master_plan.md](phase7_master_plan.md)
 
@@ -25,7 +25,7 @@ Docs were also out of sync: `docs/phases.md` still framed Phase 6 as
 
 ## Goal
 
-Ship v0.2.2 with:
+Ship v0.2.1 (combined with Sprint 6.10) with:
 
 - Full bitwise operator support in `#[gpu_kernel]` (binary `&` `|` `^`
   `<<` `>>`, unary `!`, compound `&=` `|=` `^=` `<<=` `>>=`)
