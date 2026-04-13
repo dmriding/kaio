@@ -90,10 +90,10 @@ fn ptxas_verify_mma_sync() {
     }
 
     let sm = sm_target_ampere_or_better();
-    // SAFETY: test binaries are single-threaded inside the test runner
-    // for this scenario — set_var is fine here.
-    unsafe { std::env::set_var("KAIO_SM_TARGET", &sm) };
-    let ptx = common::build_mma_sync_ptx();
+    // Sprint 6.10 D3: sm is passed directly to the builder instead of
+    // mutating KAIO_SM_TARGET. Removes the test-side process-global env
+    // mutation that was a hygiene landmine under parallel test runners.
+    let ptx = common::build_mma_sync_ptx(&sm);
 
     let tmp = std::env::temp_dir().join("kaio_mma_sync_verify.ptx");
     std::fs::write(&tmp, &ptx).expect("failed to write temp PTX file");
@@ -129,10 +129,8 @@ fn ptxas_verify_mma_sync_shared() {
     }
 
     let sm = sm_target_ampere_or_better();
-    // SAFETY: test binaries are single-threaded inside the test runner
-    // for this scenario — set_var is fine here.
-    unsafe { std::env::set_var("KAIO_SM_TARGET", &sm) };
-    let ptx = common::build_mma_sync_shared_ptx();
+    // Sprint 6.10 D3: sm passed directly to builder; no env mutation.
+    let ptx = common::build_mma_sync_shared_ptx(&sm);
 
     let tmp = std::env::temp_dir().join("kaio_mma_sync_shared_verify.ptx");
     std::fs::write(&tmp, &ptx).expect("failed to write temp PTX file");
@@ -168,9 +166,8 @@ fn ptxas_verify_cp_async() {
     }
 
     let sm = sm_target_ampere_or_better();
-    // SAFETY: see comment on ptxas_verify_mma_sync.
-    unsafe { std::env::set_var("KAIO_SM_TARGET", &sm) };
-    let ptx = common::build_cp_async_ptx();
+    // Sprint 6.10 D3: sm passed directly to builder; no env mutation.
+    let ptx = common::build_cp_async_ptx(&sm);
 
     let tmp = std::env::temp_dir().join("kaio_cp_async_verify.ptx");
     std::fs::write(&tmp, &ptx).expect("failed to write temp PTX file");
