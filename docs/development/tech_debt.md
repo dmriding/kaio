@@ -57,31 +57,36 @@ added with `RUSTDOCFLAGS="-D warnings"`.
 
 ## Low Priority
 
-### `&&` / `||` logical operators in kernel DSL
+### `&&` / `||` logical operators in kernel DSL ✅ RESOLVED Sprint 7.0
 
-Currently not supported — users must use nested `if` statements.
-Discovered in Sprint 4.1 when writing 2D kernel test.
-**Added:** Sprint 4.1 | **Sprint:** TBD
+Short-circuit `&&` / `||` with Rust-faithful semantics — branch-direct
+inside `if` conditions, materialized `.pred` in expression position.
+Signature canary: `if i < n && arr[i] > 0 { ... }` correctly skips
+`arr[i]` when `i >= n` (verified in `logical_and_bounds_guard_no_oob`
+GPU test). See `kaio-macros/src/lower/logical.rs` and the D4 test
+suite.
 
-### Compound assignment for shared memory
+### Compound assignment for shared memory ✅ RESOLVED Sprint 7.0 (bitwise variants)
 
-`sdata[idx] += val` is not supported — requires `sdata[idx] = sdata[idx] + val`.
-**Added:** Phase 3 | **Sprint:** TBD
+Arithmetic compound assign (`sdata[idx] += val`) already worked from
+Phase 3 — this tech debt entry was miscategorized. What was actually
+missing was the *bitwise* compound assign (`sdata[idx] |= mask`),
+which landed in Sprint 7.0 D3 via `desugar_compound_op` extension.
 
-### ArithOp::Shr / Shl / And / Or (bitops) in the IR
+### ArithOp::Shr / Shl / And / Or (bitops) in the IR ✅ RESOLVED Sprint 7.0
 
-Two call sites currently use `div.u32` / `rem.u32` by power-of-two
-constants where bit ops would be cleaner PTX:
+Full bitwise suite landed: `And`, `Or`, `Xor`, `Shl`, `Shr`, `Not`.
+`Shr` preserves signed vs unsigned distinction (`shr.s32` vs
+`shr.u32`) — AD2 of the Sprint 7.0 plan, verified end-to-end by the
+`shr_arithmetic_i32_sign_extends` and `shr_logical_u32_zero_extends`
+GPU canaries. Required for Phase 7.1+ quant dequant.
 
-- Reduction warp_id: `div.u32 warp_id, tid, 32` could be `shr.u32 warp_id, tid, 5`
-- Fragment helpers (Sprint 6.2, `kaio-core/src/fragment.rs::compute_group_thread_ids`):
-  `div.u32 group_id, tid, 4` + `rem.u32 tig, tid, 4` could be
-  `shr.u32 group_id, tid, 2` + `and.b32 tig, tid, 3`
-
-The driver lowers constant-power-of-two div/rem correctly (no
-correctness issue), but adding proper bitops to `ArithOp` would
-produce cleaner PTX and be useful beyond tensor-core fragment math.
-**Added:** Phase 3 / extended Sprint 6.2 | **Sprint:** Phase 4.6 optimization
+The `div.u32` / `rem.u32` call sites mentioned in the original entry
+(reduction `warp_id`, `compute_group_thread_ids`) have NOT been
+migrated to bitops as part of 7.0 — they're functionally correct and
+the driver collapses them to shift-and-mask at ptxas time. A later
+cleanup sprint can migrate them for PTX readability, but it's not
+blocking any downstream work.
 
 ### `MemoryOp::LdGlobalB128` landed but not wired into any kernel
 

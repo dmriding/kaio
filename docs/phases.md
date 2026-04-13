@@ -207,42 +207,96 @@ then full tiled attention.
 
 ---
 
-## Post-v0.1 Roadmap
+## Phase 6: Tensor Cores & Async Copies ✅
 
-These are future directions, not commitments. Ordered by expected
-impact.
+**Goal:** Add fp16/bf16 type support, tensor core instructions
+(`mma.sync`), and async memory copies (`cp.async`) to `kaio-core`.
+Implement a tensor-core matmul in `kaio-ops`. Target 60%+ of cuBLAS
+sgemm (up from 31% with scalar FMA).
 
-### Phase 6 — Tensor Cores + Async Copies
+**Status:** Complete (v0.2.0, 2026-04-13; polish landed in v0.2.1,
+2026-04-14)
 
-The single biggest performance unlock. Replace scalar FMA with
-`mma.sync` instructions for fp16/bf16 matrix operations — realistically
-gets matmul from 31% to 60-70% of cuBLAS. Paired with `cp.async` for
-Ampere+ double buffering (load next tile while computing current). The
-tiled matmul and attention infrastructure from Phases 4-5 is the
-foundation; this swaps the inner loop.
+**Deliverables:**
 
-### Phase 7 — Quantized Kernels + Training Integration
+- `PtxType::F16` / `PtxType::BF16` + `RegKind::H` / `RegKind::Hb`
+  (packed-half2 register allocator for `mma.sync` fragments)
+- `TensorCoreOp::MmaSync` with `MmaShape::M16N8K16` — emits
+  `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32` (Ampere+ only)
+- `MemoryOp::CpAsync*` variants + `PtxModule::validate()` with
+  `SmTooLow` rejection at emit time for SM-gated features
+- `KaioDevice::load_module(&PtxModule)` as the preferred runtime
+  entrypoint; raw `load_ptx(&str)` deprecated in v0.2.1 (still
+  supported for external PTX research use cases)
+- `kaio_ops::matmul_tc` / `matmul_tc_async` / `matmul_auto_tc` —
+  tensor-core matmul with auto-tuner cache and size-heuristic
+  cache-miss default
+- Three standalone showcase examples (`examples/fused_silu_gate`,
+  `gelu_comparison`, `rms_norm`) that build from a fresh clone
+- Host-level codegen regression tests (6.10 D2) for macro lowering
+  invariants, running on CI without a GPU
+- **Performance:** 82.3% sync / 92.5% async of cuBLAS sgemm at 4096²
+  on RTX 4090 (async past the 90% stretch target — see
+  `docs/performance.md` for the full matrix and apples-to-apples
+  disclaimer)
 
-Two items that serve different audiences but similar complexity.
-**Quantized kernels:** INT8/INT4 dequantize-matmul for efficient
-inference — the operation every local LLM runner needs, currently
-locked behind CUDA C++ in GGUF/GPTQ/AWQ. Depends on tensor cores.
-**Training integration:** Hand-written backward kernels for attention
-and matmul, plus a `kaio-candle` bridge crate implementing candle's
-`CustomOp` trait. Not autodiff — KAIO provides the kernel, the
-framework provides the graph. This is how Triton is actually used:
-you write forward and backward kernels, register them with
-`torch.autograd.Function`, and the framework handles the rest.
+**Sprint Breakdown (actual):**
+| Sprint | Scope | Key Deliverable |
+|--------|-------|-----------------|
+| 6.1 | fp16/bf16 types | `PtxType::F16/BF16`, `RegKind::H/Hb`, `cvt` rounding, `half` crate integration |
+| 6.2 | mma.sync + cp.async in kaio-core | `TensorCoreOp`, `CpAsync`, typed fragments, standalone mma.sync correctness test |
+| 6.3 | Tensor-core matmul (IR API) | Basic `mma.sync` matmul, manual loads, SM 8.0+ (m16n8k16) |
+| 6.4 | Double-buffered matmul | `cp.async` pipeline on top of 6.3 |
+| 6.5 | Integration + auto-tuner | 3-way dispatch (scalar / TC / TC+async), `PtxModule::validate()` gate |
+| 6.6 | TC attention + causal mask | `mma.sync` in FlashAttention inner loops, `selp` for masking |
+| 6.7 | Multi-warp + edge tiles + benchmarks | 64×64 block tile, M/N divisibility lifted, 79.9% sync / 85.1% async of cuBLAS at 4096²; `matmul_tc[_async]` promoted to stable pub |
+| 6.7b | Bank-conflict padding + D10 hoist | Col-stride pad 32→36 B, fragment-loader `(group_id, tig)` hoist, async 92.5% / sync 82.3% (LDG.128 IR primitive landed as unused-future-anchor) |
+| 6.8 | Showcase examples for v0.2.0 | Three standalone Cargo projects under `examples/` |
+| 6.9 | Polish + v0.2.0 publish | CHANGELOG, README, version bump, crates.io |
+| 6.10 | Close open threads | D2 host-level codegen regression tests, D1a macro migration to `load_module`, D1b `load_ptx` deprecation, D3 test-helper env-var hygiene (v0.2.1) |
 
-### Phase 8 — PyO3 Bindings
+**Key Decisions:** IR kernels are internal performance primitives (not
+user-facing); fragments are typed containers, not raw register arrays;
+cp.async is pluggable on top of the sync kernel, not foundational. Full
+reasoning traces in [docs/development/sprints/phase6/](development/sprints/phase6/).
+
+---
+
+## Phase 7: Quantized Kernels & Training Integration
+
+**Goal:** INT8 / INT4 dequantize-matmul for efficient inference — the
+operation every local LLM runner currently reaches for through CUDA C++
+(GGUF / GPTQ / AWQ). Training integration via a `kaio-candle` bridge
+crate layered on top of the forward kernels.
+
+**Status:** In progress (7.0 DSL completeness complete, v0.2.2)
+
+**Depends on:** Phase 6 complete (v0.2.1, 2026-04-14).
+
+See [docs/development/sprints/phase7/phase7_master_plan.md](development/sprints/phase7/phase7_master_plan.md)
+for the detailed sprint breakdown, architectural decisions, and risks.
+
+**Sprint outline (subject to refinement as each sprint is scoped):**
+
+| Sprint | Scope | Status |
+|--------|-------|--------|
+| 7.0 | DSL completeness (bitops + short-circuit `&&` / `\|\|` + compound bitwise assign) + Phase 6 closeout + Phase 7 scaffold | Complete (v0.2.2) |
+| 7.1 | INT8 dequantize-matmul (forward) | Planned |
+| 7.2 | INT4 dequantize-matmul (GPTQ-style packed 4-bit) | Planned |
+| 7.3 | Quant + attention integration | Planned |
+| 7.4 | `kaio-candle` bridge crate (forward + backward kernels via `CustomOp`) | Planned |
+
+---
+
+## Phase 8 — PyO3 Bindings (future)
 
 Thin Python wrapper around `kaio-ops` functions. If KAIO has
-tensor-core matmul and fused attention that works on Windows, Python
-users gain access to GPU kernels without Triton's Linux-only
-constraint. Low implementation effort (PyO3 is straightforward),
-high reach.
+tensor-core matmul, fused attention, and quantized matmul that work
+on Windows, Python users gain access to GPU kernels without Triton's
+Linux-only constraint. Low implementation effort (PyO3 is
+straightforward), high reach.
 
-### Unscoped — Community-Driven
+## Unscoped — Community-Driven
 
 - **Multi-GPU:** Kernel launch across multiple devices. Requires
   NCCL-style communication primitives. Deferred until there's demand.
