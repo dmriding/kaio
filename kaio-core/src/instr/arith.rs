@@ -5,6 +5,12 @@
 //!
 //! Phase 2 (Sprint 2.2): [`Sub`](ArithOp::Sub), [`Mul`](ArithOp::Mul),
 //! [`Div`](ArithOp::Div), [`Rem`](ArithOp::Rem), [`Neg`](ArithOp::Neg).
+//!
+//! Sprint 7.0 bitwise: [`And`](ArithOp::And), [`Or`](ArithOp::Or),
+//! [`Xor`](ArithOp::Xor), [`Shl`](ArithOp::Shl), [`Shr`](ArithOp::Shr),
+//! [`Not`](ArithOp::Not). Shr preserves signed/unsigned distinction
+//! (arithmetic vs logical right shift); all others are typeless (`.b{size}`
+//! or `.pred`).
 
 use std::fmt;
 
@@ -277,6 +283,92 @@ pub enum ArithOp {
         /// PTX type suffix.
         ty: PtxType,
     },
+    /// Bitwise AND: `and{suffix} dst, lhs, rhs;` — suffix is `.b{size}` for
+    /// integers or `.pred` for predicates (typeless on signedness).
+    ///
+    /// Examples:
+    /// - `and.b32 %r0, %r1, %r2;` — bitwise AND on integer registers
+    /// - `and.pred %p0, %p1, %p2;` — predicate AND (emitted by `!` context
+    ///   dispatch and any future branch-free logical combinator)
+    And {
+        /// Destination register.
+        dst: Register,
+        /// Left-hand source operand.
+        lhs: Operand,
+        /// Right-hand source operand.
+        rhs: Operand,
+        /// Operand type — determines suffix via [`PtxType::reg_decl_type`].
+        ty: PtxType,
+    },
+    /// Bitwise OR: `or{suffix} dst, lhs, rhs;` — suffix mirrors `And`.
+    Or {
+        /// Destination register.
+        dst: Register,
+        /// Left-hand source operand.
+        lhs: Operand,
+        /// Right-hand source operand.
+        rhs: Operand,
+        /// Operand type — determines suffix via [`PtxType::reg_decl_type`].
+        ty: PtxType,
+    },
+    /// Bitwise XOR: `xor{suffix} dst, lhs, rhs;` — suffix mirrors `And`.
+    Xor {
+        /// Destination register.
+        dst: Register,
+        /// Left-hand source operand.
+        lhs: Operand,
+        /// Right-hand source operand.
+        rhs: Operand,
+        /// Operand type — determines suffix via [`PtxType::reg_decl_type`].
+        ty: PtxType,
+    },
+    /// Left shift: `shl{suffix} dst, lhs, rhs;` — suffix is `.b{size}`.
+    ///
+    /// Left shift is bit-width-only; PTX does not distinguish signed vs
+    /// unsigned (the bits are the same). The `rhs` shift count operand is
+    /// always treated as `.u32` per PTX ISA §9.7.3 (caller must ensure the
+    /// shift count register is 32-bit).
+    Shl {
+        /// Destination register.
+        dst: Register,
+        /// Value being shifted.
+        lhs: Operand,
+        /// Shift count (PTX requires this operand to be 32-bit).
+        rhs: Operand,
+        /// Operand type — determines suffix via [`PtxType::reg_decl_type`].
+        ty: PtxType,
+    },
+    /// Right shift: `shr{suffix} dst, lhs, rhs;` — suffix is `.s{size}` or
+    /// `.u{size}` per operand signedness (arithmetic vs logical shift).
+    ///
+    /// Rust's `>>` on `i32` is arithmetic (sign-extends), on `u32` is logical
+    /// (zero-extends). The IR must preserve this distinction so quant
+    /// dequantization (Phase 7.1+) on signed INT8 storage produces correct
+    /// sign extension.
+    ///
+    /// The shift count `rhs` is treated as `.u32` per PTX ISA §9.7.3.
+    Shr {
+        /// Destination register.
+        dst: Register,
+        /// Value being shifted.
+        lhs: Operand,
+        /// Shift count (PTX requires this operand to be 32-bit).
+        rhs: Operand,
+        /// Operand type — S32/S64 emit arithmetic shift, U32/U64 emit logical.
+        ty: PtxType,
+    },
+    /// Bitwise NOT: `not{suffix} dst, src;` — suffix is `.b{size}` or `.pred`.
+    ///
+    /// Context-dispatched from the macro's unary `!`: integer types → bitwise
+    /// flip, `Pred` → logical inversion.
+    Not {
+        /// Destination register.
+        dst: Register,
+        /// Source operand.
+        src: Operand,
+        /// Operand type — determines suffix via [`PtxType::reg_decl_type`].
+        ty: PtxType,
+    },
 }
 
 impl Emit for ArithOp {
@@ -374,6 +466,34 @@ impl Emit for ArithOp {
             } => {
                 let mnemonic = format!("selp{}", ty.ptx_suffix());
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, a, b, pred])
+            }
+            ArithOp::And { dst, lhs, rhs, ty } => {
+                // Typeless on signedness: use reg_decl_type for `.b{size}` / `.pred`.
+                let mnemonic = format!("and{}", ty.reg_decl_type());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Or { dst, lhs, rhs, ty } => {
+                let mnemonic = format!("or{}", ty.reg_decl_type());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Xor { dst, lhs, rhs, ty } => {
+                let mnemonic = format!("xor{}", ty.reg_decl_type());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Shl { dst, lhs, rhs, ty } => {
+                // Left shift is typeless on signedness.
+                let mnemonic = format!("shl{}", ty.reg_decl_type());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Shr { dst, lhs, rhs, ty } => {
+                // Right shift preserves signed/unsigned distinction:
+                // ptx_suffix gives `.s32` / `.u32` / `.s64` / `.u64`.
+                let mnemonic = format!("shr{}", ty.ptx_suffix());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
+            }
+            ArithOp::Not { dst, src, ty } => {
+                let mnemonic = format!("not{}", ty.reg_decl_type());
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, src])
             }
         }
     }
@@ -762,6 +882,188 @@ mod tests {
         .emit(&mut w)
         .unwrap();
         assert_eq!(w.finish(), "    rcp.approx.f32 %f0, %f1;\n");
+    }
+
+    // --- Sprint 7.0: Bitwise operators ---
+
+    #[test]
+    fn emit_and_b32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::And {
+            dst: reg(RegKind::R, 0, PtxType::U32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::U32)),
+            rhs: Operand::Reg(reg(RegKind::R, 2, PtxType::U32)),
+            ty: PtxType::U32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    and.b32 %r0, %r1, %r2;\n");
+    }
+
+    #[test]
+    fn emit_and_pred() {
+        // Sprint 7.0 AD3: unary `!` on bool dispatches to ArithOp::Not{ty:Pred},
+        // but the three-operand and.pred variant must also be emittable for
+        // Sprint 7.x short-circuit optimization pass and any future branch-free
+        // logical combinator. Lock the format now.
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::And {
+            dst: reg(RegKind::P, 0, PtxType::Pred),
+            lhs: Operand::Reg(reg(RegKind::P, 1, PtxType::Pred)),
+            rhs: Operand::Reg(reg(RegKind::P, 2, PtxType::Pred)),
+            ty: PtxType::Pred,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    and.pred %p0, %p1, %p2;\n");
+    }
+
+    #[test]
+    fn emit_or_b64() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Or {
+            dst: reg(RegKind::Rd, 0, PtxType::U64),
+            lhs: Operand::Reg(reg(RegKind::Rd, 1, PtxType::U64)),
+            rhs: Operand::Reg(reg(RegKind::Rd, 2, PtxType::U64)),
+            ty: PtxType::U64,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    or.b64 %rd0, %rd1, %rd2;\n");
+    }
+
+    #[test]
+    fn emit_xor_b32_with_immediate() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Xor {
+            dst: reg(RegKind::R, 0, PtxType::U32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::U32)),
+            rhs: Operand::ImmU32(0xFF),
+            ty: PtxType::U32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    xor.b32 %r0, %r1, 255;\n");
+    }
+
+    #[test]
+    fn emit_shl_b32() {
+        // Left shift is typeless on signedness per AD2 — reg_decl_type
+        // collapses S32/U32 to .b32.
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Shl {
+            dst: reg(RegKind::R, 0, PtxType::U32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::U32)),
+            rhs: Operand::ImmU32(4),
+            ty: PtxType::U32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    shl.b32 %r0, %r1, 4;\n");
+    }
+
+    #[test]
+    fn emit_shl_b32_signed_still_typeless() {
+        // Signed S32 input must still emit shl.b32 (not shl.s32) — PTX does
+        // not have signed shl variants.
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Shl {
+            dst: reg(RegKind::R, 0, PtxType::S32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::S32)),
+            rhs: Operand::ImmU32(2),
+            ty: PtxType::S32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    shl.b32 %r0, %r1, 2;\n");
+    }
+
+    #[test]
+    fn emit_shr_u32_logical() {
+        // AD2 direct canary: unsigned right shift → shr.u32 (logical, zero-extend).
+        // Paired with emit_shr_s32_arithmetic — these two tests together verify
+        // the signed/unsigned dispatch that quant INT8 dequant depends on.
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Shr {
+            dst: reg(RegKind::R, 0, PtxType::U32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::U32)),
+            rhs: Operand::ImmU32(1),
+            ty: PtxType::U32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    shr.u32 %r0, %r1, 1;\n");
+    }
+
+    #[test]
+    fn emit_shr_s32_arithmetic() {
+        // AD2 direct canary: signed right shift → shr.s32 (arithmetic, sign-extend).
+        // If this test ever emits shr.u32 or shr.b32, the IR-level half of the
+        // signedness dispatch has regressed and Phase 7.1+ INT8 dequant will
+        // silently zero-extend negative packed values.
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Shr {
+            dst: reg(RegKind::R, 0, PtxType::S32),
+            lhs: Operand::Reg(reg(RegKind::R, 1, PtxType::S32)),
+            rhs: Operand::ImmU32(1),
+            ty: PtxType::S32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    shr.s32 %r0, %r1, 1;\n");
+    }
+
+    #[test]
+    fn emit_shr_u64_logical() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Shr {
+            dst: reg(RegKind::Rd, 0, PtxType::U64),
+            lhs: Operand::Reg(reg(RegKind::Rd, 1, PtxType::U64)),
+            rhs: Operand::ImmU32(4),
+            ty: PtxType::U64,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    shr.u64 %rd0, %rd1, 4;\n");
+    }
+
+    #[test]
+    fn emit_not_b32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Not {
+            dst: reg(RegKind::R, 0, PtxType::U32),
+            src: Operand::Reg(reg(RegKind::R, 1, PtxType::U32)),
+            ty: PtxType::U32,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    not.b32 %r0, %r1;\n");
+    }
+
+    #[test]
+    fn emit_not_pred() {
+        // Logical not on predicate — emitted when unary `!` is applied to a
+        // bool-typed expression (e.g. `!(a < b)`).
+        let mut w = PtxWriter::new();
+        w.indent();
+        ArithOp::Not {
+            dst: reg(RegKind::P, 0, PtxType::Pred),
+            src: Operand::Reg(reg(RegKind::P, 1, PtxType::Pred)),
+            ty: PtxType::Pred,
+        }
+        .emit(&mut w)
+        .unwrap();
+        assert_eq!(w.finish(), "    not.pred %p0, %p1;\n");
     }
 
     #[test]
