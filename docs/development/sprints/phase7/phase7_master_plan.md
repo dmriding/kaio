@@ -128,7 +128,9 @@ perf win immediately; training users wait for backward.
 | Sprint | Scope | Key Deliverable |
 |--------|-------|-----------------|
 | 7.0 | DSL completeness + Phase 6 closeout + Phase 7 scaffold | Bitops, short-circuit `&&`/`\|\|`, compound bitwise assign, phases.md Phase 6 promotion, phase7 master plan (this file) — v0.2.1 (combined with Sprint 6.10 in the same release) |
-| 7.1 | INT8 dequantize-matmul | `kaio_ops::matmul_int8` symmetric INT8 × f16 → f32, perf target TBD at sprint kickoff |
+| 7.0.5 | Pre-7.1 ergonomics fast-track | Debug-build performance note (A2), proc-macro error-span audit + 3 fixes (A4), consolidated `docs/debugging.md` (B3) — v0.2.2 |
+| 7.1 | INT8 dequantize-matmul | `kaio_ops::matmul_int8` symmetric INT8 × f16 → f32, perf target TBD at sprint kickoff. **Folds in integer-arithmetic DSL support** — mixed-width `u8×u8→u16` / `i8×i8→i32` is a 7.1 prerequisite, not a separate deliverable |
+| 7.1.5 (planned) | Warp + block reductions in DSL | Convergence-doc D1/D2 — `warp_reduce_sum/max/min`, `block_reduce_sum/max` as `#[gpu_kernel]` builtins. Standalone between-quant-milestones sprint |
 | 7.2 | INT4 dequantize-matmul | `kaio_ops::matmul_int4` GPTQ-style packed 4-bit + group scales |
 | 7.3 | Quant + attention integration | Dequant-on-the-fly QKV projection wired into FlashAttention |
 | 7.4 | `kaio-candle` bridge crate | Forward-kernel `CustomOp` bindings for core `kaio-ops` operations |
@@ -136,7 +138,12 @@ perf win immediately; training users wait for backward.
 ## Dependency Graph
 
 ```
-7.0 (DSL completeness) -> 7.1 (INT8 matmul) -> 7.2 (INT4 matmul)
+7.0 (DSL completeness) -> 7.0.5 (ergonomics) -> 7.1 (INT8 matmul)
+                                                    |
+                                                    +-> 7.1.5 (reductions, optional between quant milestones)
+                                                    |
+                                                    v
+                                               7.2 (INT4 matmul)
                                                     |
                                                     v
                                                7.3 (quant + attention)
@@ -146,10 +153,58 @@ perf win immediately; training users wait for backward.
 ```
 
 7.0 blocks 7.1 because dequant is literally impossible without
-bitops. 7.2 benefits from 7.1's infrastructure (dequant kernel
-skeleton, tile-scale handling). 7.3 needs 7.1 or 7.2 landed. 7.4 is
-additive — depends on whichever forward kernels exist at its
-sprint kickoff.
+bitops. 7.0.5 is a narrow pre-7.1 ergonomics sprint — not blocking on
+correctness, but on the adoption-friction argument described below.
+7.2 benefits from 7.1's infrastructure (dequant kernel skeleton,
+tile-scale handling). 7.3 needs 7.1 or 7.2 landed. 7.4 is additive —
+depends on whichever forward kernels exist at its sprint kickoff.
+
+## Adoption-ergonomics sequencing
+
+Sprint 7.0 ship coincided with external feedback converging on a thesis:
+*trust and ergonomics gate adoption more than feature count*. The
+feedback flagged a set of potential items across trust-and-first-
+impressions (module caching, debug-mode guardrails, error-message
+quality, first-run path), discoverability (feature matrix, kernel
+programming model doc, debugging guide, example quality), runtime
+ergonomics (higher-level buffer API, launch syntax, struct args), and
+kernel primitives (warp / block reductions, atomics, integer
+arithmetic, dynamic shared memory).
+
+The thesis has real weight. The individual items need to be weighted
+against actual codebase state and sprint cost. This plan treats the
+feedback as *signal* — informs priority, does not dictate scope. Here
+is where each flagged item lands:
+
+### Folded into Sprint 7.0.5 (pre-7.1 ergonomics fast-track)
+- **Debug-build performance note** — one-time stderr warning in `KaioDevice::new` when running in a debug build. Prevents the common "benchmarked in debug, bounced" adoption failure.
+- **Proc-macro error spans** — audit of 63 error sites; 3 identified as potentially improvable. Implementation showed the fixes are defensive (unreachable paths and call-site-equivalent fallbacks) — the honest finding is that the macro's span handling is already quite good. Documented as a finding rather than a deliverable win.
+- **Consolidated debugging guide** — new `docs/debugging.md` aggregating scattered env-var docs, `compute-sanitizer` usage, tolerance guidance, troubleshooting flowchart.
+- **`cargo xtask` repo tooling** — `cargo xtask showcase` / `bench` / `all` from the repo root. Load-bearing for first-impression UX. Emerged during the sprint as the cargo-native pivot away from any justfile-as-first-impression approach.
+- **docs.rs explicit target list** — preserves Windows visibility on docs.rs after its 2026-05-01 default-target change.
+
+### Folded into 7.1 INT8 matmul scope (not a separate item)
+- **Integer arithmetic in the DSL** — mixed-width `u8×u8→u16` and `i8×i8→i32` are INT8 matmul prerequisites. Treating as a separate sprint-level deliverable would falsely imply 7.1 can happen without them.
+
+### Planned as standalone sprint (7.1.5 or 7.2.5)
+- **Warp-level reductions** (`warp_reduce_sum`, `warp_reduce_max`, `warp_reduce_min` + raw `shfl_sync_*`)
+- **Block-level reductions** in DSL (builds on warp reductions + shared memory + `bar_sync`)
+
+Both are substantial enough to deserve their own sprint. Sequenced between quant milestones rather than inside them to keep the quant story cohesive and the reductions sprint focused.
+
+### Deferred, with rationale
+- **Persistent module cache** — Sprint 6.10 D1a *intentionally* removed `OnceLock<String>` PTX caching so user kernels flow through `PtxModule::validate()` on every launch. Reintroducing a cache is not "add a cache" — it's "design a cache that doesn't re-open the trust-boundary gap." Needs a dedicated design sprint. Post-7.1.
+- **Feature / compatibility matrix doc** — living docs rot. Ride along with each sprint's DSL additions; pair with authoritative `trybuild` compile-fail fixtures. Not a single-sprint deliverable.
+- **Kernel programming model doc** — partly covered by existing `docs/implementation.md`; expand incrementally.
+- **Example-quality upgrade (tutorial-style commentary)** — continuous improvement, not a single-sprint deliverable.
+- **Higher-level buffer API (`GpuTensor`)** — post-7.1. Natural interop point for the 7.4 candle bridge. Keep thin, don't build a tensor library.
+- **Atomics** — real feature but not on the quant critical path. Standalone sprint when a quant / histogram / scatter-add kernel needs it.
+- **Dynamic shared memory** — fold into 7.1 or 7.1.5 if the INT8 matmul tile sizes need runtime configuration (probably at auto-tuner time, not day-one INT8).
+
+### Rejected
+- **Builder-pattern launch syntax** — feature-negative. The current `kernel::launch(&device, &x, &mut y, n)?` IS the minimal form. Adding `.grid()` + `.block()` + `.args()` + `.run()` for the same action is more boilerplate, not less. Grid/block dims are already declared in the `#[gpu_kernel(block_size = N)]` attribute; re-specifying them at launch site is error-prone duplication.
+- **`repr(C)` struct kernel arguments** — Phase 8+ at earliest. Deeper macro change than the current parameter-passing model; evaluate complexity vs payoff later.
+- **Adopting the full set of ergonomics feedback upfront** — too long a delay before quant. Three narrow items (debug-mode note, error spans, debugging guide) fit in a pre-7.1 sprint (7.0.5); more than that is an ergonomics phase masquerading as a sprint.
 
 ## Success Criteria
 

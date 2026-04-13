@@ -269,9 +269,21 @@ operation every local LLM runner currently reaches for through CUDA C++
 (GGUF / GPTQ / AWQ). Training integration via a `kaio-candle` bridge
 crate layered on top of the forward kernels.
 
-**Status:** In progress (7.0 DSL completeness complete, v0.2.1)
+**Status:** In progress (7.0 DSL completeness complete, v0.2.1; 7.0.5
+ergonomics fast-track in progress)
 
 **Depends on:** Phase 6 complete (v0.2.1, 2026-04-14).
+
+**On sequencing (adoption-friction framing):** the headline Phase 7
+feature is quantized matmul. But the users who would be attracted by
+INT4 kernels don't exist in the KAIO ecosystem yet; the users who
+would be *repelled* by rough ergonomics are exactly the ones Phase 7
+is trying to attract. Phase 7 interleaves small ergonomics sprints
+(7.0.5) with the quant milestones (7.1, 7.2) rather than delivering
+quant into an ecosystem where the first-run experience is rough. See
+the adoption-ergonomics sequencing section of
+[phase7_master_plan.md](development/sprints/phase7/phase7_master_plan.md)
+for which ergonomics items land where, and why.
 
 See [docs/development/sprints/phase7/phase7_master_plan.md](development/sprints/phase7/phase7_master_plan.md)
 for the detailed sprint breakdown, architectural decisions, and risks.
@@ -281,7 +293,9 @@ for the detailed sprint breakdown, architectural decisions, and risks.
 | Sprint | Scope | Status |
 |--------|-------|--------|
 | 7.0 | DSL completeness (bitops + short-circuit `&&` / `\|\|` + compound bitwise assign) + Phase 6 closeout + Phase 7 scaffold | Complete (v0.2.1, combined with Sprint 6.10) |
-| 7.1 | INT8 dequantize-matmul (forward) | Planned |
+| 7.0.5 | Pre-7.1 ergonomics fast-track — debug-build performance note, proc-macro error-span audit, consolidated debugging guide | In progress (v0.2.2) |
+| 7.1 | INT8 dequantize-matmul (forward) — folds in integer-arithmetic DSL support | Planned |
+| 7.1.5 | Warp + block reductions in DSL (optional, between quant milestones) | Planned |
 | 7.2 | INT4 dequantize-matmul (GPTQ-style packed 4-bit) | Planned |
 | 7.3 | Quant + attention integration | Planned |
 | 7.4 | `kaio-candle` bridge crate (forward + backward kernels via `CustomOp`) | Planned |

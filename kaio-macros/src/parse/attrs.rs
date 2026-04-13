@@ -3,6 +3,7 @@
 
 use proc_macro2::TokenStream;
 use syn::parse::{Parse, ParseStream};
+use syn::spanned::Spanned;
 use syn::{Ident, LitInt, Token};
 
 use crate::kernel_ir::KernelConfig;
@@ -73,11 +74,17 @@ impl Parse for GpuKernelAttrs {
 
 /// Parse the attribute token stream into a validated `KernelConfig`.
 pub fn parse_kernel_config(attr: TokenStream) -> syn::Result<KernelConfig> {
+    // Sprint 7.0.5 A4 fix #1: capture the attribute span BEFORE parsing so
+    // the "block_size is required" error points at the user's
+    // `#[gpu_kernel(...)]` attribute rather than at the macro invocation /
+    // call_site. When the attribute is empty (`#[gpu_kernel]`), `attr` is
+    // an empty TokenStream whose span is still the attribute itself.
+    let attr_span = attr.span();
     let attrs: GpuKernelAttrs = syn::parse2(attr)?;
 
     let (block_size, block_size_span) = attrs.block_size.ok_or_else(|| {
         syn::Error::new(
-            proc_macro2::Span::call_site(),
+            attr_span,
             "`block_size` is required in `#[gpu_kernel(...)]`",
         )
     })?;

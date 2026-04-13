@@ -113,7 +113,7 @@ pub fn lower_expr(
         }
 
         // Integer literal: allocate register, mov immediate
-        KernelExpr::LitInt(value, ty, _span) => {
+        KernelExpr::LitInt(value, ty, span) => {
             let dst = ctx.fresh_reg();
             let ptx_ty = ctx.ptx_type_tokens(ty);
 
@@ -136,8 +136,12 @@ pub fn lower_expr(
                     quote! { Operand::ImmU64(#v) }
                 }
                 _ => {
+                    // Sprint 7.0.5 A4 fix #2: preserve the literal's own span
+                    // (formerly discarded as `_span`) so the error points at
+                    // the user's offending literal rather than the macro
+                    // invocation / call_site.
                     return Err(syn::Error::new(
-                        Span::call_site(),
+                        *span,
                         format!("integer literal cannot have type {}", ty.display_name()),
                     ));
                 }
@@ -155,7 +159,7 @@ pub fn lower_expr(
         }
 
         // Float literal: allocate register, mov immediate
-        KernelExpr::LitFloat(value, ty, _span) => {
+        KernelExpr::LitFloat(value, ty, span) => {
             let dst = ctx.fresh_reg();
             let ptx_ty = ctx.ptx_type_tokens(ty);
 
@@ -169,8 +173,12 @@ pub fn lower_expr(
                     quote! { Operand::ImmF64(#v) }
                 }
                 _ => {
+                    // Sprint 7.0.5 A4 fix #3: preserve the literal's own span
+                    // (formerly discarded as `_span`) so the error points at
+                    // the user's offending literal rather than the macro
+                    // invocation / call_site.
                     return Err(syn::Error::new(
-                        Span::call_site(),
+                        *span,
                         format!("float literal cannot have type {}", ty.display_name()),
                     ));
                 }

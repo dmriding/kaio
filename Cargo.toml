@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["kaio-core", "kaio-runtime", "kaio-macros", "kaio", "kaio-ops"]
+members = ["kaio-core", "kaio-runtime", "kaio-macros", "kaio", "kaio-ops", "xtask"]
 exclude = ["examples/*"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Dave Riding <david@netviper.gr>"]

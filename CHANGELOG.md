@@ -10,6 +10,21 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-04-14 — Sprint 7.0.5: Ergonomics fast-track before Phase 7.1
+
+Sprint 7.0.5 is a narrow pre-7.1 ergonomics sprint. It ships a targeted set of adoption-friction fixes that set the table for first-time users arriving via the quant-kernels story. Bigger ergonomics items (module cache, buffer API, reductions, atomics) stay deferred — see [`docs/development/sprints/phase7/phase7_master_plan.md`](docs/development/sprints/phase7/phase7_master_plan.md) for sequencing.
+
+### Added — Sprint 7.0.5
+- **D1 (A2)** — One-time debug-build performance note. `KaioDevice::new` emits `[kaio] Note: debug build — GPU kernel performance is ~10-20x slower than --release. ... Correctness is unaffected. Set KAIO_SUPPRESS_DEBUG_WARNING=1 to silence.` on first call in a debug binary. Zero cost in release (`cfg!(debug_assertions)` folds to `false`). Prevents the common "benchmarked in debug, bounced" adoption failure. Message is performance-framed only — correctness testing in debug remains trustworthy.
+- **D3 (B3)** — New [`docs/debugging.md`](docs/debugging.md) as the single entry point for diagnosis: troubleshooting flowchart, consolidated env-var reference, `compute-sanitizer` usage, tolerance-choice guidance for floating-point verification, PTX-stats interpretation, common-errors quick reference. README + `docs/index.md` link to it.
+- **D5** — New [`cargo xtask`](xtask/) repo-tooling binary. `cargo xtask showcase` runs all three standalone examples from the repo root with no `cd`; `cargo xtask bench` runs the matmul tensor-core benchmark; `cargo xtask all` runs both. Continue-on-error semantics with a pass/fail summary. `.cargo/config.toml` alias makes `cargo xtask` a single verb. README "Try KAIO in 30 seconds" section pivots to use this.
+- **D6** — `[package.metadata.docs.rs] targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]` in all 5 published crates. docs.rs changed its default on 2026-05-01 to build only one target; this preserves KAIO's Windows-support visibility on docs.rs.
+
+### Changed — Sprint 7.0.5
+- **D2 (A4)** — Proc-macro error spans: fixed three identified sites (`kaio-macros/src/parse/attrs.rs` missing-block_size, `kaio-macros/src/lower/mod.rs` LitInt and LitFloat type mismatches) to use specific spans instead of `Span::call_site()`. **Honest finding**: audit of 63 error sites identified only these 3 as potentially improvable, and investigation showed the fixes are defensive (LitInt/LitFloat paths are unreachable per parser type-gating; `attr.span()` vs `call_site()` resolves to the same location for empty attributes). The macro's span handling is already quite good. The fixes stand on principle with zero cost.
+- **D4** — [`docs/phases.md`](docs/phases.md) Phase 7 intro gains adoption-friction-rent framing. [`docs/development/sprints/phase7/phase7_master_plan.md`](docs/development/sprints/phase7/phase7_master_plan.md) adds an adoption-ergonomics sequencing section explicitly mapping each identified feedback item to its landing sprint (or its deferral / rejection with rationale). Sprint breakdown gains 7.0.5 and 7.1.5 (reductions) rows.
+- README limitations section updated. "Try KAIO in 30 seconds" section added as the first action-oriented surface.
+
 ## [0.2.1] — 2026-04-14 — Sprint 6.10 + 7.0: Close open threads + DSL completeness
 
 Sprint 6.10 landed on `main` without a version bump; Sprint 7.0 picked

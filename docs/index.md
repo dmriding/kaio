@@ -69,10 +69,13 @@ kaio/
 | Document | Description |
 |----------|-------------|
 | [index.md](index.md) | This file — project overview and architecture |
+| [debugging.md](debugging.md) | Debugging guide — env vars, troubleshooting flowchart, compute-sanitizer, silent-NaN diagnosis |
+| [performance.md](performance.md) | PTX inspection tools, benchmark methodology, perf tuning |
 | [implementation.md](implementation.md) | Technical implementation details per layer |
 | [phases.md](phases.md) | Development phases, timelines, and deliverables |
 | [success-criteria.md](success-criteria.md) | Quality gates and success metrics per phase |
 | [testing-strategy.md](testing-strategy.md) | Testing philosophy, layers, and infrastructure |
+| [limitations.md](limitations.md) | What KAIO does not do, and why |
 | [development/sprints/](development/sprints/) | Per-phase sprint logs with decision records |
 
 ## Key Dependencies

@@ -10,6 +10,13 @@ description = "Proc macro crate for KAIO — provides #[gpu_kernel] attribute ma
 keywords = ["gpu", "cuda", "ptx", "kernel", "macro"]
 categories = ["compilers", "development-tools::procedural-macro-helpers"]
 
+# See kaio-core/Cargo.toml for the docs.rs targets rationale.
+[package.metadata.docs.rs]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
 [lib]
 proc-macro = true
 

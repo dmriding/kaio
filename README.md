@@ -27,6 +27,22 @@ CUDA C++ because their framework doesn't support them.
   Rust to PTX at build time. Type-safe kernel signatures catch dtype
   mismatches at compile time, not as silent GPU corruption at runtime.
 
+## Try KAIO in 30 seconds
+
+Clone the repo, run one command, see three real ML kernels build and execute on your GPU:
+
+```sh
+git clone https://github.com/dmriding/kaio.git
+cd kaio
+cargo xtask showcase
+```
+
+You'll see each of `fused_silu_gate`, `gelu_comparison`, and `rms_norm` compile, launch, verify correctness against a CPU reference, and report median latency. Total wall time: ~45 seconds on a warm build.
+
+Want the performance pitch instead? `cargo xtask bench` runs the tensor-core matmul benchmark against cuBLAS sgemm across five sizes. Or `cargo xtask all` for both. `cargo xtask --help` for the full tooling surface.
+
+Requires an NVIDIA GPU with an installed display driver (NVIDIA 525 or newer — any standard Game Ready or Studio driver works). No CUDA toolkit install needed.
+
 ## Quick Start
 
 Requires an NVIDIA GPU (SM 7.0+, Volta or newer) with an installed
@@ -90,11 +106,10 @@ fn fused_silu_gate(x: &[f32], gate: &[f32], out: &mut [f32], n: u32) {
 }
 ```
 
-Runnable as a standalone Cargo project from
-[`examples/fused_silu_gate/`](examples/fused_silu_gate/):
+Run it from the repo root with no directory changes:
 
 ```
-$ cd examples/fused_silu_gate && cargo run --release
+$ cargo xtask showcase silu
 
 === fused_silu_gate ===
 Input size:        1048576 elements
@@ -102,13 +117,15 @@ Correctness:       PASS  (max_abs_err = 1.49e-8)
 Median latency:    188.8 μs  (of 100 timed runs, 5 warm-ups skipped)
 ```
 
-Three standalone showcases ship in the repo:
+Or run all three showcases in sequence with `cargo xtask showcase`:
 [fused SiLU-gate](examples/fused_silu_gate/),
 [exact vs fast GELU](examples/gelu_comparison/),
 [single-block RMSNorm](examples/rms_norm/). Each is a complete
-standalone project with correctness + timing; the GELU comparison's
-README explains why kernel fusion matters more than arithmetic
-optimization for ML workloads (the bandwidth-bound teaching moment).
+standalone project with correctness + timing (with its own `Cargo.toml`
+so you can copy the directory out of the repo as a reference for your
+own kernel); the GELU comparison's README explains why kernel fusion
+matters more than arithmetic optimization for ML workloads (the
+bandwidth-bound teaching moment).
 
 ## When to use KAIO
 
@@ -322,6 +339,17 @@ floor reflects edition-2024 features and const-evaluation patterns used
 in kernel tile-layout computation. No CUDA toolkit is needed to build
 — KAIO resolves the NVIDIA driver at runtime via dynamic loading
 (`nvcuda.dll` on Windows, `libcuda.so` on Linux).
+
+## Debugging
+
+When something goes wrong — launch errors, silent NaN, unexpectedly slow
+performance — [`docs/debugging.md`](docs/debugging.md) is the single
+entry point. It covers the env vars (`KAIO_DUMP_PTX`, `KAIO_PTX_STATS`,
+`KAIO_PTX_ANNOTATE`, `KAIO_SM_TARGET`, `KAIO_TUNE_CACHE`,
+`KAIO_SUPPRESS_DEBUG_WARNING`), the async-launch error model,
+`compute-sanitizer` usage for silent-corruption diagnosis, tolerance
+guidance for numerical verification, and a troubleshooting flowchart
+for "did it compile → launch → produce right output?"
 
 ## Test coverage
 
