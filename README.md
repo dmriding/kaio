@@ -323,6 +323,17 @@ in kernel tile-layout computation. No CUDA toolkit is needed to build
 — KAIO resolves the NVIDIA driver at runtime via dynamic loading
 (`nvcuda.dll` on Windows, `libcuda.so` on Linux).
 
+## Debugging
+
+When something goes wrong — launch errors, silent NaN, unexpectedly slow
+performance — [`docs/debugging.md`](docs/debugging.md) is the single
+entry point. It covers the env vars (`KAIO_DUMP_PTX`, `KAIO_PTX_STATS`,
+`KAIO_PTX_ANNOTATE`, `KAIO_SM_TARGET`, `KAIO_TUNE_CACHE`,
+`KAIO_SUPPRESS_DEBUG_WARNING`), the async-launch error model,
+`compute-sanitizer` usage for silent-corruption diagnosis, tolerance
+guidance for numerical verification, and a troubleshooting flowchart
+for "did it compile → launch → produce right output?"
+
 ## Test coverage
 
 **94.8% line coverage** across the 17,735-line workspace (925 lines
