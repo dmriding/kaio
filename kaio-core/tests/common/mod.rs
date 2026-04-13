@@ -527,3 +527,99 @@ pub fn build_ld_global_b128_ptx() -> String {
     module.emit(&mut w).unwrap();
     w.finish()
 }
+
+/// Build a minimal kernel exercising every Sprint 7.0 bitwise ArithOp variant
+/// (And / Or / Xor / Shl / Shr signed / Shr unsigned / Not) so ptxas_verify
+/// catches any malformed emit before the macro-level lowering lands in D2.
+///
+/// Takes `sm` as a parameter (D3-style clean contract) — no internal
+/// `KAIO_SM_TARGET` mutation.
+#[allow(dead_code)]
+pub fn build_bitops_ptx(sm: &str) -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("bitops_smoke");
+
+    kernel.add_param(PtxParam::scalar("a", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("b", PtxType::U32));
+
+    let r_a = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_a,
+        param_name: "a".to_string(),
+        ty: PtxType::U32,
+    }));
+    let r_b = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_b,
+        param_name: "b".to_string(),
+        ty: PtxType::U32,
+    }));
+
+    // and.b32
+    let r_and = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::And {
+        dst: r_and,
+        lhs: Operand::Reg(r_a),
+        rhs: Operand::Reg(r_b),
+        ty: PtxType::U32,
+    }));
+    // or.b32
+    let r_or = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Or {
+        dst: r_or,
+        lhs: Operand::Reg(r_a),
+        rhs: Operand::Reg(r_b),
+        ty: PtxType::U32,
+    }));
+    // xor.b32
+    let r_xor = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Xor {
+        dst: r_xor,
+        lhs: Operand::Reg(r_a),
+        rhs: Operand::Reg(r_b),
+        ty: PtxType::U32,
+    }));
+    // shl.b32 with immediate shift
+    let r_shl = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Shl {
+        dst: r_shl,
+        lhs: Operand::Reg(r_a),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    // shr.u32 (logical right shift)
+    let r_shr_u = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Shr {
+        dst: r_shr_u,
+        lhs: Operand::Reg(r_a),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    // shr.s32 (arithmetic right shift) — signed type, same register space.
+    // This is the AD2 canary: if ty: S32 silently becomes shr.u32, quant
+    // dequant on signed INT8 will zero-extend negative packed values.
+    let r_shr_s = alloc.alloc(PtxType::S32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Shr {
+        dst: r_shr_s,
+        lhs: Operand::Reg(r_a),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::S32,
+    }));
+    // not.b32
+    let r_not = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Not {
+        dst: r_not,
+        src: Operand::Reg(r_a),
+        ty: PtxType::U32,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new(sm);
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}

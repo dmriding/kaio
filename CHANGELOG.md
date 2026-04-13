@@ -10,8 +10,26 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-04-14 — Sprint 6.10 + 7.0: Close open threads + DSL completeness
+
+Sprint 6.10 landed on `main` without a version bump; Sprint 7.0 picked
+up the DSL completeness work in the same patch-release window.
+Publishing them together as v0.2.1.
+
+### Added — Sprint 7.0 (DSL completeness + Phase 6 closeout + Phase 7 scaffold)
+- **D1** — Six new `ArithOp` variants in `kaio-core`: `And`, `Or`, `Xor`, `Shl`, `Shr`, `Not`. `Shr` preserves signed/unsigned distinction per operand type (`shr.s32` for `i32`, `shr.u32` for `u32`) so Phase 7.1+ quant dequantization produces correct arithmetic vs logical shifts on signed packed values. All others use typeless `.b{size}` / `.pred` suffix. 11 emit unit tests + `ptxas_verify_bitops` integration test (now 7/7 ptxas_verify tests).
+- **D2** — `#[gpu_kernel]` macro now lowers bitwise binary operators (`&`, `|`, `^`, `<<`, `>>`) and unary NOT (`!`). Unary `!` context-dispatches on source type: integer → bitwise NOT (`not.b32` / `not.b64`), `bool` → logical NOT on predicate (`not.pred`). Non-integer non-bool operands to bitwise / `!` produce clear compile errors. Six macro-level tests including signed/unsigned `Shr` round-trip canaries.
+- **D3** — Compound bitwise assignment in `#[gpu_kernel]`: `&=`, `|=`, `^=`, `<<=`, `>>=`. Works on scalar and indexed lvalues (`arr[i] |= mask`). Rides the existing `IndexAssign` desugaring path — no new IR statement type.
+- **D4** — Short-circuit `&&` / `||` in kernel bodies, Rust-faithful semantics. `if i < n && arr[i] > 0 { ... }` correctly skips the `arr[i]` read when `i >= n` (bounds-guarded access pattern). Two lowering paths: branch-direct inside `if` conditions (no intermediate predicate register), materialized `.pred` result in expression position (`let mask = a && b;`). Label allocation handles nested / interleaved cases (`(a && b) || (c && d)`). 17 new GPU round-trip tests across bitops, compound bitops, and short-circuit paths; 6 codegen regression tests with named mutation canaries.
+- **Phase 6 closeout** — `docs/phases.md` Phase 6 promoted from "Post-v0.1 Roadmap / not a commitment" to fully documented ✅ section matching Phase 4/5 format (Status / Deliverables / Sprint Breakdown / Key Decisions / Performance). `docs/success-criteria.md` gained a Phase 6 section covering the 10 sprints (6.1–6.10 plus 6.7b) with measured outcomes.
+- **Phase 7 scaffold** — `docs/development/sprints/phase7/phase7_master_plan.md` + `sprint_7_0.md` land the structure for Phase 7 quantized-kernels work. Master plan mirrors the Phase 5 / Phase 6 template (Architectural Constraints / Decisions / Sprint Breakdown / Success Criteria / Risks).
+
 ### Added — Sprint 6.10 (Close open threads)
 - **D2** — Four host-level codegen regression tests in `kaio-macros` (no GPU required): `launch_wrapper_emits_correct_block_dim_1d` / `_2d`, `shared_memory_lowering_emits_shared_addr_pattern`, `reduction_lowering_uses_named_symbol`, `launch_wrapper_threads_compute_capability_into_module_build`. CI can now catch macro codegen regressions without a GPU runner. Each test has a regression canary comment; one mutation verified end-to-end.
+
+### Changed — Sprint 7.0
+- `CHANGELOG.md` duplicate `[0.2.0]` header artifact removed.
+- `docs/development/tech_debt.md` — three DSL items marked **RESOLVED Sprint 7.0**: `&&` / `||` logical operators, compound assignment for shared memory (bitwise variants; arithmetic already worked in Phase 3), `ArithOp::Shr / Shl / And / Or` bitops.
 
 ### Changed — Sprint 6.10
 - **D1a** — `#[gpu_kernel]` macro-generated `launch()` now uses `device.load_module(&PtxModule)` instead of `device.load_ptx(&str)`. The macro threads `device.info().compute_capability` through to a `build_module(sm: &str) -> PtxModule` helper. User-authored kernels now flow through `PtxModule::validate()` before ptxas — SM mismatches surface as structured `KaioError::Validation` instead of cryptic ptxas errors. `#[gpu_kernel]` user API is unchanged.
@@ -21,8 +39,6 @@ Updated at phase completion. Per-sprint detail lives in
 
 ### Deprecated — Sprint 6.10 D1b
 - `KaioDevice::load_ptx(&str)` is `#[deprecated(since = "0.2.1", note = "use load_module(&PtxModule) — runs PtxModule::validate() for readable SM-mismatch errors")]`. Public API preserved (not removed); raw-PTX use cases (external PTX files, hand-written PTX research) remain supported. Migration-guide rustdoc added with before/after example.
-
-## [0.2.0] — 2026-04-13 — Phase 6: Tensor Cores & Async Copies
 
 ## [0.2.0] — 2026-04-13 — Phase 6: Tensor Cores & Async Copies
 

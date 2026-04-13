@@ -5,6 +5,7 @@ pub mod arith;
 pub mod builtins;
 pub mod cast;
 pub mod compare;
+pub mod logical;
 pub mod memory;
 pub mod params;
 
@@ -210,6 +211,31 @@ pub fn lower_expr(
                     compare::lower_comparison(ctx, op, &lhs_reg, &rhs_reg, &lhs_ty);
                 let combined = quote! { #lhs_tokens #rhs_tokens #cmp_tokens };
                 Ok((pred, KernelType::Bool, combined))
+            } else if op.is_bitwise() {
+                // Sprint 7.0 D2: bitwise binops. Shr signedness is preserved by
+                // lhs_ty flowing through to ArithOp::Shr (see AD2 canary tests
+                // in kaio-core/src/instr/arith.rs + lower/arith.rs).
+                let (lhs_reg, lhs_ty, lhs_tokens) = lower_expr(ctx, lhs)?;
+                let (rhs_reg, _rhs_ty, rhs_tokens) = lower_expr(ctx, rhs)?;
+                if !lhs_ty.is_integer() {
+                    return Err(syn::Error::new(
+                        *span,
+                        format!(
+                            "bitwise operator {op:?} requires integer operands, got {}",
+                            lhs_ty.display_name()
+                        ),
+                    ));
+                }
+                let (dst, op_tokens) = arith::lower_bitop(ctx, op, &lhs_reg, &rhs_reg, &lhs_ty);
+                let combined = quote! { #lhs_tokens #rhs_tokens #op_tokens };
+                Ok((dst, lhs_ty, combined))
+            } else if op.is_logical() {
+                // Sprint 7.0 D4: short-circuit && / || in expression position.
+                // The if-condition branch-direct form is handled in the
+                // KernelStmt::If arm via pattern detection — falling through
+                // to here means we're nested / in a let / returning a bool.
+                let (p_out, tokens) = logical::lower_logical_expr(ctx, op, lhs, rhs)?;
+                Ok((p_out, KernelType::Bool, tokens))
             } else {
                 Err(syn::Error::new(
                     *span,
@@ -218,7 +244,7 @@ pub fn lower_expr(
             }
         }
 
-        // Unary negation
+        // Unary negation / NOT
         KernelExpr::UnaryOp { op, expr, span } => match op {
             UnaryOpKind::Neg => {
                 let (src_reg, src_ty, src_tokens) = lower_expr(ctx, expr)?;
@@ -226,10 +252,25 @@ pub fn lower_expr(
                 let combined = quote! { #src_tokens #neg_tokens };
                 Ok((dst, src_ty, combined))
             }
-            UnaryOpKind::Not => Err(syn::Error::new(
-                *span,
-                "logical not (`!`) lowering not yet implemented",
-            )),
+            UnaryOpKind::Not => {
+                // Sprint 7.0 D2 AD3: context-dispatch on source type.
+                // - Integer (I32/U32/I64/U64) → bitwise not (emits not.b{size})
+                // - Bool → logical not on predicate (emits not.pred)
+                // Any other type is an error — `!` doesn't make sense on floats.
+                let (src_reg, src_ty, src_tokens) = lower_expr(ctx, expr)?;
+                if !src_ty.is_integer() && src_ty != KernelType::Bool {
+                    return Err(syn::Error::new(
+                        *span,
+                        format!(
+                            "unary `!` requires integer or bool operand, got {}",
+                            src_ty.display_name()
+                        ),
+                    ));
+                }
+                let (dst, not_tokens) = arith::lower_not(ctx, &src_reg, &src_ty);
+                let combined = quote! { #src_tokens #not_tokens };
+                Ok((dst, src_ty, combined))
+            }
         },
 
         // Parenthesized: just recurse
@@ -355,10 +396,9 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             ..
         } => {
             let ann = annotation_tokens("if ...");
-            // 1. Lower condition to predicate register
-            let (pred_reg, _pred_ty, cond_tokens) = lower_expr(ctx, condition)?;
 
-            // 2. Generate labels
+            // 1. Generate labels first so the branch-direct logical path can
+            //    use `skip_target` directly.
             let has_else = else_body.is_some();
             let end_label = ctx.fresh_label("IF_END");
             let else_label = if has_else {
@@ -366,22 +406,46 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
             } else {
                 None
             };
-
-            // 3. Branch: @!pred bra target (skip then-block when condition is false)
             let skip_target = else_label.as_deref().unwrap_or(&end_label);
-            let skip_target_str = skip_target.to_string();
-            let branch_tokens = quote! {
-                kernel.push(PtxInstruction::Control(ControlOp::BraPred {
-                    pred: #pred_reg,
-                    target: #skip_target_str.to_string(),
-                    negate: true,
-                }));
+
+            // 2. Lower condition. Sprint 7.0 D4: if the condition is directly
+            //    a logical `&&` / `||`, skip materializing an intermediate
+            //    p_out register — branch straight to skip_target from the
+            //    short-circuit paths. Any other condition shape falls through
+            //    to the general expression lowering (which still correctly
+            //    materializes logical ops when they're nested).
+            let cond_and_branch_tokens = if let KernelExpr::BinOp { op, lhs, rhs, .. } = condition {
+                if op.is_logical() {
+                    logical::lower_logical_if(ctx, op, lhs, rhs, skip_target)?
+                } else {
+                    let (pred_reg, _ty, cond_tokens) = lower_expr(ctx, condition)?;
+                    let skip = skip_target.to_string();
+                    quote! {
+                        #cond_tokens
+                        kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+                            pred: #pred_reg,
+                            target: #skip.to_string(),
+                            negate: true,
+                        }));
+                    }
+                }
+            } else {
+                let (pred_reg, _ty, cond_tokens) = lower_expr(ctx, condition)?;
+                let skip = skip_target.to_string();
+                quote! {
+                    #cond_tokens
+                    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+                        pred: #pred_reg,
+                        target: #skip.to_string(),
+                        negate: true,
+                    }));
+                }
             };
 
-            // 4. Lower then-body
+            // 3. Lower then-body
             let then_tokens = lower_stmts(ctx, then_body)?;
 
-            // 5. If else: unconditional branch past else, else label, else body
+            // 4. If else: unconditional branch past else, else label, else body
             let else_tokens = if let Some(else_stmts) = else_body {
                 let else_lbl = else_label.as_ref().unwrap();
                 let end_lbl_str = end_label.clone();
@@ -397,15 +461,14 @@ pub fn lower_stmt(ctx: &mut LoweringContext, stmt: &KernelStmt) -> syn::Result<T
                 TokenStream::new()
             };
 
-            // 6. End label
+            // 5. End label
             let end_label_tokens = quote! {
                 kernel.push(PtxInstruction::Label(#end_label.to_string()));
             };
 
             Ok(quote! {
                 #ann
-                #cond_tokens
-                #branch_tokens
+                #cond_and_branch_tokens
                 #then_tokens
                 #else_tokens
                 #end_label_tokens

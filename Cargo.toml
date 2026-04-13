@@ -4,7 +4,7 @@ members = ["kaio-core", "kaio-runtime", "kaio-macros", "kaio", "kaio-ops"]
 exclude = ["examples/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Dave Riding <david@netviper.gr>"]

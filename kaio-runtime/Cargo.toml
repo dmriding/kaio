@@ -13,4 +13,4 @@ categories = ["hardware-support"]
 [dependencies]
 cudarc = { workspace = true }
 thiserror = { workspace = true }
-kaio-core = { version = "0.2.0", path = "../kaio-core" }
+kaio-core = { version = "0.2.1", path = "../kaio-core" }

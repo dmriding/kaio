@@ -256,6 +256,76 @@ matmuls accumulate FP error).
 
 ---
 
+## Phase 6: Tensor Cores & Async Copies
+
+### Functional Criteria
+
+| # | Criterion | Status | Validation Method |
+|---|-----------|--------|-------------------|
+| 6.1 | `PtxType::F16` / `PtxType::BF16` + packed-half2 register allocator | Done | Unit + GPU roundtrip tests |
+| 6.2 | `mma.sync.m16n8k16` emits valid PTX, produces correct output on known-value fragments | Done | Standalone gate test (bit-exact vs hand-computed expected D) |
+| 6.3 | `cp.async.ca.shared.global` emits valid PTX, SM 8.0+ gate enforced | Done | ptxas_verify + `PtxModule::validate()` rejection tests |
+| 6.4 | Tensor-core matmul produces correct output vs CPU reference | Done | `matmul_tc_api` test suite (16×8×16 through 1023×1023×1024) |
+| 6.5 | Auto-tuner dispatches to tensor-core variant when eligible | Done | 3-way dispatch tests (scalar / TC / TC+async) |
+| 6.6 | TC attention + causal mask produces output within tolerance vs CPU reference | Done | Attention GPU tests |
+| 6.7 | Tensor-core matmul reaches ≥60% of cuBLAS sgemm at 4096² (stretch: 70%) | Done, past both | Multi-warp: 79.9% sync / 85.1% async |
+| 6.7b | Bank-conflict padding + D10 hoist lifts perf to ≥87% sync / ≥86% async | Partial | async 92.5% ✅ (past 90% stretch); sync 82.3% (LDG.128 reverted, banked as future-anchor IR) |
+| 6.8 | Three showcase examples build from a fresh clone | Done | Standalone `cargo run` under `examples/` |
+| 6.9 | All 5 crates published at v0.2.0 | Done | crates.io: kaio, kaio-core, kaio-macros, kaio-ops, kaio-runtime |
+| 6.10 | Host-level codegen regression tests catch macro invariants without a GPU | Done | 4 inline tests in `kaio-macros::codegen::mod.rs` + 1 activated SM-threading canary |
+
+### Performance Criteria
+
+| Metric | Target | Actual Result | Notes |
+|--------|--------|---------------|-------|
+| TC matmul (4096², fp16 × fp16 → fp32, sync) | ≥60% of cuBLAS sgemm | 82.3% | Well past original 60% target |
+| TC matmul (4096², fp16 × fp16 → fp32, async) | ≥60% of cuBLAS sgemm | 92.5% | Past 90% stretch — single-kernel reproducible ceiling |
+
+See `docs/performance.md` for the full matrix and the apples-to-apples
+disclaimer (KAIO is fp16 × fp16 → fp32 accumulation; cuBLAS reference
+is sgemm — the project's existing benchmark path, not an equivalent-
+precision comparison).
+
+### Coverage Targets
+
+| Crate | Minimum Line Coverage |
+|-------|----------------------|
+| `kaio-core` | 75% |
+| `kaio-runtime` | 65% |
+| `kaio-macros` | 70% |
+| `kaio-ops` | 70% |
+| **Workspace total** | **≥70%** |
+
+---
+
+## Phase 7: Quantized Kernels & Training Integration
+
+### Functional Criteria (planned; fills in as sprints land)
+
+| # | Criterion | Status | Validation Method |
+|---|-----------|--------|-------------------|
+| 7.0 | `#[gpu_kernel]` supports bitwise operators with preserved signed/unsigned `Shr` | Done | Unit + macro codegen + GPU round-trip with `i32 -2 >> 1 == -1` and `u32 0xFFFFFFFF >> 1 == 0x7FFFFFFF` assertions |
+| 7.0 | Short-circuit `&&` / `||` with Rust-faithful semantics | Done | `logical_and_bounds_guard_no_oob` GPU signature canary + nested cases |
+| 7.1 | `kaio_ops::matmul_int8` produces bit-exact output vs CPU reference | Planned | — |
+| 7.2 | `kaio_ops::matmul_int4` produces output within fp16 tolerance vs CPU reference | Planned | — |
+| 7.3 | Quantized attention (QKV projection quantized) produces output within LLM-inference tolerance | Planned | — |
+| 7.4 | `kaio-candle` crate publishes with `CustomOp` bindings for core operations | Planned | — |
+
+### Performance Criteria
+
+To be defined at each sprint's planning stage. Quant performance is
+scheme-dependent (INT8 vs INT4, per-tensor vs per-tile scale) and
+hardware-dependent — target benchmarks set in sprint plans, not the
+phase-level criteria document.
+
+### Coverage Targets
+
+Inherits Phase 6 targets. Phase 7 kernels added to `kaio-ops` must
+bring their own test coverage; the workspace total gate stays at
+≥70%.
+
+---
+
 ## Summary: Coverage Progression
 
 | Phase | Workspace Target | Rationale |
@@ -265,6 +335,8 @@ matmuls accumulate FP error).
 | Phase 3 | 65% | Mature enough to push coverage up |
 | Phase 4 | 65% | Complex algorithms, maintaining target |
 | Phase 5 | 70% | Release-quality coverage for public crate |
+| Phase 6 | 70% | Sustained release-quality coverage — tensor-core primitives |
+| Phase 7 | 70% | Sustained release-quality coverage — quantized kernels |
 
 ## Summary: Clippy & Fmt Requirements
 
