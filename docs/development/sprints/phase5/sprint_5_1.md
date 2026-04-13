@@ -70,6 +70,6 @@ All existing 1D tests must pass unchanged:
 
 ## Review Notes
 
-- Opus 4.6: verify `num_warps` uses total block_size (confirmed)
-- Codex 5.4: add asymmetric block test, identity-based test, document
-  linearization convention, verify no raw TidX leaks in PTX
+- Planning review: verify `num_warps` uses total block_size (confirmed)
+- Adversarial review: add asymmetric block test, identity-based test,
+  document linearization convention, verify no raw TidX leaks in PTX

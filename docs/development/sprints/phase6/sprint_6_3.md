@@ -141,7 +141,7 @@ inline with a register-based stride. This is carry-forward tech
 debt: future sprints that want compile-time-unknown strides need a
 register-stride variant of the helper.
 
-Both bugs exemplify a pattern Dave flagged in the 6.2 retrospective:
+Both bugs exemplify a pattern flagged in the 6.2 retrospective:
 silent correctness bugs that unit tests don't catch but real kernels
 do. 6.3 was the right place for these to surface.
 
@@ -208,20 +208,23 @@ All gates green before commit:
 | `CHANGELOG.md` | 6.3 bullets |
 | `README.md` | 6.3 checklist ✅ (internal only, no feature announce) |
 
-## Reviewer input
+## Review input
 
-- **Opus 4.6:** flagged `pub(crate)` vs `pub` (fixed: `#[doc(hidden)] pub use`),
-  missing non-square test (added: `rect_128_8_16`), B shared layout
-  not explicitly stated (fixed: column-major in docstring), units
-  mixing in staging math (fixed: bytes-pinned throughout).
-- **Dave:** caught that `pub` matmul_tc with divisibility restrictions
-  would generate support issues (fixed: internal-only); caught that my
-  plan had multiplications flipped (re-verified math). Approved the
-  `.f16` single-byte B staging (no bitwise pack intrinsic).
-- **Codex 5.4:** bar.sync semantics (fixed: now says "block-wide fence
-  for tile reuse, not mma protection"), failure diagnostics (fixed:
-  full tolerance/worst-case block), validate_dims_tc host tests
-  (added: 6 tests), TEMP-safeguard on hidden export (added).
+- **Planning review:** flagged `pub(crate)` vs `pub` (fixed:
+  `#[doc(hidden)] pub use`), missing non-square test (added:
+  `rect_128_8_16`), B shared layout not explicitly stated (fixed:
+  column-major in docstring), units mixing in staging math (fixed:
+  bytes-pinned throughout).
+- **Owner decisions:** caught that `pub` matmul_tc with divisibility
+  restrictions would generate support issues (fixed: internal-only);
+  caught that the plan had multiplications flipped (re-verified math).
+  Approved the `.f16` single-byte B staging (no bitwise pack
+  intrinsic).
+- **Adversarial review:** bar.sync semantics (fixed: now says
+  "block-wide fence for tile reuse, not mma protection"), failure
+  diagnostics (fixed: full tolerance/worst-case block),
+  validate_dims_tc host tests (added: 6 tests), TEMP-safeguard on
+  hidden export (added).
 
 ## Carry-forward to 6.4
 

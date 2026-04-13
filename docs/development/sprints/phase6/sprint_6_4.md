@@ -219,19 +219,19 @@ All gates green before commit:
 | `CHANGELOG.md` | 6.4 bullets (internal / doc-hidden) |
 | `README.md` | 6.4 checklist ✅ (internal only, no feature announce) |
 
-## Reviewer input
+## Review input
 
-- **Opus 4.6:** green light with two documentation additions —
+- **Planning review:** green light with two documentation additions —
   explicit B sync-store race-freedom note in the module docstring
   (folded into D6), and a SAFETY breadcrumb at the `cp.async.ca`
   emission site (folded into D4).
-- **Codex 5.4:** green light with four adjustments — explicit
-  loop-entry invariant block in the module docstring (folded into
-  D5), instruction-centric structural test instead of label-string
-  checks (folded into D10), host-only buffer-offset toggle unit
-  test via extracted `buffer_offsets` helper (folded into D10),
-  env-var gate on the timing log (folded into D11). Also
-  escalated `load_ptx(&str)` validation-bypass tech-debt urgency.
+- **Adversarial review:** green light with four adjustments —
+  explicit loop-entry invariant block in the module docstring
+  (folded into D5), instruction-centric structural test instead of
+  label-string checks (folded into D10), host-only buffer-offset
+  toggle unit test via extracted `buffer_offsets` helper (folded
+  into D10), env-var gate on the timing log (folded into D11).
+  Also escalated `load_ptx(&str)` validation-bypass tech-debt urgency.
 
 ## Carry-forward to 6.5
 

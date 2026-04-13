@@ -67,8 +67,8 @@ all three variants.
   a single-file change
 - Avoids `emit_trait.rs` growing into a monolith as more instruction
   categories land
-- When a Forge agent works on Sprint 1.3 (memory), they only touch
-  `instr/memory.rs` — no merge conflicts with arith work
+- Work on Sprint 1.3 (memory) only touches `instr/memory.rs` — no
+  merge conflicts with arith work
 
 Consequence: removed the `ArithOp` import from `emit_trait.rs` (stale
 after the move).

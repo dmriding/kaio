@@ -162,14 +162,14 @@ push the model to its limits.
 
 ## Review Notes
 
-- **Codex 5.4:** 12-point review. Biggest gap was load/store roundtrip
-  coverage for the half register classes (fixed — added the three
-  `emit_ld_*/emit_st_*` tests). Also caught the need for the
-  end-to-end `emit_kernel_f16_flow` emitter test, and suggested the
-  cvt rounding rationale be documented in code comments.
-- **Opus 4.6:** kaio-core zero-dep change explicitly acknowledged
-  and accepted (`half` is the right call). Confirmed the BF16 "type-
-  level only this sprint" deferral plan.
+- **Adversarial review:** 12-point review. Biggest gap was load/store
+  roundtrip coverage for the half register classes (fixed — added
+  the three `emit_ld_*/emit_st_*` tests). Also caught the need for
+  the end-to-end `emit_kernel_f16_flow` emitter test, and suggested
+  the cvt rounding rationale be documented in code comments.
+- **Planning review:** kaio-core zero-dep change explicitly
+  acknowledged and accepted (`half` is the right call). Confirmed
+  the BF16 "type-level only this sprint" deferral plan.
 
 ## Follow-ups carried into 6.2
 

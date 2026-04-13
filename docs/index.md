@@ -97,4 +97,4 @@ kaio/
 2. **Incremental complexity.** A user writing their first elementwise kernel should not need to understand tiling, shared memory, or warp-level programming.
 3. **No hidden magic.** The generated PTX should be inspectable and understandable. Users should be able to see exactly what KAIO produces.
 4. **Windows is not an afterthought.** Every feature is tested on Windows and Linux before merge.
-5. **Forge-friendly architecture.** Modules are decomposable into independent sprint-sized units with clear interfaces and testable boundaries.
+5. **Sprint-friendly architecture.** Modules are decomposable into independent sprint-sized units with clear interfaces and testable boundaries.

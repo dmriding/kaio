@@ -187,15 +187,16 @@ Bisect-friendly.
 
 ## Review Inputs
 
-- **Opus 4.6** (planning review): flagged B test input gap (all-ones
-  hides column errors → changed to `j+1`), recommended free-function
+- **Planning review:** flagged B test input gap (all-ones hides
+  column errors → changed to `j+1`), recommended free-function
   fragment helpers over methods, raised `validate()` for SM gating.
-- **Codex 5.4** (planning review): softened success criterion #2 from
+- **Adversarial review:** softened success criterion #2 from
   "byte-exact nvcc parity" to "semantically correct PTX accepted by
   ptxas + gate test", recommended fragment.rs internal sectioning,
   bounded `validate()` scope to target-capability-only.
-- **Dave:** committed to pub fragment fields (no accessor), workflow
-  preference for commit-try-iterate over upfront nvcc verification.
+- **Owner decisions:** committed to pub fragment fields (no
+  accessor), workflow preference for commit-try-iterate over
+  upfront nvcc verification.
 
 ## Results
 

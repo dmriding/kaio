@@ -442,8 +442,8 @@ Median latency:    181.7 μs  (of 100 timed runs, 5 warm-ups skipped)
   clean publishing story — the flip to `kaio = "0.2.0"` at Sprint
   6.9 is a one-line edit per example.
 - The bandwidth-bound insight in `gelu_comparison/README.md` is the
-  kind of "stars a repo" content Dave wants in the v0.2.0 launch
-  story — a concrete demonstration that KAIO rewards fusion, not
+  kind of "stars a repo" content the v0.2.0 launch story wants — a
+  concrete demonstration that KAIO rewards fusion, not
   micro-optimization.
 
 ### Carry-forward

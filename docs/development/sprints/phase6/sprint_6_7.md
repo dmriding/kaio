@@ -3,7 +3,6 @@
 **Status:** ✅ Complete
 **Branch:** `phase6`
 **Parent:** `8aa77cb` (Sprint 6.6 + 6.8 prep)
-**Plan file:** `C:\Users\david\.claude\plans\scalable-giggling-cray.md`
 **Master plan:** [`phase6_master_plan.md`](phase6_master_plan.md)
 
 ---
@@ -53,7 +52,7 @@ test surfaces.
 
 ### Gate A — Multi-warp `matmul_tc` (sync) + edge handling baked in (commit `e2c8bf3`)
 
-**Path B reshape (Dave + Opus round 5).** The original plan staged
+**Path B reshape (mid-sprint).** The original plan staged
 edge handling in Gate C; Gate A would temporarily break 3 of 4
 existing GPU tests (16×8×16, 32×16×32, 128×8×16) until Gate C lifted
 divisibility. Reshape: bake edge-tile handling into Gate A from day
@@ -89,7 +88,7 @@ instead of "introduce edge tiles."
 1. **`mov.f16 %h0, 0` is invalid PTX** — no f16 immediate-zero form
    in the PTX ISA. Initial code used `mov.f16` with `ImmU32(0)` then
    `ImmF32(0.0)` — both rejected by ptxas (`Unexpected instruction
-   types specified for 'mov'`). Fix (Dave's call): pre-zero shared
+   types specified for 'mov'`). Fix: pre-zero shared
    at kernel start cooperatively, then bra-skip around the OOB B load
    + store pair. The shared slot stays zero from pre-zero; no f16
    zero immediate needed. Same pattern applied to A for consistency.
@@ -158,7 +157,7 @@ edge-pad K within an iteration.
 - Mid-range mixed-divisibility: 100×50×64
 - Large off-by-one against 1024 boundary: 1023×1023×1024
 
-**K-shape note (Dave + second-opinion):** sub-tile shapes use K=16
+**K-shape note:** sub-tile shapes use K=16
 not K=3. K=3 would force zero-padding across an entire K-tile,
 which the kernel intentionally does not do (K-tile granularity is
 structural, not edge-handled). Sub-tile stress lives in M and N
@@ -230,7 +229,7 @@ on `attention_tc` + `attention_tc_causal` (lines 71–78) per P2 —
 Phase 7 only (FlashAttention-TC lifts the seq_k≤384 + divisibility
 constraints; `attention_auto_tc` becomes the real dispatcher then).
 
-**Rustdoc updates** (per Codex framing guardrails — graduation, not
+**Rustdoc updates** (per framing guardrails — graduation, not
 finality):
 - `matmul_auto_tc` rustdoc in `tuner.rs`: dropped "Sprint 6.5 preview"
   framing, dropped temporary divisibility text, added measured
@@ -348,8 +347,8 @@ All passing at commit-time:
 | `kaio-ops/tests/matmul_tc_api.rs` | **+** 6 Gate C pathological tests + 1 Gate A quadrant canary. |
 | `kaio-ops/tests/matmul_tc_async_api.rs` | **+** 6 Gate C pathological tests. |
 | `kaio-ops/tests/tuner_tc_test.rs` | Swapped `rejects_non_divisible_m` for `handles_non_divisible_dims` (positive) + added `rejects_k_not_multiple_of_16` (negative for the structural K constraint). |
-| `kaio-ops/tests/matmul_tc_bench.rs` | **NEW** — TC sync + TC async + cuBLAS sgemm at 256/512/1024/2048/4096. 5 warmup + 20 timed median. `#[ignore]`-gated. Apples-to-apples disclaimer in eprintln header (Codex D8 verbatim). |
-| `CHANGELOG.md` | Sprint 6.7 entry under [Unreleased] — added + breaking sections. Codex framing guardrails (graduation, not finality). |
+| `kaio-ops/tests/matmul_tc_bench.rs` | **NEW** — TC sync + TC async + cuBLAS sgemm at 256/512/1024/2048/4096. 5 warmup + 20 timed median. `#[ignore]`-gated. Apples-to-apples disclaimer in eprintln header (D8). |
+| `CHANGELOG.md` | Sprint 6.7 entry under [Unreleased] — added + breaking sections. Framing guardrails (graduation, not finality). |
 | `README.md` | Supported Kernel Features matmul_auto_tc row update. Phase 6 progress section: 6.7 ✅ + 6.7b queued. |
 | `docs/performance.md` | NEW Tensor-Core Matmul Performance section with measured table, apples-to-apples disclaimer, why-small-sizes-underperform explanation, path to 90%+. |
 | `docs/benchmarks.md` | TC bench reproduction command + Sprint 6.7 results table. |
@@ -360,9 +359,9 @@ All passing at commit-time:
 
 ---
 
-## Plan-mode review folds (4 rounds, all converged)
+## Planning decisions and mid-sprint folds
 
-### Round 1 — Dave (decisions, P1/P2/P3)
+### Initial scope (P1/P2/P3)
 - P1: 50% gate, 60% stretch (split into 6.7 + 6.7b). Confirmed.
   Result: blew past at 79.9% / 85.1% — the conservative gate was
   almost too conservative. Gap to 90%+ in 6.7b is meaningful but
@@ -372,42 +371,42 @@ All passing at commit-time:
 - P3: cuBLAS sgemm only + apples-to-apples disclaimer. Confirmed and
   held.
 
-### Round 2 — Opus 4.6
-- Caught the **D1 arithmetic bug** in the original plan: 4 warps ×
-  16×16 = 1024 elements, not 4096. Fixed in plan to 32×32 per warp
-  via 8 mma per K-tile (the layout that actually shipped).
+### Structural corrections during planning
+- **D1 arithmetic bug** in the original plan: 4 warps × 16×16 = 1024
+  elements, not 4096. Fixed to 32×32 per warp via 8 mma per K-tile
+  (the layout that actually shipped).
 - Confirmed: 64×64 / 4-warp over 128×64 / 8-warp for this sprint;
   D4 OOB-padding precision-safe (standard CUTLASS pattern); D10
   fragment-loader parameterization should live in kaio-core if done.
 - Confirmed Gate A doesn't need further splitting.
 
-### Round 3 — Dave self-review
-- Hardened Gate C deferral protocol: if Gate C defers, deferral is
-  documented in 3 places + 6.7c becomes hard sequencing block before
-  6.7b / 6.8 / 6.9. (Did not fire — Gate C landed cleanly.)
+### Gate C deferral protocol
+- Hardened: if Gate C defers, deferral is documented in 3 places and
+  6.7c becomes hard sequencing block before 6.7b / 6.8 / 6.9. (Did
+  not fire — Gate C landed cleanly.)
 
-### Round 4 — Codex 5.4
-- Caught: edge-tile test surface needs sub-tile cases (1, 7, 15-class).
+### Adversarial-review folds
+- Edge-tile test surface needs sub-tile cases (1, 7, 15-class).
   Folded in as 7×5×16 + 15×7×16.
-- Caught: Gate C should be non-blocking to promotion if it threatens
-  the multi-warp performance story. Spelled out in promotion
-  checklist item 2.
-- Caught: D10 hoisting timing — only do if low-diff and
-  non-disruptive. Made conditional, then deferred to 6.7b after
-  Gate-A measurement showed ptxas's CSE handles the redundant
-  div/rem within `emit_warp_quadrant_mma` cleanly.
-- Caught: promotion criteria should be a checklist, not just sprint
+- Gate C should be non-blocking to promotion if it threatens the
+  multi-warp performance story. Spelled out in promotion checklist
+  item 2.
+- D10 hoisting timing — only do if low-diff and non-disruptive.
+  Made conditional, then deferred to 6.7b after Gate-A measurement
+  showed ptxas's CSE handles the redundant div/rem within
+  `emit_warp_quadrant_mma` cleanly.
+- Promotion criteria should be a checklist, not just sprint
   completion. Added 4-item checklist (D7 above).
-- Caught: README/CHANGELOG framing should be "graduation, not
-  finality." Applied verbatim guardrails.
-- Provided: D8 cuBLAS-disclaimer phrasing — used verbatim in
+- README/CHANGELOG framing should be "graduation, not finality."
+  Applied verbatim guardrails.
+- D8 cuBLAS-disclaimer phrasing — used verbatim in
   `matmul_tc_bench.rs` header and `docs/performance.md`.
 
-### Mid-sprint: Path B reshape (Dave + Opus round 5)
+### Mid-sprint: Path B reshape
 - After Gate B planning revealed the test-surface mismatch (Path A
   would `#[ignore]`-disable 3 of 4 existing matmul_tc_api tests
-  until Gate C), paused execution and asked Dave. Second-opinion
-  confirmed: bake edge handling into Gate A so the multi-warp
+  until Gate C), execution paused for a second-opinion check.
+  Outcome: bake edge handling into Gate A so the multi-warp
   restructure ships green-on-everything from day one. Gate C
   becomes "pathological coverage + lift validate," not "introduce
   edge tiles."

@@ -2,7 +2,6 @@
 
 **Status:** Planning
 **Depends on:** Phase 4 complete (v0.0.4, commit `5cc2ca0`)
-**Reviewed by:** Opus 4.6, Codex 5.4
 
 ## Goal
 
@@ -202,9 +201,9 @@ hit > 5 params.
   matmul at 31% cuBLAS, PTX inspection tools, 4 runnable examples
 - Sprint 4.9 (adoption polish): README rewrite, examples, patterns,
   limitations, feedback CTA
-- Codex adoption review identified 7 barriers, all addressed in 4.9
+- Adoption review identified 7 barriers, all addressed in 4.9
 - 2D block reduction is the only hard DSL blocker for attention
-- Opus 4.6 review: treat 5.1 as core DSL change, not just a fix;
+- Planning review: treat 5.1 as core DSL change, not just a fix;
   FlashAttention should not block v0.1.0; start CI early
-- Codex 5.4 review: treat 5.2/5.3 as DSL stress test; lock
+- Adversarial review: treat 5.2/5.3 as DSL stress test; lock
   auto-tuner scope; standard attention is the real deliverable

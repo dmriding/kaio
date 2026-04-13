@@ -34,11 +34,12 @@ This sprint adds no new features — it makes what exists easy to try.
 
 ## Review Notes
 
-- Opus 4.6: reduction example must use real data (not synthetic
-  constants), patterns must stay 5-8 lines, crates.io README < 150 lines
-- Codex 5.4: star-mark vector_add as entry point, add gotchas section,
-  framing sentence for "When to Use KAIO", failure expectation note
-  after quickstart
+- Planning review: reduction example must use real data (not
+  synthetic constants), patterns must stay 5-8 lines, crates.io
+  README < 150 lines
+- Adversarial review: star-mark vector_add as entry point, add
+  gotchas section, framing sentence for "When to Use KAIO", failure
+  expectation note after quickstart
 
 ## Files
 

@@ -71,7 +71,7 @@ Tolerance: abs_err < 1e-3 || rel_err < 1e-2.
 
 ## Review Notes
 
-- Opus 4.6: verify matmul arg ordering (M=seq_len, N=d_k, K=seq_len),
+- Planning review: verify matmul arg ordering (M=seq_len, N=d_k, K=seq_len),
   use relative error for medium+ sizes, PTX dump to check K^T addressing
-- Codex 5.4: document memory-heavy nature, distinguish from FlashAttention,
-  add structured Q==K==V test
+- Adversarial review: document memory-heavy nature, distinguish from
+  FlashAttention, add structured Q==K==V test

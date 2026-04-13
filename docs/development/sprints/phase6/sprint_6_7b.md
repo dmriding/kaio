@@ -8,7 +8,6 @@
 - Final `feat(phase6)`: _(this commit)_
 
 **Prior sprint:** [sprint_6_7.md](sprint_6_7.md) (multi-warp restructure landed at 79.9% sync / 85.1% async of cuBLAS sgemm at 4096²).
-**Plan file:** `C:\Users\david\.claude\plans\scalable-giggling-cray.md` (6 review rounds tracked).
 
 ---
 
@@ -166,13 +165,11 @@ Apples-to-apples disclaimer (unchanged from 6.7): KAIO TC matmul uses fp16 input
 
 ---
 
-## Review trail summary
+## Planning and execution folds
 
-See plan file `C:\Users\david\.claude\plans\scalable-giggling-cray.md` "Review trail summary" table for all 6 rounds in detail.
-
-- **Round 1** (Dave initial decisions): P1/P2/P3 framing confirmed.
-- **Round 2** (Opus 4.6): 4 precision-tightening folds — 4× `st.shared.b32`, host-side N%8 dispatch, 64-reg decision rule, call-site enumeration.
-- **Round 3** (Dave self-review): no additional structural changes.
-- **Round 4** (Codex 5.4 sanity check): 3 strongly-recommended folds (priority-ordered gate checkpoints, sub-tile canary, fast-path ≠ API eligibility) + 1 recommended (D7b explicit split trigger).
-- **Round 5** (mid-execution discovery): row-major B flip removed from scope — would have been a net regression on fragment B reads. Bank math pressure-tested by Plan agent; col-stride 36 padding confirmed as the actual correct fix.
-- **Round 6** (post-bench discovery): async at 92.5% banked from padding + hoist alone (7.4pp vs 2-4pp estimate). D9 revised to a mechanical rule. Sync at 82.3% (< 85% threshold) → ship 6.7b-lite, LDG.128 stays as unused IR in kaio-core.
+- **Initial decisions:** P1/P2/P3 framing confirmed.
+- **Planning review fold 1:** 4 precision-tightening folds — 4× `st.shared.b32`, host-side N%8 dispatch, 64-reg decision rule, call-site enumeration.
+- **Self-review:** no additional structural changes.
+- **Adversarial-review fold:** 3 strongly-recommended folds (priority-ordered gate checkpoints, sub-tile canary, fast-path ≠ API eligibility) + 1 recommended (D7b explicit split trigger).
+- **Mid-execution discovery:** row-major B flip removed from scope — would have been a net regression on fragment B reads. Bank math pressure-tested; col-stride 36 padding confirmed as the actual correct fix.
+- **Post-bench discovery:** async at 92.5% banked from padding + hoist alone (7.4pp vs 2-4pp estimate). D9 revised to a mechanical rule. Sync at 82.3% (< 85% threshold) → ship 6.7b-lite, LDG.128 stays as unused IR in kaio-core.

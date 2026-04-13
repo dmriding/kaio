@@ -30,7 +30,8 @@ test be `#[ignore]` (excluded from default runs) or always-run with a
 soft-skip if ptxas isn't found?
 
 **Decision:** Always-run with soft-skip (early return + eprintln). ptxas
-IS available on Dave's machine and on any machine with the CUDA toolkit.
+IS available on the primary dev machine and on any machine with the
+CUDA toolkit.
 `#[ignore]` would hide it from normal `cargo test` output. The soft-skip
 means machines without CUDA toolkit see a passed test with a diagnostic
 message, not a failed test.

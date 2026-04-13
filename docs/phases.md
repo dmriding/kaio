@@ -2,7 +2,7 @@
 
 ## Overview
 
-KAIO is developed in five phases, each producing a shippable milestone. Phases are designed to be Forge-friendly: decomposable into independent sprints with clear inputs, outputs, and testable boundaries.
+KAIO is developed in five phases, each producing a shippable milestone. Phases are designed to be sprint-friendly: decomposable into independent sprints with clear inputs, outputs, and testable boundaries.
 
 Each phase builds on the previous. No phase is started until the prior phase meets its success criteria (see `success-criteria.md`).
 
@@ -32,7 +32,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 - Runtime: device enumeration, memory alloc/free, host↔device transfer, kernel launch
 - `vector_add` kernel built manually via the IR API (no macro yet)
 
-**Forge Sprint Breakdown:**
+**Sprint Breakdown:**
 | Sprint | Scope | Agent Work |
 |--------|-------|------------|
 | 1.1 | PTX type system + register model | Struct definitions, type mapping |
@@ -72,7 +72,7 @@ Each phase builds on the previous. No phase is started until the prior phase mee
 - Built-in function registry (`thread_idx_x()`, `block_idx_x()`, `sqrt()`, `exp()`, etc.)
 - Math function emitters (Priority 5 instructions: `ex2`, `lg2`, `rcp`, `sqrt`, `sin`, `cos`)
 
-**Forge Sprint Breakdown:**
+**Sprint Breakdown:**
 | Sprint | Scope | Agent Work |
 |--------|-------|------------|
 | 2.1 | Macro skeleton + function parsing | `syn` visitor, parameter extraction |

@@ -178,8 +178,8 @@ No implicit assumptions, no runtime failure as discovery mechanism.
 
 ## Review Context
 
-- Opus 4.6: standalone fragment test, cudarc half verification,
+- Planning review: standalone fragment test, cudarc half verification,
   SM gating for three variants, manual loads before ldmatrix
-- Codex 5.4: IR as internal-only, fragment abstractions not raw
-  registers, cp.async pluggable not foundational, TC attention
+- Adversarial review: IR as internal-only, fragment abstractions not
+  raw registers, cp.async pluggable not foundational, TC attention
   optional, precision documentation
