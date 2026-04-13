@@ -29,7 +29,7 @@ Per plan: diagnostic bisection tool. Log median async % vs cuBLAS at 4096² afte
 |------------|-------|-------|-------|--------------|-------------|-------|
 | **Pre-sprint baseline** | 112.1% | 109.8% | 107.1% | **109.8%** | **103.1%** | 2026-04-13. cuBLAS running at 47-59 TFLOPS this session (thermal / driver state). Use these numbers as "this machine, today" reference; the published 102.3% v0.2.0 median is the cross-session baseline. |
 | **D2 landed** | 100.4% | 143.4% | 113.4% | **113.4%** | **116.9%** | 2026-04-13, commit `b49cbad`. Wide ratio variance driven by cuBLAS wobbling 45-58 TFLOPS — KAIO async itself was 47/65/66 TFLOPS (run 1 looks like thermal outlier). D2 touched only `kaio-macros` host tests — no runtime kernel path change, no mechanism for perf regression. Noise, not signal. |
-| D1a landed | | | | | | Expected: no delta at 4096² (per-launch PtxModule rebuild cost is microseconds). Small-matrix numbers (256² / 512²) may drop — expected cost-model change, not a regression. |
+| **D1a landed** | 100.9% | 103.4% | 113.4% | **103.4%** | **104.5%** | 2026-04-13, commit `7fad5f2`. KAIO async 4096² median: **2.31ms / 59.48 TFLOPS** vs baseline 2.32ms / 59.20 TFLOPS — within noise, no regression. Small-matrix 256² async: 0.38→0.39ms (+0.01ms, expected `OnceLock<String>` cache-removal cost; per plan NOT a regression). Trust-boundary fix is in without perf cost at the headline size. |
 | D1b landed | | | | | | Expected: no delta (attribute only) |
 | D3 landed | | | | | | Expected: no delta (test refactor) |
 
@@ -78,23 +78,41 @@ Tests 1, 2, 4 use identical assertion mechanics (substring check on TokenStream 
 
 ## D1a — Macro loader migration
 
-**Status:** Not started
+**Status:** ✅ Complete
 
-### Target files
+### Target files migrated
 
-- `kaio-macros/src/codegen/ptx_builder.rs` — `build_ptx() -> String` becomes `build_module(sm: &str) -> PtxModule`
-- `kaio-macros/src/codegen/mod.rs` — remove `static PTX_CACHE: OnceLock<String>` (rebuild per launch)
-- `kaio-macros/src/codegen/launch_wrapper.rs` — read `device.info().compute_capability`, format as `sm_XX`, call `device.load_module(&module)?`
+- ✅ `kaio-macros/src/codegen/ptx_builder.rs` — `build_ptx() -> String` renamed to `build_module(sm: &str) -> PtxModule`. Inner flow unchanged up to the `PtxWriter.finish()` point; now returns the `PtxModule` directly. `KAIO_SM_TARGET` env var preserved as caller-override escape hatch.
+- ✅ `kaio-macros/src/codegen/mod.rs` — `static PTX_CACHE: OnceLock<String>` removed entirely. Macro-generated `launch()` rebuilds `PtxModule` per call (microseconds of host overhead, invisible at 4096² kernel size).
+- ✅ `kaio-macros/src/codegen/launch_wrapper.rs` — `launch()` now reads `device.info().compute_capability`, formats as `sm_XX`, calls `build_module(&sm)` and `device.load_module(&ptx_module)?`. Old `PTX_CACHE.get_or_init(build_ptx)` + `device.load_ptx(ptx)?` path gone.
 
-### Non-macro test call sites
+### Non-macro test call sites migrated
 
-- `kaio-runtime/tests/vector_add_e2e.rs:189, 238`
-- `kaio/tests/cp_async_roundtrip.rs:205`
-- `kaio/tests/mma_sync_fragment.rs:201`
+- ✅ `kaio-runtime/tests/vector_add_e2e.rs` — `build_vector_add_ptx() -> String` renamed to `build_vector_add_module() -> PtxModule`; both tests (`vector_add_small`, `vector_add_large`) use `device.load_module(&ptx_module)`. `emit_ptx_debug()` helper added for failure-path PTX dump.
+- ✅ `kaio/tests/cp_async_roundtrip.rs` — same pattern. `build_cp_async_roundtrip_module() -> PtxModule`.
+- ✅ `kaio/tests/mma_sync_fragment.rs` — same pattern. `build_mma_gate_module() -> PtxModule`.
 
-### Results
+`kaio-runtime/src/device.rs:116` intentionally untouched — that's `load_module()` calling `load_ptx()` as a private implementation detail after `validate()`.
 
-_To be filled in_
+### SM-threading canary activated
+
+Test `launch_wrapper_threads_compute_capability_into_module_build` (D2 Test 5) was `#[ignore]`'d during D2 as a spec-stub. D1a removes the `#[ignore]` and the test passes — structural verification that the macro:
+- reads `device.info().compute_capability`
+- calls `load_module`
+- does NOT emit `load_ptx`
+
+### Gate status
+
+- ✅ Full workspace `cargo test` clean (host) — 140 + 122 + 24 + all other crate tests pass
+- ✅ Full workspace `cargo test -- --ignored` clean (GPU on Dave's 4090) — every GPU-gated test including the two long-running Gate C pathological-shape tests (74s and 69s) passes
+- ✅ `cargo check --workspace --tests` clean — no compile errors
+- ✅ All three example kernels (`fused_silu_gate`, `gelu_comparison`, `rms_norm`) — `cargo run --release` PASS correctness:
+  - `fused_silu_gate`: max_abs_err 1.49e-8, 182.2 μs median
+  - `gelu_comparison`: exact PASS (2.38e-7) 184.0 μs, fast PASS (2.38e-7) 177.8 μs
+  - `rms_norm`: max_abs_err 2.38e-7, 214.2 μs median
+- ✅ No user-visible API change — `#[gpu_kernel]` attribute usage unchanged, no new imports required at the user's call site
+
+Commit: `7fad5f2` — migrate macro + test call sites to load_module(&PtxModule)
 
 ---
 
