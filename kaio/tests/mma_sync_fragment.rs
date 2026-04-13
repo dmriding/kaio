@@ -203,7 +203,10 @@ fn mma_sync_m16n8k16_fragment_gate() {
     );
 
     let module = device.load_module(&ptx_module).unwrap_or_else(|e| {
-        eprintln!("=== PTX that failed to load ===\n{}", emit_ptx_debug(&ptx_module));
+        eprintln!(
+            "=== PTX that failed to load ===\n{}",
+            emit_ptx_debug(&ptx_module)
+        );
         panic!("load_module failed: {e}");
     });
     let func = module

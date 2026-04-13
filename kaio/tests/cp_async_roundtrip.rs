@@ -207,7 +207,10 @@ fn cp_async_ca_roundtrip_4_floats() {
     assert!(major >= 8, "cp.async requires SM 8.0+ (got sm_{major})");
 
     let module = device.load_module(&ptx_module).unwrap_or_else(|e| {
-        eprintln!("=== PTX that failed to load ===\n{}", emit_ptx_debug(&ptx_module));
+        eprintln!(
+            "=== PTX that failed to load ===\n{}",
+            emit_ptx_debug(&ptx_module)
+        );
         panic!("load_module failed: {e}");
     });
     let func = module

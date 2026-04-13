@@ -195,7 +195,10 @@ fn vector_add_small() {
     // Load into driver
     let device = KaioDevice::new(0).expect("GPU required");
     let module = device.load_module(&ptx_module).unwrap_or_else(|e| {
-        eprintln!("=== PTX that failed to load ===\n{}", emit_ptx_debug(&ptx_module));
+        eprintln!(
+            "=== PTX that failed to load ===\n{}",
+            emit_ptx_debug(&ptx_module)
+        );
         panic!("load_module failed: {e}");
     });
     let func = module.function("vector_add").unwrap_or_else(|e| {
@@ -244,7 +247,10 @@ fn vector_add_large() {
 
     let device = KaioDevice::new(0).expect("GPU required");
     let module = device.load_module(&ptx_module).unwrap_or_else(|e| {
-        eprintln!("=== PTX that failed to load ===\n{}", emit_ptx_debug(&ptx_module));
+        eprintln!(
+            "=== PTX that failed to load ===\n{}",
+            emit_ptx_debug(&ptx_module)
+        );
         panic!("load_module failed: {e}");
     });
     let func = module.function("vector_add").unwrap_or_else(|e| {

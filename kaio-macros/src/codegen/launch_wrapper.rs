@@ -175,10 +175,7 @@ mod tests {
             // Minimal 1D kernel: `fn k(out: &mut [f32], n: u32)`.
             // The `n: u32` is required because 1D codegen uses the last
             // u32 scalar to compute grid_dim.
-            params: vec![
-                mock_param_slice_mut_f32("out"),
-                mock_param_u32("n"),
-            ],
+            params: vec![mock_param_slice_mut_f32("out"), mock_param_u32("n")],
             config: KernelConfig {
                 block_size,
                 block_size_y: None,

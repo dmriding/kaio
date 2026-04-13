@@ -92,8 +92,7 @@ mod tests {
                 sdata[0] = 0.0f32;
             }
         });
-        let sig = parse_kernel_signature(&func, dummy_config(256))
-            .expect("signature should parse");
+        let sig = parse_kernel_signature(&func, dummy_config(256)).expect("signature should parse");
         let body = parse_body(&func.block).expect("body should parse");
 
         let module = generate_kernel_module(&sig, &body)
@@ -128,8 +127,7 @@ mod tests {
                 out[0] = s;
             }
         });
-        let sig = parse_kernel_signature(&func, dummy_config(256))
-            .expect("signature should parse");
+        let sig = parse_kernel_signature(&func, dummy_config(256)).expect("signature should parse");
         let body = parse_body(&func.block).expect("body should parse");
 
         let module = generate_kernel_module(&sig, &body)

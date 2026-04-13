@@ -24,7 +24,10 @@ use crate::lower::LoweringContext;
 /// `device.info().compute_capability`, so the driver call path hits
 /// `PtxModule::validate()` before ptxas — closing the trust-boundary gap
 /// flagged in tech_debt.md:129.
-pub fn generate_build_module(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Result<TokenStream> {
+pub fn generate_build_module(
+    sig: &KernelSignature,
+    body: &[KernelStmt],
+) -> syn::Result<TokenStream> {
     let kernel_name = &sig.name;
     let mut ctx = LoweringContext::new();
     let total_threads = sig.config.block_size * sig.config.block_size_y.unwrap_or(1);
