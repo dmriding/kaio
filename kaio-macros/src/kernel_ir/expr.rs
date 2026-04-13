@@ -142,6 +142,23 @@ impl BinOpKind {
                 | BinOpKind::Ne
         )
     }
+
+    /// Returns `true` if this is a bitwise operator (`&`, `|`, `^`, `<<`, `>>`).
+    pub fn is_bitwise(&self) -> bool {
+        matches!(
+            self,
+            BinOpKind::BitAnd
+                | BinOpKind::BitOr
+                | BinOpKind::BitXor
+                | BinOpKind::Shl
+                | BinOpKind::Shr
+        )
+    }
+
+    /// Returns `true` if this is a short-circuit logical operator (`&&`, `||`).
+    pub fn is_logical(&self) -> bool {
+        matches!(self, BinOpKind::And | BinOpKind::Or)
+    }
 }
 
 /// Unary operator kinds.
@@ -172,5 +189,25 @@ mod tests {
         assert!(BinOpKind::Ge.is_comparison());
         assert!(!BinOpKind::Add.is_comparison());
         assert!(!BinOpKind::Or.is_comparison());
+    }
+
+    #[test]
+    fn binop_is_bitwise() {
+        assert!(BinOpKind::BitAnd.is_bitwise());
+        assert!(BinOpKind::BitOr.is_bitwise());
+        assert!(BinOpKind::BitXor.is_bitwise());
+        assert!(BinOpKind::Shl.is_bitwise());
+        assert!(BinOpKind::Shr.is_bitwise());
+        assert!(!BinOpKind::Add.is_bitwise());
+        assert!(!BinOpKind::And.is_bitwise()); // logical, not bitwise
+    }
+
+    #[test]
+    fn binop_is_logical() {
+        assert!(BinOpKind::And.is_logical());
+        assert!(BinOpKind::Or.is_logical());
+        assert!(!BinOpKind::BitAnd.is_logical()); // bitwise, not logical
+        assert!(!BinOpKind::BitOr.is_logical());
+        assert!(!BinOpKind::Add.is_logical());
     }
 }

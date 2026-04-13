@@ -210,7 +210,26 @@ pub fn lower_expr(
                     compare::lower_comparison(ctx, op, &lhs_reg, &rhs_reg, &lhs_ty);
                 let combined = quote! { #lhs_tokens #rhs_tokens #cmp_tokens };
                 Ok((pred, KernelType::Bool, combined))
+            } else if op.is_bitwise() {
+                // Sprint 7.0 D2: bitwise binops. Shr signedness is preserved by
+                // lhs_ty flowing through to ArithOp::Shr (see AD2 canary tests
+                // in kaio-core/src/instr/arith.rs + lower/arith.rs).
+                let (lhs_reg, lhs_ty, lhs_tokens) = lower_expr(ctx, lhs)?;
+                let (rhs_reg, _rhs_ty, rhs_tokens) = lower_expr(ctx, rhs)?;
+                if !lhs_ty.is_integer() {
+                    return Err(syn::Error::new(
+                        *span,
+                        format!(
+                            "bitwise operator {op:?} requires integer operands, got {}",
+                            lhs_ty.display_name()
+                        ),
+                    ));
+                }
+                let (dst, op_tokens) = arith::lower_bitop(ctx, op, &lhs_reg, &rhs_reg, &lhs_ty);
+                let combined = quote! { #lhs_tokens #rhs_tokens #op_tokens };
+                Ok((dst, lhs_ty, combined))
             } else {
+                // Logical &&/|| (AD4) land in D4.
                 Err(syn::Error::new(
                     *span,
                     format!("operator {op:?} lowering not yet implemented"),
@@ -218,7 +237,7 @@ pub fn lower_expr(
             }
         }
 
-        // Unary negation
+        // Unary negation / NOT
         KernelExpr::UnaryOp { op, expr, span } => match op {
             UnaryOpKind::Neg => {
                 let (src_reg, src_ty, src_tokens) = lower_expr(ctx, expr)?;
@@ -226,10 +245,25 @@ pub fn lower_expr(
                 let combined = quote! { #src_tokens #neg_tokens };
                 Ok((dst, src_ty, combined))
             }
-            UnaryOpKind::Not => Err(syn::Error::new(
-                *span,
-                "logical not (`!`) lowering not yet implemented",
-            )),
+            UnaryOpKind::Not => {
+                // Sprint 7.0 D2 AD3: context-dispatch on source type.
+                // - Integer (I32/U32/I64/U64) → bitwise not (emits not.b{size})
+                // - Bool → logical not on predicate (emits not.pred)
+                // Any other type is an error — `!` doesn't make sense on floats.
+                let (src_reg, src_ty, src_tokens) = lower_expr(ctx, expr)?;
+                if !src_ty.is_integer() && src_ty != KernelType::Bool {
+                    return Err(syn::Error::new(
+                        *span,
+                        format!(
+                            "unary `!` requires integer or bool operand, got {}",
+                            src_ty.display_name()
+                        ),
+                    ));
+                }
+                let (dst, not_tokens) = arith::lower_not(ctx, &src_reg, &src_ty);
+                let combined = quote! { #src_tokens #not_tokens };
+                Ok((dst, src_ty, combined))
+            }
         },
 
         // Parenthesized: just recurse
