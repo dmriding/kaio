@@ -54,12 +54,13 @@ FFI binding headers to generate).
 - `cuda-version-from-build-system` — auto-detect from installed toolkit.
   Would break on machines without a CUDA toolkit (contradicts the
   dynamic-loading goal of no build-time CUDA requirement).
-- `cuda-12080` — pin to CUDA 12.8 headers. Dave has CUDA 12.8 installed.
-  Combined with `dynamic-loading`, the binding ABI is set at build time
-  but the actual driver is resolved at runtime. Can build without toolkit
-  installed (untested — to be verified on a clean CI machine in Phase 5).
+- `cuda-12080` — pin to CUDA 12.8 headers. CUDA 12.8 is installed on
+  the dev machine. Combined with `dynamic-loading`, the binding ABI is
+  set at build time but the actual driver is resolved at runtime. Can
+  build without toolkit installed (untested — to be verified on a
+  clean CI machine in Phase 5).
 
-**Decision:** `cuda-12080`. Matches Dave's installed toolkit exactly.
+**Decision:** `cuda-12080`. Matches the installed toolkit exactly.
 Documented the reasoning in a comment in root `Cargo.toml`.
 
 ### README / LICENSE placement

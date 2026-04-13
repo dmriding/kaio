@@ -3,7 +3,6 @@
 **Status:** ✅ Complete
 **Branch:** `phase6`
 **Parent:** `64b2bca` (Sprint 6.5 + PHASE_6_LOG hash fill)
-**Plan file:** `C:\Users\david\.claude\plans\calm-inventing-dragon.md`
 **Master plan:** [`phase6_master_plan.md`](phase6_master_plan.md)
 
 ---
@@ -64,7 +63,7 @@ bf16/non-standard mma shapes, macro-codegen `load_module` migration.
 
 ## Three-gate bring-up
 
-Plan Opus + Codex reviews both flagged this sprint's stacked novelty
+Both planning reviews flagged this sprint's stacked novelty
 (TC matmul #1 + scale + optional causal mask + row-serial softmax +
 f32→f16 bridge + TC matmul #2) as a debugging swamp risk. Solution:
 structure implementation as three internally-sequenced correctness
@@ -167,8 +166,8 @@ the structural claims without a GPU:
   actual: 70 }` before any driver interaction.
 - **`attention_tc_causal_module_rejects_sm_70_via_validate`** —
   same for the causal variant.
-- **`attention_tc_module_shared_bytes_under_ceiling`** — Codex-fold
-  regression gate: builds both variants, sums the module's
+- **`attention_tc_module_shared_bytes_under_ceiling`** —
+  adversarial-review regression gate: builds both variants, sums the module's
   `SharedDecl` bytes, asserts total stays under the 46 KB ceiling
   (2 KB margin vs the 48 KB hardware static shared limit). Actual
   total: 41,472 B = 40.5 KB. Asserts the sum matches the module-
@@ -241,9 +240,9 @@ pre-bridge / bridge-only / post-bridge failures respectively.
 - Clippy clean with `-D warnings`. Rustfmt clean. `cargo doc
   --workspace --no-deps` clean.
 
-## Plan-mode review folds (both accepted)
+## Planning review folds (both accepted)
 
-### Opus 4.6 (pass 1)
+### Planning pass
 - **D5 V/K tile iteration** pinned explicitly as 16×8 per-mma
   tiles; budget recomputed to 41,472 B at worst case with
   pre-implementation headroom verification.
@@ -253,7 +252,7 @@ pre-bridge / bridge-only / post-bridge failures respectively.
 - **D11 test matrix** expanded to 5 shapes × 2 causal variants =
   10 correctness tests plus the row-0 canary.
 
-### Codex 5.4 (pass 2)
+### Adversarial pass
 - **Scope split into three internal bring-up gates** — the primary
   process recommendation. Adopted as Gate A → Gate B → Gate C with
   dev-only entrypoints deleted at the final sprint commit.

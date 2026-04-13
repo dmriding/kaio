@@ -265,8 +265,12 @@ pub fn build_shared_mem_ptx() -> String {
 /// the offline assembler for SM 8.0+. The kernel is not functionally
 /// meaningful — just enough valid PTX to exercise the `TensorCoreOp::MmaSync`
 /// emit path end-to-end.
+///
+/// Sprint 6.10 D3: takes `sm` as an explicit argument. Callers pass the
+/// SM target directly instead of mutating `KAIO_SM_TARGET`. `sm` must
+/// be Ampere-or-better (sm_80+) — enforced by the caller, not here.
 #[allow(dead_code)]
-pub fn build_mma_sync_ptx() -> String {
+pub fn build_mma_sync_ptx(sm: &str) -> String {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("mma_sync_smoke");
 
@@ -313,9 +317,7 @@ pub fn build_mma_sync_ptx() -> String {
     kernel.push(PtxInstruction::Control(ControlOp::Ret));
     kernel.set_registers(alloc.into_allocated());
 
-    // mma.sync requires SM 8.0+. Floor the env override at sm_80.
-    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
-    let mut module = PtxModule::new(&sm);
+    let mut module = PtxModule::new(sm);
     module.add_kernel(kernel);
 
     let mut w = PtxWriter::new();
@@ -328,8 +330,11 @@ pub fn build_mma_sync_ptx() -> String {
 ///
 /// Used by `ptxas_verify_cp_async` to confirm the cp.async emission
 /// passes the offline assembler for SM 8.0+.
+///
+/// Sprint 6.10 D3: takes `sm` as an explicit argument. Callers pass the
+/// SM target directly; `sm` must be Ampere-or-better (sm_80+).
 #[allow(dead_code)]
-pub fn build_cp_async_ptx() -> String {
+pub fn build_cp_async_ptx(sm: &str) -> String {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("cp_async_smoke");
 
@@ -374,8 +379,7 @@ pub fn build_cp_async_ptx() -> String {
     kernel.push(PtxInstruction::Control(ControlOp::Ret));
     kernel.set_registers(alloc.into_allocated());
 
-    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
-    let mut module = PtxModule::new(&sm);
+    let mut module = PtxModule::new(sm);
     module.add_kernel(kernel);
 
     let mut w = PtxWriter::new();
@@ -393,8 +397,11 @@ pub fn build_cp_async_ptx() -> String {
 /// emission is structurally valid PTX for SM 8.0+. The kernel does no
 /// initial tile population — ptxas does not care that the shared
 /// memory is uninitialized; it only verifies the instruction syntax.
+///
+/// Sprint 6.10 D3: takes `sm` as an explicit argument. Callers pass the
+/// SM target directly; `sm` must be Ampere-or-better (sm_80+).
 #[allow(dead_code)]
-pub fn build_mma_sync_shared_ptx() -> String {
+pub fn build_mma_sync_shared_ptx(sm: &str) -> String {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("mma_sync_shared_smoke");
 
@@ -463,8 +470,7 @@ pub fn build_mma_sync_shared_ptx() -> String {
     kernel.push(PtxInstruction::Control(ControlOp::Ret));
     kernel.set_registers(alloc.into_allocated());
 
-    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
-    let mut module = PtxModule::new(&sm);
+    let mut module = PtxModule::new(sm);
     module.add_kernel(kernel);
 
     let mut w = PtxWriter::new();

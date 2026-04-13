@@ -15,12 +15,16 @@ use kaio_core::types::PtxType;
 use cudarc::driver::PushKernelArg;
 use kaio_runtime::{KaioDevice, LaunchConfig};
 
-/// Build the vector_add kernel IR and emit it to a PTX string.
+/// Build the vector_add kernel IR and return it as a `PtxModule`.
 ///
 /// This is the same IR construction as `kaio-core/tests/vector_add_emit.rs`,
 /// extracted here so both the emission test and the E2E test share the same
 /// kernel definition.
-fn build_vector_add_ptx() -> String {
+///
+/// Sprint 6.10 D1a: migrated from `build_vector_add_ptx() -> String` to
+/// return the `PtxModule` directly, matching the `load_module(&PtxModule)`
+/// path used by internal TC kernels and the `#[gpu_kernel]` macro.
+fn build_vector_add_module() -> PtxModule {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("vector_add");
 
@@ -173,7 +177,11 @@ fn build_vector_add_ptx() -> String {
     let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_70".to_string());
     let mut module = PtxModule::new(&sm);
     module.add_kernel(kernel);
+    module
+}
 
+/// Emit a `PtxModule` to PTX text for debug printing on failure paths.
+fn emit_ptx_debug(module: &PtxModule) -> String {
     let mut w = PtxWriter::new();
     module.emit(&mut w).unwrap();
     w.finish()
@@ -182,13 +190,16 @@ fn build_vector_add_ptx() -> String {
 #[test]
 #[ignore] // requires NVIDIA GPU
 fn vector_add_small() {
-    let ptx = build_vector_add_ptx();
+    let ptx_module = build_vector_add_module();
 
     // Load into driver
     let device = KaioDevice::new(0).expect("GPU required");
-    let module = device.load_ptx(&ptx).unwrap_or_else(|e| {
-        eprintln!("=== PTX that failed to load ===\n{ptx}");
-        panic!("load_ptx failed: {e}");
+    let module = device.load_module(&ptx_module).unwrap_or_else(|e| {
+        eprintln!(
+            "=== PTX that failed to load ===\n{}",
+            emit_ptx_debug(&ptx_module)
+        );
+        panic!("load_module failed: {e}");
     });
     let func = module.function("vector_add").unwrap_or_else(|e| {
         panic!("function('vector_add') failed: {e}");
@@ -216,7 +227,7 @@ fn vector_add_small() {
             .launch(cfg)
     }
     .unwrap_or_else(|e| {
-        eprintln!("=== PTX ===\n{ptx}");
+        eprintln!("=== PTX ===\n{}", emit_ptx_debug(&ptx_module));
         panic!("kernel launch failed: {e}");
     });
 
@@ -232,12 +243,15 @@ fn vector_add_small() {
 #[test]
 #[ignore] // requires NVIDIA GPU
 fn vector_add_large() {
-    let ptx = build_vector_add_ptx();
+    let ptx_module = build_vector_add_module();
 
     let device = KaioDevice::new(0).expect("GPU required");
-    let module = device.load_ptx(&ptx).unwrap_or_else(|e| {
-        eprintln!("=== PTX that failed to load ===\n{ptx}");
-        panic!("load_ptx failed: {e}");
+    let module = device.load_module(&ptx_module).unwrap_or_else(|e| {
+        eprintln!(
+            "=== PTX that failed to load ===\n{}",
+            emit_ptx_debug(&ptx_module)
+        );
+        panic!("load_module failed: {e}");
     });
     let func = module.function("vector_add").unwrap_or_else(|e| {
         panic!("function('vector_add') failed: {e}");
@@ -265,7 +279,7 @@ fn vector_add_large() {
             .launch(cfg)
     }
     .unwrap_or_else(|e| {
-        eprintln!("=== PTX ===\n{ptx}");
+        eprintln!("=== PTX ===\n{}", emit_ptx_debug(&ptx_module));
         panic!("kernel launch failed: {e}");
     });
 

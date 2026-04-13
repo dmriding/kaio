@@ -75,12 +75,12 @@ the magnitude of the win on either side.
 6. `cargo publish -p kaio-ops --dry-run` → full publish
 7. `git tag v0.2.0 <commit>` + `git push --tags`
 8. GitHub release with CHANGELOG 0.2.0 section as the body
-9. Launch post / announcements (Dave)
+9. Launch post / announcements
 
 ### Explicitly out of scope
 
-- README.md rewrite / landing copy — Dave is handling this separately with external feedback. The landing page gets the 92.5% headline and the positioning pass that a launch deserves; it's not mechanical doc work.
-- env-var-based test isolation fix (Codex's finding #2 on 2026-04-13): deferred to a dedicated post-v0.2.0 hygiene sprint with the clean-fix path already scoped (parameterize SM target + cache path into helper functions, eliminating `set_var` calls entirely). Pre-existing from Phase 5, zero test failures in practice, fix is mechanical but not small. Tracked in `tech_debt.md`.
+- README.md rewrite / landing copy — handled separately with external feedback. The landing page gets the 92.5% headline and the positioning pass that a launch deserves; it's not mechanical doc work.
+- env-var-based test isolation fix (adversarial-review finding #2 on 2026-04-13): deferred to a dedicated post-v0.2.0 hygiene sprint with the clean-fix path already scoped (parameterize SM target + cache path into helper functions, eliminating `set_var` calls entirely). Pre-existing from Phase 5, zero test failures in practice, fix is mechanical but not small. Tracked in `tech_debt.md`.
 
 ---
 

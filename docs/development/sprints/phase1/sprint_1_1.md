@@ -26,8 +26,8 @@ extensions, and GpuType impls to maintain until needed.
 - Half-precision types may require the `half` crate dependency
 - Adding later is a non-breaking change (new enum variants, new trait impls)
 
-Marked with an explicit "do NOT add" comment to prevent Forge agents from
-scope-creeping.
+Marked with an explicit "do NOT add" comment to prevent scope creep in
+future sprints.
 
 ### Register allocator — 5 counters vs 7 (per PTX type)
 
@@ -72,7 +72,7 @@ nvcc output as a golden reference file at
 
 ### Operand immediates — single i32 vs separate signed/unsigned
 
-**Context:** Dave (via review feedback) flagged that `Operand::Imm32(i32)`
+**Context:** Review feedback flagged that `Operand::Imm32(i32)`
 would force casting through `i32` when passing unsigned values. The nvcc
 output has `mul.wide.u32 %rd5, %r1, 4` where `4` should be unsigned.
 

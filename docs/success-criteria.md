@@ -271,4 +271,4 @@ matmuls accumulate FP error).
 - `cargo fmt` — enforced before every commit via pre-commit hook
 - `cargo clippy --workspace -- -D warnings` — zero warnings, no exceptions
 - These are non-negotiable across all phases
-- Forge agents must run both before marking any sprint as complete
+- Both must pass before marking any sprint as complete

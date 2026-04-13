@@ -54,7 +54,7 @@ use kaio_core::types::PtxType;
 /// Parameters (in order): `a_ptr` (f16), `b_ptr` (f16), `d_ptr` (f32).
 /// The C input is hardcoded to zeros inside the kernel so the host
 /// doesn't need to ship a buffer of zeros.
-fn build_mma_gate_ptx() -> String {
+fn build_mma_gate_module() -> PtxModule {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("mma_sync_gate");
 
@@ -151,7 +151,11 @@ fn build_mma_gate_ptx() -> String {
     };
     let mut module = PtxModule::new(&sm);
     module.add_kernel(kernel);
+    module
+}
 
+/// Emit a `PtxModule` to PTX text for debug printing on failure paths.
+fn emit_ptx_debug(module: &PtxModule) -> String {
     let mut w = PtxWriter::new();
     module.emit(&mut w).unwrap();
     w.finish()
@@ -186,7 +190,7 @@ fn build_b_host() -> Vec<f16> {
 #[test]
 #[ignore] // requires NVIDIA GPU with SM 8.0+
 fn mma_sync_m16n8k16_fragment_gate() {
-    let ptx = build_mma_gate_ptx();
+    let ptx_module = build_mma_gate_module();
 
     let device = KaioDevice::new(0).expect("GPU required for this test");
 
@@ -198,9 +202,12 @@ fn mma_sync_m16n8k16_fragment_gate() {
         "mma.sync.m16n8k16 requires SM 8.0+ (got sm_{major}{minor})",
     );
 
-    let module = device.load_ptx(&ptx).unwrap_or_else(|e| {
-        eprintln!("=== PTX that failed to load ===\n{ptx}");
-        panic!("load_ptx failed: {e}");
+    let module = device.load_module(&ptx_module).unwrap_or_else(|e| {
+        eprintln!(
+            "=== PTX that failed to load ===\n{}",
+            emit_ptx_debug(&ptx_module)
+        );
+        panic!("load_module failed: {e}");
     });
     let func = module
         .function("mma_sync_gate")
@@ -231,7 +238,7 @@ fn mma_sync_m16n8k16_fragment_gate() {
             .launch(cfg)
     }
     .unwrap_or_else(|e| {
-        eprintln!("=== PTX ===\n{ptx}");
+        eprintln!("=== PTX ===\n{}", emit_ptx_debug(&ptx_module));
         panic!("mma_sync_gate launch failed: {e}");
     });
 

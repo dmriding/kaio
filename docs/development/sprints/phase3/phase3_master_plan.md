@@ -596,8 +596,7 @@ Dependencies: All prior sprints
 ```
 
 Sprints 3.1 and 3.2 have NO dependency on each other — 3.1 is pure
-kaio-macros work, 3.2 is pure kaio-core work. They can execute in parallel
-via Forge.
+kaio-macros work, 3.2 is pure kaio-core work. They can execute in parallel.
 
 ---
 

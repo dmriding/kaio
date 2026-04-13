@@ -13,15 +13,18 @@ Reductions now compute linear tid = `tidx + tidy * block_dim_x` for
 with square (16x16), asymmetric (32x8), and identity-based 2D blocks.
 **Resolved:** Sprint 5.1
 
-### Host-level codegen regression tests
+### ~~Host-level codegen regression tests~~ RESOLVED (Sprint 6.10 D2)
 
-Critical fixes (launch config block_dim, shared addressing) are only
-verified by ignored GPU tests — not part of CI. Add host-level tests:
+Four host-side codegen regression tests landed in `kaio-macros`, all passing in CI without a GPU:
 
-- launch wrapper emits correct `block_dim` matching declared `block_size`
-- shared memory lowering emits `Operand::SharedAddr` + `Add` pattern
-- reduction lowering uses `_kaio_reduce_smem` named-symbol addressing
-  **Added:** Sprint 4.2 review | **Sprint:** Phase 4.8 or Phase 5
+- `launch_wrapper_emits_correct_block_dim_1d` / `_2d` — verify `LaunchConfig.block_dim` matches declared `block_size` for both 1D and 2D attribute forms
+- `shared_memory_lowering_emits_shared_addr_pattern` — verify `Operand::SharedAddr(...)` + `Add` pattern for `shared_mem![]` lowering
+- `reduction_lowering_uses_named_symbol` — verify `"_kaio_reduce_smem"` literal used by `block_reduce_sum` / `_max` lowering
+- `launch_wrapper_threads_compute_capability_into_module_build` — added in D2 as `#[ignore]`'d spec-stub for D1a, activated after D1a landed; verifies macro reads `device.info().compute_capability`, calls `load_module`, does NOT emit `load_ptx`
+
+Each test has a regression canary comment naming the mutation it guards against. One mutation verified end-to-end (`Operand::SharedAddr` → `Operand::MUTATION_TEST` in `lower/memory.rs` — test failed with the expected diagnostic, then reverted). Other three tests use identical substring-match mechanics, validated by parity.
+
+**Resolved:** Sprint 6.10 D2
 
 ### fma() f64 support
 
@@ -126,56 +129,17 @@ measured 6.7b uplift over 6.7 was +2.4pp sync / +7.4pp async
 (79.9→82.3 / 85.1→92.5).
 **Resolved:** Sprint 6.7b
 
-### `PtxModule::validate()` bypass via `load_ptx(&str)`
+### ~~`PtxModule::validate()` bypass via `load_ptx(&str)`~~ RESOLVED (Sprint 6.10 D1)
 
-`kaio-runtime::KaioDevice::load_module(&PtxModule)` calls
-`PtxModule::validate()` before handing PTX text to the driver. But
-`KaioDevice::load_ptx(&str)` (the older raw-text entrypoint) does
-not — a user who builds a module, emits to text manually, and
-loads via `load_ptx(ptx_text)` skips SM validation.
+Full resolution across D1a (migration) + D1b (deprecation):
 
-Not a correctness bug (ptxas will still catch it downstream, just
-with a cryptic error). Candidates if this bites:
+- **D1a** — `#[gpu_kernel]` proc-macro codegen in `kaio-macros/src/codegen/` now emits `device.load_module(&PtxModule)` instead of `device.load_ptx(&str)`. The macro reads `device.info().compute_capability` at launch time, formats as `sm_XX`, passes it to a generated `build_module(sm: &str) -> PtxModule` function, and calls `load_module`. The `PTX_CACHE: OnceLock<String>` cache was removed; modules are rebuilt per launch (microseconds of host overhead; measured no 4096² kernel-time regression, +0.01ms at 256² as the expected cost-model change).
+- **D1a** also migrated 4 non-macro test call sites (`vector_add_e2e`, `cp_async_roundtrip`, `mma_sync_fragment`) to the `load_module` path. The one remaining `load_ptx(&str)` caller is `load_module()` itself at `device.rs:117` (private implementation detail after `validate()`).
+- **D1b** — Added `#[deprecated(since = "0.2.1", note = "use load_module(&PtxModule) — runs PtxModule::validate() for readable SM-mismatch errors")]` on `KaioDevice::load_ptx(&str)` with a migration-guide rustdoc. Public API preserved (not removed — raw-PTX use cases still supported for external PTX files / hand-written PTX research). Internal self-call in `load_module` gated with `#[allow(deprecated)]` to prevent warning surface.
 
-1. Re-parse the `.target sm_NN` line from the PTX text and do a
-   minimal regex check for known-SM-gated features (`mma.sync`,
-   `cp.async`). Hacky.
-2. Deprecate `load_ptx(&str)` in favor of `load_module(&PtxModule)`
-   and migrate all internal callers. Cleanest.
-3. Just document the divergence and leave it.
+Trust-boundary fix complete: user-authored kernels with Ampere-gated features (`mma.sync`, `cp.async`) on sub-Ampere targets now surface a structured `KaioError::Validation` via `PtxModule::validate()` instead of a cryptic ptxas error.
 
-Leaning toward option 2 in a future sprint, after the macro codegen
-path has fully moved to the `PtxModule` entrypoint.
-
-**Priority elevated (Sprint 6.4 retrospective, Codex 5.4 review):**
-With 6.4 adding a second internal TC kernel (`matmul_tc_async`) on
-top of `matmul_tc`, the surface area that bypasses SM validation
-has grown — `mma.sync`, `cp.async`, and two internal kernel variants
-all take the `load_ptx(&str)` path. This is now a trust-boundary
-issue, not just an optimization. Sprint 6.5's auto-tuner is a
-natural centralization point for kernel loading; migrating all
-internal callers to `load_module(&PtxModule)` there, then deprecating
-`load_ptx(&str)`, should be one of the **first** cleanup targets
-after 6.5 or during post-Phase-6 stabilization.
-
-**Partial resolution (Sprint 6.5):** The two TC kernels
-(`matmul_tc` and `matmul_tc_async`) are migrated to
-`device.load_module(&PtxModule)`. Their module target SM is derived
-from `device.info()` at call time, and `PtxModule::validate()`
-catches sub-Ampere cleanly via `ValidationError::SmTooLow` (surfaced
-as `KaioError::Validation`, distinct from `KaioError::PtxLoad`). The
-ad-hoc `device.info().compute_capability < 8` checks in both host
-APIs are deleted.
-
-**Remaining work:** the `#[gpu_kernel]` proc-macro codegen in
-`kaio-macros/src/codegen/launch_wrapper.rs` still emits
-`device.load_ptx(&str)` calls. That path covers every user-authored
-scalar kernel plus the scalar `matmul_kernel::matmul` family. After
-that migration, `KaioDevice::load_ptx(&str)` can be `#[deprecated]`
-with a migration guide. Until then, deprecating it would emit a
-warning at every user macro call site — unacceptable noise.
-
-**Added:** Sprint 6.2 | **Elevated:** Sprint 6.4 | **Partial resolution:** Sprint 6.5 (TC kernels migrated) | **Remaining:** macro-codegen migration, then `#[deprecated]` on `load_ptx(&str)`
+**Added:** Sprint 6.2 | **Elevated:** Sprint 6.4 | **Partial resolution:** Sprint 6.5 (TC kernels migrated) | **Resolved:** Sprint 6.10 D1a + D1b (macro-codegen migration + deprecation)
 
 ### No GPU runtime test for scalar f16 kernel execution
 
@@ -193,33 +157,13 @@ which is indirect coverage. A dedicated scalar-f16 GPU roundtrip
 test would close the gap explicitly.
 **Added:** Sprint 6.2 (retroactive 6.1 gap) | **Sprint:** TBD
 
-### `ptxas_verify` tests mutate process-global `KAIO_SM_TARGET`
+### ~~`ptxas_verify` tests mutate process-global `KAIO_SM_TARGET`~~ RESOLVED (Sprint 6.10 D3)
 
-Three of the `kaio-core/tests/ptxas_verify.rs` tests
-(`ptxas_verify_mma_sync`, `ptxas_verify_mma_sync_shared`,
-`ptxas_verify_cp_async`) call `unsafe { std::env::set_var("KAIO_SM_TARGET",
-...) }` to force an Ampere-or-better target for the PTX they're about
-to verify. The test binary's single-threaded default makes this safe
-in practice, but there's no harness-level enforcement (no
-`#[serial]`, no cargo-nextest isolation), and any future parallel
-test that reads `KAIO_SM_TARGET` could race against these writes.
+Fixed by option 1: three builders in `kaio-core/tests/common/mod.rs` (`build_mma_sync_ptx`, `build_mma_sync_shared_ptx`, `build_cp_async_ptx`) now take `sm: &str` as an explicit argument. All three `unsafe { std::env::set_var("KAIO_SM_TARGET", ...) }` calls in `kaio-core/tests/ptxas_verify.rs` are removed. Tests pass the SM target directly to the builder.
 
-Not a correctness issue in the PTX itself — the test harness's
-default `--test-threads=1` inside a single binary keeps this
-serialized — but it's a hygiene gap that would bite if someone runs
-with `--test-threads=N` or a future test starts mutating env vars
-from another thread. Candidates:
+**Audit surfaced (not in scope for D3):** three other helpers (`build_vector_add_ptx`, `build_shared_mem_ptx`, `build_ld_global_b128_ptx`) still read `KAIO_SM_TARGET` internally. Their callers do NOT mutate the env var — no hygiene issue today. Parameterizing them for consistency is a minor follow-up, not a correctness concern.
 
-1. Replace `set_var` with a per-test PTX re-build path that accepts
-   the SM target as an argument, sidestepping the env var entirely.
-2. Add a `serial_test` dependency and gate the affected tests.
-3. Document the constraint and leave it.
-
-Option 1 is cleanest. The `build_mma_sync_ptx` / `build_cp_async_ptx`
-helpers in `tests/common/mod.rs` currently read `KAIO_SM_TARGET`
-internally — parameterize them to take an SM target instead, and
-the env-var mutation disappears.
-**Added:** Sprint 6.4 (Codex adversarial review 2026-04-12) | **Sprint:** TBD
+**Added:** Sprint 6.4 review, 2026-04-12 | **Resolved:** Sprint 6.10 D3
 
 ### Pathological-shape benchmark CPU reference dominates wall time
 

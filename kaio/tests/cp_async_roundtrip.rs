@@ -39,7 +39,7 @@ use kaio_core::ir::{
 };
 use kaio_core::types::PtxType;
 
-fn build_cp_async_roundtrip_ptx() -> String {
+fn build_cp_async_roundtrip_module() -> PtxModule {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("cp_async_roundtrip");
 
@@ -186,7 +186,11 @@ fn build_cp_async_roundtrip_ptx() -> String {
     };
     let mut module = PtxModule::new(&sm);
     module.add_kernel(kernel);
+    module
+}
 
+/// Emit a `PtxModule` to PTX text for debug printing on failure paths.
+fn emit_ptx_debug(module: &PtxModule) -> String {
     let mut w = PtxWriter::new();
     module.emit(&mut w).unwrap();
     w.finish()
@@ -195,16 +199,19 @@ fn build_cp_async_roundtrip_ptx() -> String {
 #[test]
 #[ignore] // requires NVIDIA GPU with SM 8.0+
 fn cp_async_ca_roundtrip_4_floats() {
-    let ptx = build_cp_async_roundtrip_ptx();
+    let ptx_module = build_cp_async_roundtrip_module();
 
     let device = KaioDevice::new(0).expect("GPU required for this test");
     let info = device.info().expect("device info");
     let (major, _minor) = info.compute_capability;
     assert!(major >= 8, "cp.async requires SM 8.0+ (got sm_{major})");
 
-    let module = device.load_ptx(&ptx).unwrap_or_else(|e| {
-        eprintln!("=== PTX that failed to load ===\n{ptx}");
-        panic!("load_ptx failed: {e}");
+    let module = device.load_module(&ptx_module).unwrap_or_else(|e| {
+        eprintln!(
+            "=== PTX that failed to load ===\n{}",
+            emit_ptx_debug(&ptx_module)
+        );
+        panic!("load_module failed: {e}");
     });
     let func = module
         .function("cp_async_roundtrip")
@@ -228,7 +235,7 @@ fn cp_async_ca_roundtrip_4_floats() {
             .launch(cfg)
     }
     .unwrap_or_else(|e| {
-        eprintln!("=== PTX ===\n{ptx}");
+        eprintln!("=== PTX ===\n{}", emit_ptx_debug(&ptx_module));
         panic!("cp_async_roundtrip launch failed: {e}");
     });
 

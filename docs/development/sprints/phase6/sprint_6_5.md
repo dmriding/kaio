@@ -261,19 +261,19 @@ All gates green before commit:
 | `docs/development/sprints/phase6/sprint_6_5.md` | **NEW** — this doc. |
 | `docs/development/tech_debt.md` | `load_ptx(&str)` entry updated with 6.5 migration status. |
 
-## Reviewer input
+## Review input
 
-- **Opus 4.6:** green light with two folds — conservative-default
+- **Planning review:** green light with two folds — conservative-default
   inline comment at the fallback site (D4) pointing at the 6.4
   timing datapoint and 6.7 revisit trigger; noted the SM-format-
   string edge case as a non-action.
-- **Codex 5.4:** green light with five folds — softened pre-check
-  error message (D4) to name both fallback options; narrow-contract
-  docs requirement (D7) to frame `matmul_auto_tc` as a Sprint 6.5
-  preview surface rather than a mature API; added host-only
-  cache-coexistence test (D9); explicit Breaking Changes bullet
-  for `KAIO_SM_TARGET` asymmetry (D11); structural tests kept
-  instruction-centric.
+- **Adversarial review:** green light with five folds — softened
+  pre-check error message (D4) to name both fallback options;
+  narrow-contract docs requirement (D7) to frame `matmul_auto_tc`
+  as a Sprint 6.5 preview surface rather than a mature API; added
+  host-only cache-coexistence test (D9); explicit Breaking Changes
+  bullet for `KAIO_SM_TARGET` asymmetry (D11); structural tests
+  kept instruction-centric.
 
 ## Carry-forward to 6.6 and 6.7
 

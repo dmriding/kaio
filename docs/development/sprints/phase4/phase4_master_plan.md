@@ -2,7 +2,6 @@
 
 **Status:** Complete (v0.0.4, 2026-04-11)
 **Depends on:** Phase 3 complete (commit `0691be8`)
-**Reviewed by:** Codex 5.4 (readiness review), Claude Opus 4.6
 
 ## Goal
 
