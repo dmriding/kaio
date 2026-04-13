@@ -1,0 +1,13 @@
+# Cargo aliases for repo-internal tooling.
+#
+# `cargo xtask <command>` expands to running the `xtask` binary crate in
+# `--release` mode. See `xtask/src/main.rs` for the available subcommands
+# (`showcase`, `bench`, `all`, `--help`).
+#
+# The `--release` flag is chosen deliberately: xtask subcommands shell out
+# to other cargo invocations, and we want the xtask binary itself to be
+# fast (no debug-build overhead on startup). xtask has no heavy runtime
+# logic — cost is negligible regardless — but the convention matches what
+# rust-analyzer, Bevy, and cargo itself use.
+[alias]
+xtask = "run --package xtask --release --"

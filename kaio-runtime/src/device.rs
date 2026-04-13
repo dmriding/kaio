@@ -264,8 +264,7 @@ mod tests {
             "debug warning must mention performance: {msg}"
         );
         assert!(
-            msg.contains("Correctness is unaffected")
-                || msg.contains("correctness is unaffected"),
+            msg.contains("Correctness is unaffected") || msg.contains("correctness is unaffected"),
             "debug warning must explicitly state correctness is unaffected: {msg}"
         );
         assert!(

@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Repo-internal tooling: `cargo xtask showcase`, `cargo xtask bench`, etc."
+
+[dependencies]
+# Intentionally zero. The xtask binary only shells out via std::process::Command;
+# any heavier logic belongs in one of the published crates.

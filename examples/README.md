@@ -42,9 +42,23 @@ File a GitHub issue if you'd like to see any of these prioritized.
 
 ## Using these examples from a fresh clone
 
+The fastest way to see them all run, with no `cd` required:
+
 ```sh
 git clone https://github.com/dmriding/kaio.git
-cd kaio/examples/fused_silu_gate   # (once Sprint 6.8 lands)
+cd kaio
+cargo xtask showcase              # all three
+cargo xtask showcase silu         # just fused_silu_gate
+cargo xtask showcase --list       # list available names
+```
+
+Each example is also a standalone Cargo project you can run individually
+— the "standalone" part proves that the KAIO dependency works from a
+fresh `Cargo.toml`, not just from inside the workspace. To use an example
+that way:
+
+```sh
+cd kaio/examples/fused_silu_gate
 cargo run --release
 ```
 
