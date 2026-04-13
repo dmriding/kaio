@@ -10,7 +10,19 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
-No unreleased changes since v0.2.0.
+### Added — Sprint 6.10 (Close open threads)
+- **D2** — Four host-level codegen regression tests in `kaio-macros` (no GPU required): `launch_wrapper_emits_correct_block_dim_1d` / `_2d`, `shared_memory_lowering_emits_shared_addr_pattern`, `reduction_lowering_uses_named_symbol`, `launch_wrapper_threads_compute_capability_into_module_build`. CI can now catch macro codegen regressions without a GPU runner. Each test has a regression canary comment; one mutation verified end-to-end.
+
+### Changed — Sprint 6.10
+- **D1a** — `#[gpu_kernel]` macro-generated `launch()` now uses `device.load_module(&PtxModule)` instead of `device.load_ptx(&str)`. The macro threads `device.info().compute_capability` through to a `build_module(sm: &str) -> PtxModule` helper. User-authored kernels now flow through `PtxModule::validate()` before ptxas — SM mismatches surface as structured `KaioError::Validation` instead of cryptic ptxas errors. `#[gpu_kernel]` user API is unchanged.
+- **D1a** — `PTX_CACHE: OnceLock<String>` removed from macro codegen; modules rebuilt per launch. Measured no regression at 4096² async matmul (2.31ms vs 2.32ms baseline, within run-to-run noise). Small-matrix (256²) host-side overhead +0.01ms — expected cost-model change from cache removal.
+- **D1a** — Migrated 4 non-macro test call sites (`vector_add_e2e`, `cp_async_roundtrip`, `mma_sync_fragment`) from `load_ptx(&str)` to `load_module(&PtxModule)`.
+- **D3** — `kaio-core/tests/common/mod.rs` helpers `build_mma_sync_ptx`, `build_mma_sync_shared_ptx`, `build_cp_async_ptx` now take an explicit `sm: &str` argument. Three `unsafe { std::env::set_var("KAIO_SM_TARGET", ...) }` calls removed from `kaio-core/tests/ptxas_verify.rs`. Test hygiene landmine under parallel runners eliminated.
+
+### Deprecated — Sprint 6.10 D1b
+- `KaioDevice::load_ptx(&str)` is `#[deprecated(since = "0.2.1", note = "use load_module(&PtxModule) — runs PtxModule::validate() for readable SM-mismatch errors")]`. Public API preserved (not removed); raw-PTX use cases (external PTX files, hand-written PTX research) remain supported. Migration-guide rustdoc added with before/after example.
+
+## [0.2.0] — 2026-04-13 — Phase 6: Tensor Cores & Async Copies
 
 ## [0.2.0] — 2026-04-13 — Phase 6: Tensor Cores & Async Copies
 
@@ -330,8 +342,8 @@ documentation lives under
   (sync wins 256-2048, async wins 4096). Per-shape cache hits
   override the heuristic; this only affects the first-call path
   before tuning is run. See D6 in
-  `docs/development/sprints/phase6/sprint_6_7.md` and the 2026-04-12
-  Codex post-review fold for the measurement.
+  `docs/development/sprints/phase6/sprint_6_7.md` for the measurement
+  and review notes (2026-04-12).
 - **`kaio_ops::matmul_tc` and `kaio_ops::matmul_tc_async` are now
   stable `pub` exports.** They were previously `#[doc(hidden)] pub
   use` (test-reachable but not part of the documented surface). Code

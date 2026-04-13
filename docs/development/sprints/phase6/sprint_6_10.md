@@ -3,8 +3,6 @@
 **Status:** Executing (2026-04-13)
 **Branch:** `cleanup/open-threads`
 **Parent:** v0.2.0 release, main branch tip
-**Plan:** `C:\Users\david\.claude\plans\sprint_6_10_close_open_threads.md`
-**Review rounds:** CC draft → Opus 4.6 → Codex 5.4 → Dave self-review (all accepted)
 
 ---
 
@@ -29,9 +27,9 @@ Per plan: diagnostic bisection tool. Log median async % vs cuBLAS at 4096² afte
 |------------|-------|-------|-------|--------------|-------------|-------|
 | **Pre-sprint baseline** | 112.1% | 109.8% | 107.1% | **109.8%** | **103.1%** | 2026-04-13. cuBLAS running at 47-59 TFLOPS this session (thermal / driver state). Use these numbers as "this machine, today" reference; the published 102.3% v0.2.0 median is the cross-session baseline. |
 | **D2 landed** | 100.4% | 143.4% | 113.4% | **113.4%** | **116.9%** | 2026-04-13, commit `b49cbad`. Wide ratio variance driven by cuBLAS wobbling 45-58 TFLOPS — KAIO async itself was 47/65/66 TFLOPS (run 1 looks like thermal outlier). D2 touched only `kaio-macros` host tests — no runtime kernel path change, no mechanism for perf regression. Noise, not signal. |
-| **D1a landed** | 100.9% | 103.4% | 113.4% | **103.4%** | **104.5%** | 2026-04-13, commit `7fad5f2`. KAIO async 4096² median: **2.31ms / 59.48 TFLOPS** vs baseline 2.32ms / 59.20 TFLOPS — within noise, no regression. Small-matrix 256² async: 0.38→0.39ms (+0.01ms, expected `OnceLock<String>` cache-removal cost; per plan NOT a regression). Trust-boundary fix is in without perf cost at the headline size. |
-| D1b landed | | | | | | Expected: no delta (attribute only) |
-| D3 landed | | | | | | Expected: no delta (test refactor) |
+| **D1a landed** | 100.9% | 103.4% | 113.4% | **103.4%** | **104.5%** | 2026-04-13, commit `7fad5f2`. KAIO async 4096² median: **2.31ms / 59.48 TFLOPS** vs baseline 2.32ms / 59.20 TFLOPS — within noise, no regression. Small-matrix 256² async: 0.38→0.39ms (+0.01ms, expected `OnceLock<String>` cache-removal cost, not a regression). Trust-boundary fix is in without perf cost at the headline size. |
+| **D1b landed** | 100.9% | 108.0% | 108.5% | **108.0%** | **94.8%** | 2026-04-13, commit `b789346`. Attribute-only change (no runtime path). KAIO async 4096² median: 2.12ms / 65.05 TFLOPS — within run-to-run noise of D1a (2.31ms). Ratio drift is cuBLAS wobble. |
+| **D3 landed** | 105.7% | 109.5% | 123.4% | **109.5%** | **94.8%** | 2026-04-13, commit `bf13542`. Test refactor only (no runtime path). KAIO async 4096² median: 2.15ms / 64.04 TFLOPS. Within noise of D1b. Run 3 ratio spike (123.4%) driven by cuBLAS having a bad run (51.90 TFLOPS vs session median 60+). |
 
 **Action thresholds:**
 - Single run drops >5pp from prior checkpoint median → rerun 3×, confirm, stop and diagnose before next D
@@ -104,7 +102,7 @@ Test `launch_wrapper_threads_compute_capability_into_module_build` (D2 Test 5) w
 ### Gate status
 
 - ✅ Full workspace `cargo test` clean (host) — 140 + 122 + 24 + all other crate tests pass
-- ✅ Full workspace `cargo test -- --ignored` clean (GPU on Dave's 4090) — every GPU-gated test including the two long-running Gate C pathological-shape tests (74s and 69s) passes
+- ✅ Full workspace `cargo test -- --ignored` clean on the reference 4090 dev box — every GPU-gated test including the two long-running Gate C pathological-shape tests (74s and 69s) passes
 - ✅ `cargo check --workspace --tests` clean — no compile errors
 - ✅ All three example kernels (`fused_silu_gate`, `gelu_comparison`, `rms_norm`) — `cargo run --release` PASS correctness:
   - `fused_silu_gate`: max_abs_err 1.49e-8, 182.2 μs median
@@ -118,34 +116,77 @@ Commit: `7fad5f2` — migrate macro + test call sites to load_module(&PtxModule)
 
 ## D1b — Deprecation
 
-**Status:** Not started
+**Status:** ✅ Complete
 
 ### Work
 
-- `#[deprecated(note = "use load_module(&PtxModule) instead")]` on `KaioDevice::load_ptx(&str)`
-- Rustdoc migration guide with before/after example
+- ✅ Added `#[deprecated(since = "0.2.1", note = "use load_module(&PtxModule) — runs PtxModule::validate() for readable SM-mismatch errors")]` on `KaioDevice::load_ptx(&str)`
+- ✅ Added migration-guide rustdoc with before/after example pointing at `load_module`
+- ✅ Added `#[allow(deprecated)]` on the internal `self.load_ptx(&ptx_text)` call at [device.rs:117](../../../kaio-runtime/src/device.rs#L117) (inside `load_module()` — private implementation detail that can't be migrated without circular dependency)
 
-### Results
+### Gate status
 
-_To be filled in_
+- ✅ `cargo build --workspace` clean — no unexpected deprecation warnings in our own code
+- ✅ `cargo build --workspace --tests --examples` clean — neither tests nor user-facing examples surface the warning
+- ✅ `cargo doc --workspace --no-deps` clean — migration-guide rustdoc renders
+- ✅ All workspace tests pass (host + GPU)
+
+Commit: `b789346` — deprecate load_ptx(&str) with migration-guide rustdoc
 
 ---
 
 ## D3 — env-var hygiene
 
-**Status:** Not started
+**Status:** ✅ Complete
 
-### Target files
+### Target files migrated
 
-- `kaio-core/tests/common/mod.rs` — parameterize `build_mma_sync_ptx`, `build_cp_async_ptx` to take SM target argument
-- `kaio-core/tests/ptxas_verify.rs` — three tests (`ptxas_verify_mma_sync`, `ptxas_verify_mma_sync_shared`, `ptxas_verify_cp_async`) — pass SM target explicitly, remove `set_var` calls
+- ✅ `kaio-core/tests/common/mod.rs` — three builders (`build_mma_sync_ptx`, `build_mma_sync_shared_ptx`, `build_cp_async_ptx`) now take `sm: &str` as an explicit argument. Internal `std::env::var("KAIO_SM_TARGET")...` reads removed.
+- ✅ `kaio-core/tests/ptxas_verify.rs` — three tests (`ptxas_verify_mma_sync`, `ptxas_verify_mma_sync_shared`, `ptxas_verify_cp_async`) now pass `sm` directly to the builder. All three `unsafe { std::env::set_var(...) }` calls removed.
 
-### Results
+### Audit note
 
-_To be filled in_
+Other test helpers in `common/mod.rs` also read `KAIO_SM_TARGET` internally:
+
+- `build_vector_add_ptx` (line ~172 pre-sprint)
+- `build_shared_mem_ptx` (line ~253 pre-sprint)
+- `build_ld_global_b128_ptx` (line ~516 pre-sprint)
+
+Their callers (`ptxas_verify_vector_add`, `ptxas_verify_shared_mem`, `ptxas_verify_ld_global_b128`) do NOT call `set_var` — so no hygiene issue exists today. Left intact to keep the sprint scope focused on the `set_var` callers specifically; parameterizing the other three for consistency is a minor follow-up, not a correctness concern.
+
+### Gate status
+
+- ✅ All 6 `ptxas_verify_*` tests pass (`cargo test -p kaio-core --test ptxas_verify -- --ignored --nocapture`)
+- ✅ No `unsafe { set_var(...) }` calls remain in `ptxas_verify.rs`
+- ✅ `KAIO_SM_TARGET` user-facing env var still works (read by `sm_target()` helper in test, still read by `build_module` in macro codegen) — unchanged user surface
+- ✅ Full workspace `cargo test` clean
+
+Commit: `bf13542` — parameterize ptxas_verify builders, remove set_var hygiene issue
 
 ---
 
 ## Sprint summary
 
-_To be filled in at merge._
+**Status: all deliverables complete.** D2 → D1a → D1b → D3 executed in planned order, each with independent commits providing clean rollback points. No regressions at the headline 4096² async bench across all four checkpoints (kernel time stable at 2.12–2.32ms median per run, well within run-to-run variance). Small-matrix (256²) timing nudged +0.01ms after D1a as expected from the `OnceLock<String>` cache removal — the documented cost-model change.
+
+**Trust-boundary fix delivered:** `#[gpu_kernel]` macro-authored kernels now flow through `PtxModule::validate()` before ptxas sees the PTX. A user-authored kernel using Ampere-gated features (`mma.sync`, `cp.async`) on a sub-Ampere target now surfaces a structured `KaioError::Validation` instead of a cryptic ptxas error.
+
+**Deprecation in place:** `KaioDevice::load_ptx(&str)` is `#[deprecated(since = "0.2.1")]` with a migration-guide rustdoc. Public API preserved (not removed), so no breaking change.
+
+**CI coverage expanded:** 4 host-side codegen regression tests live in `kaio-macros` (block_dim 1D/2D, shared-memory lowering, reduction named symbol, SM threading canary). One mutation verified. CI can now catch macro codegen regressions without a GPU runner.
+
+**Test hygiene:** no `unsafe { std::env::set_var(...) }` calls remain in `ptxas_verify.rs`. Three `build_*_ptx` helpers now take SM target as an explicit argument.
+
+**Commits on branch (in order):**
+
+1. `18bb94a` update gitignore
+2. `c83320d` add Sprint 6.10 log skeleton
+3. `c18ffd5` D2 partial: launch_wrapper block_dim canaries + SM-threading stub
+4. `b49cbad` D2: shared memory + reduction lowering canaries
+5. `c4c7977` log: D2 complete, checkpoint bench captured
+6. `7fad5f2` D1a: migrate macro + test call sites to load_module(&PtxModule)
+7. `1a797db` log: D1a complete, checkpoint bench captured
+8. `b789346` D1b: deprecate load_ptx(&str) with migration-guide rustdoc
+9. `bf13542` D3: parameterize ptxas_verify builders, remove set_var hygiene issue
+
+Plus a final CHANGELOG + tech_debt update commit (next step).
