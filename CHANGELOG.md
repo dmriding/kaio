@@ -8,9 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Phase 6: Tensor Cores & Async Copies
+## [Unreleased]
 
-Branch: `phase6`. In progress toward v0.2.0.
+No unreleased changes since v0.2.0.
+
+## [0.2.0] — 2026-04-13 — Phase 6: Tensor Cores & Async Copies
+
+**Headline:** `kaio_ops::matmul_auto_tc` reaches **92.5% of cuBLAS sgemm
+at 4096²** on RTX 4090 (async path) — pure Rust, no CUDA C++, no
+Python, no toolchain. fp16 × fp16 → fp32 accumulation.
+
+**Highlights:**
+- Full tensor-core matmul stack (Ampere+): public `matmul_tc`,
+  `matmul_tc_async`, `matmul_auto_tc` with an auto-tuner cache and a
+  size-heuristic cache-miss default.
+- fp16 / bf16 type support and packed-half2 register allocator in
+  `kaio-core` (`mma.sync`, `cp.async`, fragment containers).
+- `PtxModule::validate()` + `KaioDevice::load_module(&PtxModule)` for
+  SM-gated validation at kernel-load time.
+- Three standalone showcase examples (`examples/fused_silu_gate`,
+  `gelu_comparison`, `rms_norm`) that build from a fresh clone.
+- Measured TC matmul results across 256-4096, with apples-to-apples
+  disclaimer in `docs/performance.md` + `docs/benchmarks.md`.
+
+For the full per-sprint detail, see the sections below. Sprint
+documentation lives under
+[docs/development/sprints/phase6/](docs/development/sprints/phase6/).
 
 ### Added — Sprint 6.1 (fp16/bf16 types)
 - `PtxType::F16` / `PtxType::BF16` with `.f16` / `.bf16` PTX suffixes.

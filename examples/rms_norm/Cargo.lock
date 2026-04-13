@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "kaio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kaio-core",
  "kaio-macros",
@@ -67,14 +67,14 @@ dependencies = [
 
 [[package]]
 name = "kaio-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "half",
 ]
 
 [[package]]
 name = "kaio-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "kaio-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cudarc",
  "kaio-core",

@@ -1,8 +1,8 @@
 # Phase 6 Master Plan — Tensor Cores + Async Copies
 
-**Status:** In progress (6.1–6.8 + 6.7b complete; 6.9 pending)
+**Status:** In progress (6.1–6.8 + 6.7b complete; 6.9 v0.2.0 publish prep in progress)
 **Depends on:** Phase 5 complete (v0.1.0, commit `bbc1c4d`)
-**Current branch tip:** `d8cd0a0` (Sprint 6.7b final — bank-conflict padding + D10 hoist, async 92.5% / sync 82.3% of cuBLAS sgemm at 4096²). See PHASE_6_LOG for per-sprint commit hashes.
+**Current branch tip:** Sprint 6.9 v0.2.0 publish prep in progress on `phase6`. Prior milestone: `d8cd0a0` (Sprint 6.7b final — bank-conflict padding + D10 hoist, async 92.5% / sync 82.3% of cuBLAS sgemm at 4096²). See PHASE_6_LOG for per-sprint commit hashes.
 **Sprint order (as executed):** 6.1 → 6.2 → 6.3 → 6.4 → 6.5 → 6.6 → 6.7 → 6.8 → 6.7b → 6.9. 6.8 was moved ahead of 6.7b on 2026-04-12 (showcase examples needed for a discoverable v0.2.0 before chasing incremental perf). 6.7b was then pulled back into the pre-publish window on 2026-04-13 when "92.5% of cuBLAS" became a launch-grade headline worth one more sprint.
 
 See [PHASE_6_LOG.md](PHASE_6_LOG.md) for per-sprint commit hashes

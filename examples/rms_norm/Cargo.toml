@@ -7,5 +7,8 @@ publish = false
 [workspace]
 
 [dependencies]
-# TODO(Sprint 6.9 publish): flip to `kaio = "0.2.0"` before pushing to crates.io.
-kaio = { path = "../../kaio" }
+# Path-dep form keeps this example buildable from the KAIO repo. The
+# version pin matches the published KAIO crate — after v0.2.0 publishes
+# to crates.io, this example can be copied out of the repo and the path
+# can be dropped; cargo will resolve via crates.io automatically.
+kaio = { path = "../../kaio", version = "0.2.0" }

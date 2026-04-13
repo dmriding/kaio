@@ -14,12 +14,17 @@
 //! - [`matmul_auto_tc`] / [`matmul_tc`] / [`matmul_tc_async`] —
 //!   tensor-core f16 × f16 → f32 matmul. Multi-warp 64×64 block tile,
 //!   4 warps × 32×32 sub-quadrant via 8 mma.sync.m16n8k16 per K-tile.
+//!   Bank-conflict-padded shared Tile B (Sprint 6.7b col-stride 36 B)
+//!   plus fragment-loader `(group_id, tig)` hoist for minimum
+//!   shared-memory serialisation on the fragment-B read hot path.
 //!   Edge-tile predication on M and N — only `K % 16 == 0` is
 //!   required (mma K-tile is structural). Requires SM 8.0+ (Ampere).
-//!   Sprint 6.7 measured performance: **79.9%** of cuBLAS sgemm at
-//!   4096² for the sync variant, **85.1%** for the cp.async double-
-//!   buffered variant. See `docs/performance.md` for the full table
-//!   and the project-local-baseline disclaimer.
+//!   **Measured: 82.3% (sync) / 92.5% (async) of cuBLAS sgemm at
+//!   4096² on RTX 4090 sm_89.** See `docs/performance.md` for the
+//!   full table (256–4096), the apples-to-apples disclaimer (KAIO is
+//!   fp16 × fp16 → fp32 accumulation vs cuBLAS sgemm f32 × f32 → f32),
+//!   and the rationale for why async benefits more than sync from
+//!   the shared-memory layout improvements.
 //! - [`attention`] / [`attention_auto`] and causal variants —
 //!   fused attention for f32.
 //!
@@ -55,10 +60,11 @@ pub use tuner::{
 pub use matmul_kernel::matmul_naive;
 
 // Sprint 6.7 D7 promotion (multi-warp restructure + edge tiles +
-// 79.9% cuBLAS sgemm at 4096² + benchmark): stable public API.
-// Both kernels accept any positive M, N and require K%16=0
-// (mma.sync.m16n8k16 K-tile is structural). f16 inputs, f32
-// accumulation, SM 8.0+ (Ampere).
+// benchmark) + Sprint 6.7b (bank-conflict padding + D10 hoist,
+// 82.3% sync / 92.5% async cuBLAS sgemm at 4096²). Stable public
+// API as of v0.2.0. Both kernels accept any positive M, N and
+// require K%16=0 (mma.sync.m16n8k16 K-tile is structural). f16
+// inputs, f32 accumulation, SM 8.0+ (Ampere).
 pub use matmul_tc_async_kernel::matmul_tc_async;
 pub use matmul_tc_kernel::matmul_tc;
 

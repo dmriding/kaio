@@ -651,20 +651,21 @@ pub fn tune_matmul_tc(device: &KaioDevice, m: u32, n: u32, k: u32) -> Result<Str
 ///   predication handles ragged dims). `K % 16 == 0` is required —
 ///   the mma.sync.m16n8k16 K-tile is structural and the kernel does
 ///   not edge-pad K. Pad K to the next multiple of 16 if needed.
-/// - **Cache-miss dispatch policy (Sprint 6.7 post-review):** if
-///   `max(M, N, K) >= 3072` the fallback is the cp.async double-
-///   buffered variant (async wins at 4096² by ~6.5%). Otherwise the
-///   sync variant is dispatched (it wins at 256-2048 by small
-///   margins on the measured 6.7 curve). A prior `tune_matmul_tc`
-///   call overrides this with the per-shape measured winner.
-/// - **Performance:** Sprint 6.7 multi-warp restructure measured
-///   **79.9%** of cuBLAS sgemm at 4096² for the sync variant,
-///   **85.1%** for the cp.async double-buffered variant, on RTX 4090
-///   sm_89. See `docs/performance.md` for the full table and the
+/// - **Cache-miss dispatch policy:** if `max(M, N, K) >= 3072` the
+///   fallback is the cp.async double-buffered variant (async wins at
+///   4096² by ~12.4% after 6.7b's shared-memory improvements).
+///   Otherwise the sync variant is dispatched (it wins at 256-2048
+///   by small margins on the measured curve). A prior
+///   `tune_matmul_tc` call overrides this with the per-shape
+///   measured winner.
+/// - **Performance:** Sprint 6.7 multi-warp restructure plus Sprint
+///   6.7b bank-conflict-padded Tile B (col stride 32 → 36 bytes) and
+///   fragment-loader `(group_id, tig)` hoist measure **82.3%** of
+///   cuBLAS sgemm at 4096² for the sync variant and **92.5%** for
+///   the cp.async double-buffered variant, on RTX 4090 sm_89. See
+///   `docs/performance.md` for the full table (256–4096) and the
 ///   project-local-baseline disclaimer (KAIO uses fp16 inputs with
-///   fp32 accumulation; cuBLAS sgemm is f32). Sprint 6.7b will
-///   chase the remaining headroom via vectorized loads (LDG.128) +
-///   bank-conflict padding.
+///   fp32 accumulation; cuBLAS sgemm is f32).
 /// - **API stability:** pre-1.0 (overall crate). The signature is
 ///   intentionally identical in shape to [`matmul_auto`] so any
 ///   future extensions remain additive.
@@ -691,9 +692,10 @@ pub fn matmul_auto_tc(
 }
 
 /// Size threshold where the cp.async double-buffered variant overtakes
-/// the sync variant on the measured Sprint 6.7 curve. Below this, sync
-/// wins by small margins (256-2048 at RTX 4090 sm_89); at/above, async
-/// wins by ~6.5% at 4096². One line of arithmetic is cheaper than a
+/// the sync variant on the measured curve. Below this, sync wins by
+/// small margins (256-2048 at RTX 4090 sm_89); at/above, async wins by
+/// ~12.4% at 4096² under the 6.7b bank-conflict-padded layout (was
+/// ~6.5% under 6.7). One line of arithmetic is cheaper than a
 /// consistently-wrong small-shape default.
 const ASYNC_FALLBACK_MAX_DIM_THRESHOLD: u32 = 3072;
 
