@@ -11,3 +11,4 @@ keywords = ["gpu", "cuda", "ptx", "codegen", "ir"]
 categories = ["hardware-support", "compilers"]
 
 [dependencies]
+half = { workspace = true }

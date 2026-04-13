@@ -1,10 +1,14 @@
 //! Shared test helpers for kaio-core integration tests.
 
 use kaio_core::emit::{Emit, PtxWriter};
+use kaio_core::fragment::{
+    alloc_a, alloc_b, alloc_c, load_fragment_a_m16n8k16_shared_row,
+    load_fragment_b_m16n8k16_shared_col,
+};
 use kaio_core::instr::control::{CmpOp, ControlOp};
 use kaio_core::instr::memory::MemoryOp;
 use kaio_core::instr::special;
-use kaio_core::instr::{ArithOp, MadMode};
+use kaio_core::instr::{ArithOp, MadMode, MmaShape, TensorCoreOp};
 use kaio_core::ir::{
     Operand, PtxInstruction, PtxKernel, PtxModule, PtxParam, RegisterAllocator, SharedDecl,
 };
@@ -247,6 +251,270 @@ pub fn build_shared_mem_ptx() -> String {
 
     let mut module =
         PtxModule::new(&std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_70".to_string()));
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
+/// Build a minimal kernel that emits one `mma.sync.m16n8k16.row.col.f32.f16.f16.f32`
+/// with zero-initialized fragment registers.
+///
+/// Used by `ptxas_verify_mma_sync` to confirm the PTX emission passes
+/// the offline assembler for SM 8.0+. The kernel is not functionally
+/// meaningful — just enough valid PTX to exercise the `TensorCoreOp::MmaSync`
+/// emit path end-to-end.
+#[allow(dead_code)]
+pub fn build_mma_sync_ptx() -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("mma_sync_smoke");
+
+    let a = alloc_a(&mut alloc);
+    let b = alloc_b(&mut alloc);
+    let c = alloc_c(&mut alloc);
+    let d = alloc_c(&mut alloc);
+
+    // Zero-initialize all fragment registers.
+    for r in &a.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmU32(0),
+            ty: PtxType::U32,
+        });
+    }
+    for r in &b.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmU32(0),
+            ty: PtxType::U32,
+        });
+    }
+    for r in &c.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmF32(0.0),
+            ty: PtxType::F32,
+        });
+    }
+
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+        d,
+        a,
+        b,
+        c,
+        shape: MmaShape::M16N8K16,
+        d_ty: PtxType::F32,
+        a_ty: PtxType::F16,
+        b_ty: PtxType::F16,
+        c_ty: PtxType::F32,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    // mma.sync requires SM 8.0+. Floor the env override at sm_80.
+    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
+    let mut module = PtxModule::new(&sm);
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
+/// Build a minimal kernel exercising `cp.async.ca.shared.global`,
+/// `cp.async.commit_group`, and `cp.async.wait_group`.
+///
+/// Used by `ptxas_verify_cp_async` to confirm the cp.async emission
+/// passes the offline assembler for SM 8.0+.
+#[allow(dead_code)]
+pub fn build_cp_async_ptx() -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("cp_async_smoke");
+
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile".to_string(),
+        align: 16,
+        size_bytes: 16,
+    });
+
+    kernel.add_param(PtxParam::pointer("src", PtxType::F32));
+
+    let rd_src_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_src_param,
+        param_name: "src".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_src_global = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_src_global,
+        src: rd_src_param,
+    }));
+
+    let r_shared_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_shared_addr,
+        src: Operand::SharedAddr("tile".to_string()),
+        ty: PtxType::U32,
+    });
+
+    kernel.push(PtxInstruction::Memory(MemoryOp::new_cp_async_ca(
+        r_shared_addr,
+        rd_src_global,
+        16,
+    )));
+    kernel.push(PtxInstruction::Memory(MemoryOp::CpAsyncCommitGroup));
+    kernel.push(PtxInstruction::Memory(MemoryOp::CpAsyncWaitGroup { n: 0 }));
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+        barrier_id: 0,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
+    let mut module = PtxModule::new(&sm);
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
+/// Build a minimal kernel exercising the **shared-source** fragment
+/// load helpers: declares shared `tile_a` and `tile_b` allocations,
+/// gets a `%tid.x`, calls `load_fragment_a_m16n8k16_shared_row` and
+/// `load_fragment_b_m16n8k16_shared_col` (with zero C, fresh D), emits
+/// one `mma.sync`, and returns.
+///
+/// Used by `ptxas_verify_mma_sync_shared` to confirm the shared-source
+/// emission is structurally valid PTX for SM 8.0+. The kernel does no
+/// initial tile population — ptxas does not care that the shared
+/// memory is uninitialized; it only verifies the instruction syntax.
+#[allow(dead_code)]
+pub fn build_mma_sync_shared_ptx() -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("mma_sync_shared_smoke");
+
+    // Declare shared tiles matching Sprint 6.3 sizes.
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_a".to_string(),
+        align: 4,
+        size_bytes: 512, // 16 × 16 fp16
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_b".to_string(),
+        align: 4,
+        size_bytes: 256, // 16 × 8 fp16 column-major
+    });
+
+    // %tid.x
+    let (r_tid, tid_instr) = special::tid_x(&mut alloc);
+    kernel.push(tid_instr);
+
+    // Shared base-offset registers for tile_a and tile_b.
+    let r_tile_a = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_a,
+        src: Operand::SharedAddr("tile_a".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_tile_b = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_b,
+        src: Operand::SharedAddr("tile_b".to_string()),
+        ty: PtxType::U32,
+    });
+
+    // Fragment loads from shared.
+    let frag_a =
+        load_fragment_a_m16n8k16_shared_row(&mut alloc, &mut kernel, r_tile_a, r_tid, 32, None);
+    let frag_b =
+        load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, r_tile_b, r_tid, 32, None);
+
+    // Zero C fragment.
+    let frag_c = alloc_c(&mut alloc);
+    for r in &frag_c.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmF32(0.0),
+            ty: PtxType::F32,
+        });
+    }
+
+    // Fresh D fragment.
+    let frag_d = alloc_c(&mut alloc);
+
+    // One mma.sync.
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+        d: frag_d,
+        a: frag_a,
+        b: frag_b,
+        c: frag_c,
+        shape: MmaShape::M16N8K16,
+        d_ty: PtxType::F32,
+        a_ty: PtxType::F16,
+        b_ty: PtxType::F16,
+        c_ty: PtxType::F32,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
+    let mut module = PtxModule::new(&sm);
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
+/// Build a minimal kernel that exercises `MemoryOp::LdGlobalB128`:
+/// loads a pointer parameter, converts to global-space, and issues
+/// one `ld.global.v4.b32` into 4 freshly-allocated b32 registers.
+///
+/// Used by `ptxas_verify_ld_global_b128` (Sprint 6.7b Gate A) to
+/// confirm the emitted vectorized-load instruction is accepted by
+/// ptxas. The kernel doesn't do anything with the loaded values —
+/// ptxas only verifies PTX syntax / ISA legality, not runtime
+/// behavior. LDG.128 is not Ampere-gated (vectorized loads have
+/// been part of PTX since sm_30-era); uses the base SM target.
+#[allow(dead_code)]
+pub fn build_ld_global_b128_ptx() -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("ld_global_b128_smoke");
+
+    kernel.add_param(PtxParam::pointer("src", PtxType::F32));
+
+    let rd_src_param = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_src_param,
+        param_name: "src".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_src_global = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_src_global,
+        src: rd_src_param,
+    }));
+
+    let r0 = alloc.alloc(PtxType::U32);
+    let r1 = alloc.alloc(PtxType::U32);
+    let r2 = alloc.alloc(PtxType::U32);
+    let r3 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::new_ld_global_b128(
+        [r0, r1, r2, r3],
+        rd_src_global,
+    )));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_70".to_string());
+    let mut module = PtxModule::new(&sm);
     module.add_kernel(kernel);
 
     let mut w = PtxWriter::new();

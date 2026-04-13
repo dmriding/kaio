@@ -85,6 +85,36 @@ impl KaioDevice {
         let module = self.ctx.load_module(ptx)?;
         Ok(crate::module::KaioModule::from_raw(module))
     }
+
+    /// Validate, emit, and load a [`kaio_core::ir::PtxModule`] on the device.
+    ///
+    /// This is the preferred entrypoint when the caller has an in-memory
+    /// `PtxModule` (as opposed to raw PTX text). Before the PTX text is
+    /// handed to the driver, [`kaio_core::ir::PtxModule::validate`]
+    /// checks that the module's target SM supports every feature used by
+    /// its kernels — raising
+    /// [`KaioError::Validation`](crate::error::KaioError::Validation) if
+    /// e.g. a `mma.sync` op is present but the target is `sm_70`.
+    ///
+    /// Surfacing the error at this layer gives the user a readable
+    /// message ("`mma.sync.m16n8k16 requires sm_80+, target is sm_70`")
+    /// instead of a cryptic `ptxas` error from deep in the driver.
+    pub fn load_module(
+        &self,
+        module: &kaio_core::ir::PtxModule,
+    ) -> Result<crate::module::KaioModule> {
+        use kaio_core::emit::{Emit, PtxWriter};
+
+        module.validate()?;
+
+        let mut w = PtxWriter::new();
+        module
+            .emit(&mut w)
+            .map_err(|e| crate::error::KaioError::PtxLoad(format!("emit failed: {e}")))?;
+        let ptx_text = w.finish();
+
+        self.load_ptx(&ptx_text)
+    }
 }
 
 /// Basic information about a CUDA device.

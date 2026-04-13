@@ -50,7 +50,11 @@ All reported numbers are from a single machine configuration:
 ### How to reproduce
 
 ```sh
+# Scalar f32 matmul (Phase 4): naive + optimized vs cuBLAS sgemm
 cargo test -p kaio-ops --test matmul_bench -- --ignored --nocapture
+
+# Tensor-core f16 matmul (Sprint 6.7): sync + async vs cuBLAS sgemm
+cargo test -p kaio-ops --test matmul_tc_bench -- --ignored --nocapture
 ```
 
 Requires NVIDIA GPU and CUDA toolkit (for cuBLAS).
@@ -86,14 +90,65 @@ Requires NVIDIA GPU and CUDA toolkit (for cuBLAS).
 
 ## Performance Status
 
-**Current:** 31% of cuBLAS sgemm — BM=BN=64, BK=16, TM=TN=4, scalar loads
+**Scalar f32 matmul (Phase 4):** 31% of cuBLAS sgemm — BM=BN=64, BK=16,
+TM=TN=4, scalar loads.
 
-**Planned next levers:**
-- Vectorized global loads (`LDG.128`) — 4× fewer load instructions
-- Double buffering — overlap computation with next tile load
-- Size-based dispatch — use naive kernel for small sizes where
-  64×64 tile overhead dominates
+**Tensor-core f16 matmul (Sprints 6.7 + 6.7b — final Phase 6 result):**
+**82.3% (sync) / 92.5% (async)** of cuBLAS sgemm at 4096² on RTX 4090.
+Multi-warp 64×64 block tile (6.7) + Tile B col-stride padding +
+fragment-loader `(group_id, tig)` hoist (6.7b). See the
+**[Tensor-Core Matmul Performance section in performance.md](performance.md#tensor-core-matmul-performance-sprints-67--67b)**
+for the full table across 256–4096, the apples-to-apples disclaimer
+(KAIO uses fp16 inputs with fp32 accumulation; cuBLAS sgemm is f32),
+and the analysis of why async lifted more than sync under 6.7b
+(bank-conflict relief on fragment-B shared reads). 6.7b's async
+result — 92.5% — is past the original 90% stretch target from one
+sprint earlier.
 
-These optimizations require DSL extensions (vectorized load intrinsics)
-and are planned for Phase 5+. See [performance.md](performance.md)
-for writing fast kernels with the current tooling.
+---
+
+## Results — Sprints 6.7 + 6.7b TC MatMul (final Phase 6 state)
+
+**Date:** 2026-04-13 | **GPU:** RTX 4090 (sm_89) | **Kernels:**
+multi-warp 64×64 sync (`matmul_tc`) + cp.async double-buffered
+(`matmul_tc_async`), with 6.7b col-stride padding + fragment-loader
+`(group_id, tig)` hoist | **Reference:** cuBLAS sgemm
+
+| Size  | TC sync TFLOPS | TC async TFLOPS | cuBLAS TFLOPS | sync vs cuBLAS | async vs cuBLAS |
+|-------|---------------:|----------------:|--------------:|---------------:|----------------:|
+| 256³  | 0.05           | 0.05            | 1.77          | 2.9%           | 2.6%            |
+| 512³  | 0.37           | 0.34            | 11.09         | 3.3%           | 3.1%            |
+| 1024³ | 2.87           | 2.62            | 37.35         | 7.7%           | 7.0%            |
+| 2048³ | 17.34          | 16.74           | 52.91         | 32.8%          | 31.6%           |
+| 4096³ | **40.93**      | **45.96**       | **49.72**     | **82.3%**      | **92.5%**       |
+
+Sprint 6.7 → Sprint 6.7b delta at 4096²: sync 79.9% → 82.3% (+2.4pp),
+async 85.1% → **92.5%** (+7.4pp — past the 90% stretch target on
+padding + hoist alone).
+
+**Apples-to-apples disclaimer:** KAIO TC matmul uses fp16 inputs with
+fp32 accumulation; cuBLAS sgemm is f32 inputs / f32 output. The
+comparison is a project-local performance baseline, not a precision-
+identity claim. See [performance.md](performance.md#apples-to-apples-disclaimer)
+for the full framing.
+
+**Analysis:**
+- Multi-warp restructure (6.7) unlocked SM occupancy at large shapes
+  — at 4096² the kernel launches 64×64 = 4,096 blocks × 128 threads
+  ≈ 16 resident warps/SM on RTX 4090.
+- Async pulls ahead of sync at 4096² (46.0 vs 40.9 TFLOPS, +12.4%
+  under 6.7b — materially wider than 6.7's +6.5% gap) — cp.async
+  pipeline gets enough K-iterations (256) to hide latency, and 6.7b's
+  bank-conflict fix on Tile B fragment reads benefits async
+  disproportionately because its global-load bandwidth was already
+  saturated via cp.async direct bypass.
+- Small sizes (256-1024) still lose to cuBLAS by large margins — too
+  few blocks to fill the SM array, kernel launch overhead dominates.
+  Use scalar `matmul` or stay on cuBLAS for small shapes.
+- Path past 92.5% for async / 82.3% for sync: future sprints
+  (LDG.128 IR primitive landed in 6.7b as well-formed unused IR for
+  this purpose, plus `ldmatrix.sync.aligned` as the sync-path lever).
+
+---
+
+## Phase 4 baseline retained for comparison

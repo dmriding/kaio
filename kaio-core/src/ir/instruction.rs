@@ -2,7 +2,7 @@
 
 use super::operand::Operand;
 use super::register::Register;
-use crate::instr::{ArithOp, ControlOp, MemoryOp};
+use crate::instr::{ArithOp, ControlOp, MemoryOp, TensorCoreOp};
 use crate::types::PtxType;
 
 /// A single PTX instruction in a kernel body.
@@ -19,6 +19,12 @@ pub enum PtxInstruction {
     Memory(MemoryOp),
     /// Control flow operation (populated in Sprint 1.4).
     Control(ControlOp),
+    /// Warp-collective tensor-core operation (populated in Sprint 6.2).
+    ///
+    /// Currently supports `mma.sync.m16n8k16` for fp16/bf16 inputs with
+    /// fp32 accumulation (Ampere+, SM 8.0+). See [`crate::instr::tensor_core`]
+    /// and [`crate::fragment`].
+    TensorCore(TensorCoreOp),
     /// Register-to-register or immediate-to-register move.
     ///
     /// Also used for special register reads:

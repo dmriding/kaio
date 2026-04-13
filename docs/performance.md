@@ -222,9 +222,104 @@ See [benchmarks.md](benchmarks.md) for methodology and results.
 ### Quick reference
 
 ```sh
-# Run matmul benchmark (requires NVIDIA GPU + CUDA toolkit)
+# Scalar f32 matmul benchmark (Phase 4 — naive + optimized vs cuBLAS sgemm)
 cargo test -p kaio-ops --test matmul_bench -- --ignored --nocapture
+
+# Tensor-core f16 matmul benchmark (Sprint 6.7 — sync + async vs cuBLAS sgemm)
+cargo test -p kaio-ops --test matmul_tc_bench -- --ignored --nocapture
 ```
 
 Measures kernel execution time only (no allocation or transfer).
-Reports TFLOPS for naive, optimized, and cuBLAS sgemm.
+Reports TFLOPS for the kernels under test against the cuBLAS sgemm
+baseline. 5 warmup iterations + 20 timed iterations, median reported.
+
+## Tensor-Core Matmul Performance (Sprints 6.7 + 6.7b)
+
+Multi-warp 64×64 block tile, 4 warps per block, each warp owning a
+32×32 sub-quadrant computed via 8 × `mma.sync.m16n8k16` per K-iteration.
+Two variants exposed: `matmul_tc` (synchronous shared-mem staging) and
+`matmul_tc_async` (cp.async double-buffered A staging). The
+`matmul_auto_tc` tuner dispatches between them per-shape via cached
+benchmark data (cache miss falls back to a size heuristic — async for
+`max(M,N,K) >= 3072`, sync below — matching the measured curve).
+
+**Sprint 6.7b folded in** col-stride padding on shared Tile B (32 → 36
+bytes per col) plus a D10 fragment-loader hoist
+(`(group_id, thread_id_in_group)` computed once per block). These two
+changes alone delivered a 7.4pp uplift on the async path, pushing it
+past the 90% stretch target from Sprint 6.7.
+
+### Measured on RTX 4090 (sm_89), median of 20 timed iterations after 5 warmups
+
+| Size       | TC sync TFLOPS | TC async TFLOPS | cuBLAS sgemm TFLOPS | sync vs cuBLAS | async vs cuBLAS |
+|------------|---------------:|----------------:|--------------------:|---------------:|----------------:|
+| 256³       | 0.05           | 0.05            | 1.77                | 2.9%           | 2.6%            |
+| 512³       | 0.37           | 0.34            | 11.09               | 3.3%           | 3.1%            |
+| 1024³      | 2.87           | 2.62            | 37.35               | 7.7%           | 7.0%            |
+| 2048³      | 17.34          | 16.74           | 52.91               | 32.8%          | 31.6%           |
+| **4096³**  | **40.93**      | **45.96**       | **49.72**           | **82.3%**      | **92.5%**       |
+
+6.7 → 6.7b delta at 4096²: sync 79.9% → 82.3% (+2.4pp), async 85.1% →
+**92.5%** (+7.4pp — past the 90% stretch on padding + hoist alone).
+
+### Apples-to-apples disclaimer
+
+KAIO TC matmul uses **fp16 inputs with fp32 accumulation**. Comparison
+is against **cuBLAS sgemm** (f32 inputs, f32 output) because that is
+the existing supported benchmark path in this repo (cudarc 0.19's
+`Gemm::gemm` exposes sgemm cleanly). Results should be read as a
+**project-local performance baseline, not a claim of apples-to-apples
+precision identity.** The fp16-input / fp32-input asymmetry halves
+global memory bandwidth on the TC side and unlocks tensor-core
+throughput; that gap is part of the value proposition, not a flaw in
+the comparison. A true f16-vs-f16 comparison against cuBLAS HGEMM /
+GemmEx is tracked tech debt for a future sprint.
+
+### Why small sizes underperform cuBLAS
+
+At 256–1024, TC matmul lands at 3–8% of cuBLAS. This is expected:
+the multi-warp kernel launches `(N/64) × (M/64)` blocks and below
+1024² there are too few blocks to fill the SM array (1024² = 16
+blocks; one block per SM occupies only a sliver of the 4090's 128
+SMs). cuBLAS at small sizes uses dispatch heuristics that pick
+launch shapes appropriate to the workload — a single library tuned
+for the full size range. KAIO's TC matmul is a single kernel
+optimized for the large-shape regime where TC throughput matters.
+For small shapes, prefer scalar `matmul` (Phase 4) or stay on cuBLAS.
+
+### Why async lifts more than sync under 6.7b
+
+The pre-6.7b bank conflicts were on the Tile B fragment-B **read** hot
+path (32 lanes per warp × 16 fragment-B loads per block per K-tile).
+Col stride 32 B put all 8 thread-groups' bases at just 16 distinct
+banks (`(group_id·8 + tig) mod 32`), serialising every single
+fragment-B read 2-way across a warp. Post-pad col stride 36 B gives
+`(group_id·9 + tig) mod 32` — most banks accessed by a single lane,
+only 3 banks remain 2-way, effectively a ~5–8× reduction in
+shared-memory serialisation on the hot path.
+
+Async benefits more than sync from this fix because async's cp.async
+pipeline already saturates load bandwidth; its remaining bottleneck
+was shared-memory contention at fragment-read time, which is exactly
+what the padding fixes. Sync is still global-memory-latency-bound.
+
+### Path to >92.5% (future work)
+
+The remaining ~7.5 pp of headroom at 4096² (vs cuBLAS sgemm) on async,
+and the wider sync gap, is bounded by structural choices this kernel
+hasn't yet made:
+
+- **LDG.128 vectorized global loads (sync path).** The cooperative
+  Tile B loader uses 8 × scalar `ld.global.f16` per thread. Switching
+  to one `ld.global.v4.b32` per thread is an 8× instruction
+  reduction on the global load side — the sync path's primary
+  remaining lever. Sprint 6.7b landed the `MemoryOp::LdGlobalB128`
+  IR primitive in kaio-core but deliberately did not wire it into
+  any kernel: the companion "b32 → 2× b16 unpack" IR primitive needed
+  for scattering into col-major shared was not worth the scope
+  creep against 6.7b's D10 orthogonality requirement. A future
+  sprint can design that primitive properly and then use the
+  LDG.128 variant cleanly.
+- **bf16 TC matmul / larger mma shapes** (Phase 7).
+- **ldmatrix.sync.aligned** (Phase 7) — the real path to closing the
+  remaining gap on sync.

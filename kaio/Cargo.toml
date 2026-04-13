@@ -19,9 +19,11 @@ include = [
 ]
 
 [dependencies]
-kaio-core = { version = "0.1.0", path = "../kaio-core" }
-kaio-runtime = { version = "0.1.0", path = "../kaio-runtime" }
-kaio-macros = { version = "0.1.0", path = "../kaio-macros" }
+kaio-core = { version = "0.2.0", path = "../kaio-core" }
+kaio-runtime = { version = "0.2.0", path = "../kaio-runtime" }
+kaio-macros = { version = "0.2.0", path = "../kaio-macros" }
 
 [dev-dependencies]
+cudarc = { workspace = true }
+half = { workspace = true }
 trybuild = "1"

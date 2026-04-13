@@ -94,8 +94,8 @@ pub fn generate_build_ptx(sig: &KernelSignature, body: &[KernelStmt]) -> syn::Re
                     _s.ld_global, _s.st_global, _s.ld_shared, _s.st_shared);
                 eprintln!("  Control:      {} bar.sync, {} branches, {} setp, {} mov, {} cvt",
                     _s.bar_sync, _s.branches, _s.setp, _s.mov, _s.cvt);
-                eprintln!("  Registers:    {} r32, {} r64, {} f32, {} f64, {} pred  (PTX-level, not final HW allocation)",
-                    _s.registers_r, _s.registers_rd, _s.registers_f, _s.registers_fd, _s.registers_p);
+                eprintln!("  Registers:    {} r32, {} r64, {} f32, {} f64, {} pred, {} f16, {} bf16  (PTX-level, not final HW allocation)",
+                    _s.registers_r, _s.registers_rd, _s.registers_f, _s.registers_fd, _s.registers_p, _s.registers_h, _s.registers_hb);
                 eprintln!("  Shared mem:   {} bytes", _s.shared_bytes);
             }
 

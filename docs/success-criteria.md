@@ -208,13 +208,13 @@ loads (LDG.128) and double buffering — planned for Phase 6 (tensor cores).
 | # | Criterion | Status | Validation Method |
 |---|-----------|--------|-------------------|
 | 5.1 | 2D block reductions work (hard gate) | Done | GPU tests: square, asymmetric, identity-based |
-| 5.2 | Standard attention produces correct output | Pending | Compare to CPU reference (< 1e-3 abs error) |
-| 5.3 | Causal masking works correctly | Pending | Verify masked positions produce correct output |
-| 5.4 | FlashAttention uses O(n) memory (stretch goal) | Pending | Memory measurement vs standard attention |
-| 5.5 | Auto-tuner selects optimal block/tile size | Pending | Grid search produces correct output |
-| 5.6 | CI runs on Windows + Linux | Pending | GitHub Actions matrix |
-| 5.7 | `cargo publish --dry-run` succeeds for all crates | Pending | Dry-run all 5 crates |
-| 5.8 | DSL friction points documented for Phase 6 | Pending | Friction report from attention implementation |
+| 5.2 | Standard attention produces correct output | Done | 7 GPU tests vs CPU reference |
+| 5.3 | Causal masking works correctly | Done | 6 causal tests + direct mask verification |
+| 5.4 | FlashAttention uses O(n) memory (stretch goal) | Done | 9 flash tests, flash_matches_standard validation |
+| 5.5 | Auto-tuner selects optimal block/tile size | Done | 7 tuner tests (tune, auto, fallback, d_k guard) |
+| 5.6 | CI runs on Windows + Linux | Done | GitHub Actions matrix (Ubuntu + Windows) |
+| 5.7 | `cargo publish --dry-run` succeeds for all crates | Done | v0.1.0 published to crates.io |
+| 5.8 | DSL friction points documented for Phase 6 | Done | Sprint 5.3 friction report (5 points) |
 
 **Note:** Validation is against CPU reference implementation, not
 PyTorch. CPU reference is standard matmul + softmax + matmul in f32.
@@ -236,12 +236,12 @@ matmuls accumulate FP error).
 | P1 | Crate name `kaio` claimed on crates.io | Done — v0.0.4 (all 5 crates published) |
 | P2 | License: MIT OR Apache-2.0 (dual license) | Done |
 | P3 | `Cargo.toml` metadata: description, repository, keywords, categories | Done (Sprint 4.8) |
-| P4 | `CHANGELOG.md` covers all phases | Done through Phase 4 |
+| P4 | `CHANGELOG.md` covers all phases | Done through Phase 5 |
 | P5 | `CONTRIBUTING.md` exists with dev setup instructions | Done |
-| P6 | GitHub Actions CI: Windows + Linux matrix | Pending (Sprint 5.6) |
+| P6 | GitHub Actions CI: Windows + Linux matrix | Done (Sprint 5.6) |
 | P7 | All `#![warn(missing_docs)]` passes | Done (all 5 crates) |
-| P8 | r/rust post drafted and reviewed | Pending (Sprint 5.8) |
-| P9 | Blog post (optional but recommended) | Pending (Sprint 5.8) |
+| P8 | r/rust post drafted and reviewed | Deferred (Sprint 5.8 not executed) |
+| P9 | Blog post (optional but recommended) | Deferred |
 | P10 | Benchmark comparison table in README | Done (Sprint 4.9) |
 
 ### Coverage Targets

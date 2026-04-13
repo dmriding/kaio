@@ -6,6 +6,7 @@ use super::register::Register;
 use crate::instr::ArithOp;
 use crate::instr::control::ControlOp;
 use crate::instr::memory::MemoryOp;
+use crate::instr::tensor_core::TensorCoreOp;
 use crate::types::RegKind;
 
 /// Shared memory declaration in a PTX kernel preamble.
@@ -102,7 +103,16 @@ impl PtxKernel {
                         MemoryOp::StGlobal { .. } => s.st_global += 1,
                         MemoryOp::LdShared { .. } => s.ld_shared += 1,
                         MemoryOp::StShared { .. } => s.st_shared += 1,
+                        MemoryOp::CpAsyncCaSharedGlobal { .. } => s.cp_async += 1,
+                        MemoryOp::CpAsyncCommitGroup => s.cp_async_commit += 1,
+                        MemoryOp::CpAsyncWaitGroup { .. } => s.cp_async_wait += 1,
                         _ => {}
+                    }
+                }
+                PtxInstruction::TensorCore(op) => {
+                    s.total_instructions += 1;
+                    match op {
+                        TensorCoreOp::MmaSync { .. } => s.mma += 1,
                     }
                 }
                 PtxInstruction::Control(op) => {
@@ -133,6 +143,8 @@ impl PtxKernel {
                 RegKind::F => s.registers_f += 1,
                 RegKind::Fd => s.registers_fd += 1,
                 RegKind::P => s.registers_p += 1,
+                RegKind::H => s.registers_h += 1,
+                RegKind::Hb => s.registers_hb += 1,
             }
         }
 
@@ -163,6 +175,14 @@ pub struct KernelStats {
     pub st_shared: usize,
     /// `bar.sync` count.
     pub bar_sync: usize,
+    /// `mma.sync` instruction count (all tensor-core shapes).
+    pub mma: usize,
+    /// `cp.async.ca.shared.global` instruction count.
+    pub cp_async: usize,
+    /// `cp.async.commit_group` instruction count.
+    pub cp_async_commit: usize,
+    /// `cp.async.wait_group` instruction count.
+    pub cp_async_wait: usize,
     /// `fma` instruction count.
     pub fma: usize,
     /// Non-FMA arithmetic instructions (add, mul, sub, etc.).
@@ -185,6 +205,10 @@ pub struct KernelStats {
     pub registers_fd: u32,
     /// `%p` registers (predicate).
     pub registers_p: u32,
+    /// `%h` registers (f16).
+    pub registers_h: u32,
+    /// `%hb` registers (bf16).
+    pub registers_hb: u32,
     /// Total declared shared memory in bytes.
     pub shared_bytes: u32,
 }
@@ -333,6 +357,52 @@ mod tests {
         assert_eq!(s.registers_f, 2);
         assert_eq!(s.registers_fd, 1);
         assert_eq!(s.registers_p, 2);
+    }
+
+    #[test]
+    fn stats_counts_tensor_core_and_cp_async() {
+        use crate::fragment::{alloc_a, alloc_b, alloc_c};
+        use crate::instr::MmaShape;
+        use crate::ir::RegisterAllocator;
+
+        let mut alloc = RegisterAllocator::new();
+        let mut kernel = PtxKernel::new("tc_stats_test");
+
+        // 2 mma.sync
+        for _ in 0..2 {
+            kernel.push(PtxInstruction::TensorCore(
+                crate::instr::TensorCoreOp::MmaSync {
+                    d: alloc_c(&mut alloc),
+                    a: alloc_a(&mut alloc),
+                    b: alloc_b(&mut alloc),
+                    c: alloc_c(&mut alloc),
+                    shape: MmaShape::M16N8K16,
+                    d_ty: PtxType::F32,
+                    a_ty: PtxType::F16,
+                    b_ty: PtxType::F16,
+                    c_ty: PtxType::F32,
+                },
+            ));
+        }
+
+        // 3 cp.async loads, 1 commit, 1 wait
+        let dst_shared = reg(RegKind::R, 0, PtxType::U32);
+        let src_global = reg(RegKind::Rd, 0, PtxType::U64);
+        for _ in 0..3 {
+            kernel.push(PtxInstruction::Memory(MemoryOp::new_cp_async_ca(
+                dst_shared, src_global, 16,
+            )));
+        }
+        kernel.push(PtxInstruction::Memory(MemoryOp::CpAsyncCommitGroup));
+        kernel.push(PtxInstruction::Memory(MemoryOp::CpAsyncWaitGroup { n: 0 }));
+
+        let s = kernel.stats();
+        assert_eq!(s.mma, 2);
+        assert_eq!(s.cp_async, 3);
+        assert_eq!(s.cp_async_commit, 1);
+        assert_eq!(s.cp_async_wait, 1);
+        // 2 mma + 3 cp.async + 1 commit + 1 wait = 7 total
+        assert_eq!(s.total_instructions, 7);
     }
 
     #[test]

@@ -3,17 +3,35 @@
 [![Crates.io](https://img.shields.io/crates/v/kaio.svg)](https://crates.io/crates/kaio)
 [![Documentation](https://docs.rs/kaio/badge.svg)](https://docs.rs/kaio)
 [![Build Status](https://github.com/dmriding/kaio/actions/workflows/ci.yml/badge.svg)](https://github.com/dmriding/kaio/actions)
+[![Coverage](https://img.shields.io/badge/coverage-94.7%25-brightgreen)](#test-coverage)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](https://github.com/dmriding/kaio)
 [![Rust](https://img.shields.io/badge/rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 
-**Rust-native GPU kernel authoring framework.**
+**High-performance GPU kernels in pure Rust. PTX at build time. No CUDA C++, no Python, no toolkit.**
 
-KAIO (from the Greek kaio — _to kindle, to ignite_) lets you write GPU
-compute kernels in Rust and compile them to PTX for execution on NVIDIA
-GPUs. Cross-platform (Windows + Linux), automatic PTX generation, and
-Rust's type safety — no CUDA C++, no Python, no CUDA toolkit required.
+KAIO (from the Greek καιω — _to burn, to ignite_) is for Rust engineers
+who need custom GPU kernels today — fused attention variants,
+quantization ops, novel activations — and would otherwise be writing
+CUDA C++ because their framework doesn't support them.
+
+## Key highlights
+
+- **92.5% of cuBLAS sgemm** at 4096² on RTX 4090 (tensor-core matmul,
+  async path, fp16 inputs with fp32 accumulation). [Full benchmarks
+  →](docs/performance.md)
+- **Windows and Linux native.** No WSL2, no Triton's Linux-only runtime,
+  no Python. `cargo build` works everywhere.
+- **No CUDA toolkit required** — just the NVIDIA display driver. Build
+  in CI on a standard GitHub runner; host tests pass without a GPU.
+- **Pure-Rust kernel authorship.** The `#[gpu_kernel]` proc macro lowers
+  Rust to PTX at build time. Type-safe kernel signatures catch dtype
+  mismatches at compile time, not as silent GPU corruption at runtime.
 
 ## Quick Start
+
+Requires an NVIDIA GPU (SM 7.0+, Volta or newer) with an installed
+display driver — NVIDIA 525 or newer (any standard Game Ready or Studio
+driver works; no Tesla/TCC-specific drivers needed).
 
 ```sh
 cargo add kaio
@@ -50,27 +68,69 @@ $ cargo run
 result: [4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5]
 ```
 
-Requires an NVIDIA GPU with driver installed. No CUDA toolkit needed.
+## The real pitch — fused ML kernels
 
-## When to Use KAIO
+SAXPY is for learning the DSL. The actual value looks like this:
 
-KAIO is not a replacement for ML frameworks like
-[Candle](https://github.com/huggingface/candle) or
-[Burn](https://github.com/tracel-ai/burn). It is the layer you use
+```rust
+use kaio::prelude::*;
+
+// Gated SiLU — the feedforward activation in every LLaMA / Mistral /
+// Qwen block. llama.cpp, vLLM, and TensorRT-LLM all ship hand-written
+// CUDA for it. With KAIO it's 7 lines of Rust, compiled to PTX at
+// build time.
+#[gpu_kernel(block_size = 256)]
+fn fused_silu_gate(x: &[f32], gate: &[f32], out: &mut [f32], n: u32) {
+    let idx = thread_idx_x() + block_idx_x() * block_dim_x();
+    if idx < n {
+        let xi = x[idx];
+        let sig = 1.0f32 / (1.0f32 + exp(-xi));
+        out[idx] = xi * sig * gate[idx];
+    }
+}
+```
+
+Runnable as a standalone Cargo project from
+[`examples/fused_silu_gate/`](examples/fused_silu_gate/):
+
+```
+$ cd examples/fused_silu_gate && cargo run --release
+
+=== fused_silu_gate ===
+Input size:        1048576 elements
+Correctness:       PASS  (max_abs_err = 1.49e-8)
+Median latency:    188.8 μs  (of 100 timed runs, 5 warm-ups skipped)
+```
+
+Three standalone showcases ship in the repo:
+[fused SiLU-gate](examples/fused_silu_gate/),
+[exact vs fast GELU](examples/gelu_comparison/),
+[single-block RMSNorm](examples/rms_norm/). Each is a complete
+standalone project with correctness + timing; the GELU comparison's
+README explains why kernel fusion matters more than arithmetic
+optimization for ML workloads (the bandwidth-bound teaching moment).
+
+## When to use KAIO
+
+Reach for KAIO when:
+
+- **Your framework can't support a custom op** (novel attention, fused
+  activation, quantization) and you don't want to drop into CUDA C++
+  for one kernel.
+- **You need GPU inference on Windows** without WSL2 or Triton's
+  Linux-only runtime.
+- **Your CI runs on standard GitHub runners** without GPU or CUDA
+  toolkit access. KAIO's host tests pass without a GPU; only the
+  `#[ignore]`-gated integration tests need one. Flip the matrix on
+  later.
+- **You need deterministic VRAM usage, explicit buffer reuse, or
+  zero-copy transfers** that high-level frameworks abstract away.
+- **You're prototyping GPU code** in a language you already know
+  (Rust) without learning CUDA C++.
+
+KAIO is not a replacement for [Candle](https://github.com/huggingface/candle)
+or [Burn](https://github.com/tracel-ai/burn). It is the layer you use
 when you need more control than they provide.
-
-Use KAIO when you need to:
-
-- **Write a custom GPU kernel** that your framework doesn't support
-  (novel attention variant, fused activation, quantization op)
-- **Control GPU memory explicitly** — deterministic VRAM usage, buffer
-  reuse, zero-copy transfers
-- **Ship a GPU binary** without Python, conda, or Triton in the
-  dependency chain
-- **Run on Windows** — Triton is Linux-only; KAIO works everywhere
-  `cargo build` works
-- **Prototype GPU code fast** in a language you already know (Rust)
-  without learning CUDA C++
 
 |                             | KAIO       | cudarc        | Candle / Burn | Raw CUDA |
 | --------------------------- | ---------- | ------------- | ------------- | -------- |
@@ -81,15 +141,41 @@ Use KAIO when you need to:
 | Type-safe kernel signatures | Yes        | No            | N/A           | No       |
 | ML framework integration    | Standalone | Standalone    | Built-in      | Manual   |
 
-## The Problem
+## Performance
 
-The Rust ML ecosystem can't keep up with Python. Every time a new model
-architecture drops with a custom operation — a novel attention variant, a
-fused activation, a custom quantization kernel — frameworks like
-[candle](https://github.com/huggingface/candle) and
-[burn](https://github.com/tracel-ai/burn) can't support it until someone
-writes the GPU function. Today, that means writing CUDA C++, fighting FFI
-bindings, and giving up on Windows.
+Measured on RTX 4090 (sm_89), median of 20 timed iterations after 5 warmups:
+
+| Size  | TC sync TFLOPS | TC async TFLOPS | cuBLAS sgemm TFLOPS | sync vs cuBLAS | async vs cuBLAS |
+|-------|---------------:|----------------:|--------------------:|---------------:|----------------:|
+| 256³  | 0.05           | 0.05            | 1.77                | 2.9%           | 2.6%            |
+| 512³  | 0.37           | 0.34            | 11.09               | 3.3%           | 3.1%            |
+| 1024³ | 2.87           | 2.62            | 37.35               | 7.7%           | 7.0%            |
+| 2048³ | 17.34          | 16.74           | 52.91               | 32.8%          | 31.6%           |
+| **4096³** | **40.93**  | **45.96**       | **49.72**           | **82.3%**      | **92.5%**       |
+
+**Tensor-core matmul at 4096² reaches 92.5% of cuBLAS sgemm on the async
+path.** Small sizes lag because a 64×64 multi-warp block tile needs
+~16 blocks per SM to fill an RTX 4090's 128 SMs; at 256³ there are only
+16 blocks in the entire grid, so kernel-launch overhead dominates.
+For small shapes prefer scalar [`matmul()`](docs/benchmarks.md) or stay
+on cuBLAS.
+
+**Apples-to-apples disclaimer:** KAIO uses fp16 inputs with fp32
+accumulation; cuBLAS sgemm is f32 in / f32 out. The comparison is a
+project-local performance baseline, not a precision-identity claim.
+See [docs/performance.md](docs/performance.md) for the full analysis,
+the bank-conflict rationale for why async outpaces sync at large sizes,
+and the path-to-higher-numbers roadmap.
+
+## The problem KAIO solves
+
+The Rust ML ecosystem can't keep up with Python. Every time a new
+model architecture drops with a custom operation — a novel attention
+variant, a fused activation, a custom quantization kernel — frameworks
+like [candle](https://github.com/huggingface/candle) and
+[burn](https://github.com/tracel-ai/burn) can't support it until
+someone writes the GPU function. Today, that means writing CUDA C++,
+fighting FFI bindings, and giving up on Windows.
 
 Meanwhile, Python developers write a
 [Triton](https://github.com/triton-lang/triton) kernel in an afternoon
@@ -97,31 +183,6 @@ and move on. Triton doesn't support Windows, requires Python, and
 JIT-compiles at runtime — but it works, and Rust has no equivalent.
 
 **KAIO is that equivalent.**
-
-## Why KAIO?
-
-- **No CUDA C++.** Write kernels in Rust syntax you already know.
-- **No Python.** No Triton, no conda environments, no Python runtime.
-- **Windows + Linux.** Triton is Linux-only. KAIO works everywhere
-  `cargo build` works.
-- **Automatic PTX.** The `#[gpu_kernel]` macro lowers your Rust code to
-  PTX. Generated once at first call, cached for the process lifetime.
-- **Type safe.** Catch dtype mismatches, undefined variables, and
-  invalid kernel signatures at compile time — not as silent GPU
-  corruption at runtime.
-- **Standalone.** Not tied to any ML framework. Use with candle, burn,
-  mistral.rs, or your own project.
-
-## Examples
-
-Clone the repo and run:
-
-| Example        | Description                      | Command                                  |
-| -------------- | -------------------------------- | ---------------------------------------- |
-| **vector_add** | Start here — minimal GPU kernel  | `cargo run --example vector_add -p kaio` |
-| saxpy          | Scalar parameter passing         | `cargo run --example saxpy -p kaio`      |
-| reduction      | Shared memory + block reduction  | `cargo run --example reduction -p kaio`  |
-| matmul         | Matrix multiply via kaio-ops API | `cargo run --example matmul -p kaio-ops` |
 
 ## Patterns
 
@@ -165,60 +226,64 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 }
 ```
 
-## Supported Kernel Features
+## Feature summary
 
-| Feature         | Syntax                                                     | Status    |
-| --------------- | ---------------------------------------------------------- | --------- |
-| Arithmetic      | `+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `*=`, `/=`            | Supported |
-| Comparisons     | `<`, `<=`, `>`, `>=`, `==`, `!=`                           | Supported |
-| Control flow    | `if`/`else`, `for`, `while`                                | Supported |
-| Array access    | `a[idx]` (global memory)                                   | Supported |
-| Shared memory   | `shared_mem![f32; 256]`                                    | Supported |
-| Synchronization | `bar_sync()`                                               | Supported |
-| Warp shuffle    | `shfl_sync_down/up/bfly()`                                 | Supported |
-| Reductions      | `block_reduce_sum()`, `block_reduce_max()`                 | Supported |
-| Type casts      | `x as f32`                                                 | Supported |
-| Math builtins   | `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max`          | Supported |
-| Thread indices  | `thread_idx_x()`, `block_idx_x()`, `block_dim_x()`         | Supported |
-| FMA             | `fma(a, b, c)`                                             | Supported |
-| 2D blocks       | `block_size = (16, 16)`, `thread_idx_y()`                  | Supported |
-| Tiled matmul    | `kaio_ops::matmul()` ([31% of cuBLAS](docs/benchmarks.md)) | Supported |
-| Attention       | `kaio_ops::attention()`, `attention_causal()`              | Supported |
-| FlashAttention  | `kaio_ops::attention_flash()` — O(d_k) memory             | Supported |
-| Auto-tuner      | `kaio_ops::tune_matmul()`, `matmul_auto()`                | Supported |
+| Feature                                  | Notes                                                                      |
+| ---------------------------------------- | -------------------------------------------------------------------------- |
+| `#[gpu_kernel]` proc macro               | Rust → PTX at build time. Type-safe launch wrapper auto-generated.         |
+| Shared memory + reductions + warp shuffles | `shared_mem![]`, `bar_sync()`, `block_reduce_sum/max`, `shfl_sync_*`.    |
+| 2D blocks, FMA, math builtins            | `block_size = (16,16)`, `fma`, `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max`. |
+| Scalar tiled matmul                      | `kaio_ops::matmul` / `matmul_auto` — 31% of cuBLAS sgemm. Any SM.          |
+| Fused attention + FlashAttention         | `kaio_ops::attention`, `attention_flash` (O(d_k) memory). Any SM.          |
+| Tensor-core matmul                       | `kaio_ops::matmul_tc` / `matmul_tc_async` / `matmul_auto_tc` — f16 → f32, SM 8.0+, **82.3% sync / 92.5% async of cuBLAS sgemm at 4096²**. |
+| Auto-tuner + cache                       | `tune_matmul`, `matmul_auto`, `matmul_auto_tc` with JSON cache.            |
+| PTX inspection                           | `KAIO_DUMP_PTX=1`, `KAIO_PTX_STATS=1`, `KAIO_PTX_ANNOTATE=1`.              |
 
-## Limitations
+See [docs.rs/kaio](https://docs.rs/kaio) for the full API surface and
+the internal IR types.
 
-KAIO is early-stage software. Being honest about what it can't do:
+## Project status and constraints
 
-- **NVIDIA only** — SM 7.0+ (Volta through Hopper). No AMD, no Intel.
-- **Not cuBLAS-level performance** — matmul reaches 31% of cuBLAS.
-  Good enough for custom ops, not for replacing vendor libraries.
-- **No autograd / backward pass** — inference and custom compute only,
-  not training.
-- **DSL subset** — the kernel DSL supports a subset of Rust. No
-  closures, traits, generics, method calls, or string operations.
-- **No `&&` / `||` operators** — use nested `if` statements instead.
-- **No compound shared memory assignment** — `sdata[i] += val` is not
-  supported; write `sdata[i] = sdata[i] + val`.
-- **FlashAttention d_k limit** — `attention_flash()` requires
-  d_k <= 256 (one thread per output dimension).
-- **No multi-GPU** — single device only.
-- **API will change** — this is pre-1.0 software.
+KAIO is pre-1.0 software. Current engineering constraints:
+
+- **NVIDIA only.** SM 7.0+ (Volta, Turing, Ampere, Ada Lovelace,
+  Hopper). No AMD, no Intel, no Apple Silicon.
+- **Matmul performance is size-dependent.** Tensor-core matmul reaches
+  82.3% sync / 92.5% async of cuBLAS sgemm at 4096² on Ampere, but
+  lags heavily at ≤1024² (2-8%) because a 64×64 multi-warp block tile
+  doesn't fill the SM array until the grid is large. Scalar matmul
+  tops out at 31% of cuBLAS. For small shapes prefer cuBLAS or the
+  scalar path. [Details →](docs/performance.md)
+- **Inference only.** No autograd / backward pass. Training integration
+  (`kaio-candle` bridge) is planned for Phase 7.
+- **DSL is a Rust subset.** No closures, traits, generics, method
+  calls, or string operations inside `#[gpu_kernel]` function bodies.
+  No `&&` / `||` (use nested `if`). No compound shared-memory
+  assignment (`sdata[i] += val` must be `sdata[i] = sdata[i] + val`).
+- **FlashAttention d_k limit.** `attention_flash()` requires
+  d_k ≤ 256 (one thread per output dimension).
+- **Single-device.** No multi-GPU support.
+- **First-call PTX compilation.** The `#[gpu_kernel]` macro generates
+  PTX at Rust compile time, but kernel-module loading still happens
+  lazily at first call (cached via `OnceLock` for the process
+  lifetime). First launch pays the module-load latency once per
+  kernel; subsequent launches are dispatch-only.
+- **API will change** before 1.0. Breaking changes documented in
+  CHANGELOG per release.
 
 ## Architecture
 
-KAIO is structured in four layers:
+Four layers, bottom to top:
 
 ```
 +-------------------------------------------+
-|  Layer 4: Block-Level Operations          |  tiled matmul, fused attention
+|  Layer 4: Block-Level Operations          |  tiled matmul, fused attention, TC matmul
 +-------------------------------------------+
-|  Layer 3: #[gpu_kernel] Proc Macro        |  Rust syntax -> PTX automatically
+|  Layer 3: #[gpu_kernel] Proc Macro        |  Rust syntax → PTX automatically
 +-------------------------------------------+
-|  Layer 2: Runtime (kaio-runtime)          |  device memory, kernel launch
+|  Layer 2: Runtime (kaio-runtime)          |  device memory, kernel launch, SM validation
 +-------------------------------------------+
-|  Layer 1: PTX Codegen (kaio-core)         |  IR types, instruction emitters
+|  Layer 1: PTX Codegen (kaio-core)         |  IR types, instruction emitters, fragments
 +-------------------------------------------+
 ```
 
@@ -226,15 +291,20 @@ KAIO is structured in four layers:
 | -------------- | ----------------------------------------------------------------------- |
 | `kaio`         | Umbrella crate — re-exports everything via `prelude`                    |
 | `kaio-macros`  | `#[gpu_kernel]` proc macro                                              |
-| `kaio-core`    | PTX IR, instruction emitters, zero external dependencies                |
+| `kaio-core`    | PTX IR, instruction emitters, fragment containers, zero external deps   |
 | `kaio-runtime` | CUDA driver wrapper via [cudarc](https://github.com/coreylowman/cudarc) |
-| `kaio-ops`     | Pre-built GPU operations (matmul, more planned)                         |
+| `kaio-ops`     | Pre-built GPU operations (matmul, attention, TC matmul, auto-tuner)     |
 
-## Target Hardware
+## Target hardware
 
-- **GPUs:** NVIDIA SM 7.0+ (Volta, Turing, Ampere, Ada Lovelace, Hopper)
-- **Platforms:** Windows 10/11, Linux (Ubuntu 22.04+)
-- **Tested on:** RTX 4090 (SM 8.9)
+- **GPUs:** NVIDIA SM 7.0+ (Volta, Turing, Ampere, Ada Lovelace,
+  Hopper). Tensor-core kernels (`matmul_tc*`) require SM 8.0+ (Ampere
+  or newer).
+- **Platforms:** Windows 10/11 and Linux (Ubuntu 22.04+).
+- **Driver:** NVIDIA 525+ (CUDA 12.0+ compatible). Standard Game Ready
+  or Studio drivers work on consumer cards; Tesla/TCC drivers are not
+  required and not needed for KAIO's dynamic-loading path.
+- **Tested on:** RTX 4090 (sm_89) under Windows.
 
 ## Building
 
@@ -245,25 +315,51 @@ cargo test --workspace -- --ignored     # GPU tests (requires NVIDIA GPU)
 KAIO_DUMP_PTX=1 cargo test              # inspect generated PTX
 ```
 
-Requires Rust 1.94+ (pinned via `rust-toolchain.toml`). No CUDA toolkit
-needed to build — KAIO uses dynamic loading via the NVIDIA display driver.
+Requires Rust 1.94+ (pinned via `rust-toolchain.toml`). The version
+floor reflects edition-2024 features and const-evaluation patterns used
+in kernel tile-layout computation. No CUDA toolkit is needed to build
+— KAIO resolves the NVIDIA driver at runtime via dynamic loading
+(`nvcuda.dll` on Windows, `libcuda.so` on Linux).
 
-## How It Works
+## Test coverage
+
+**94.7% line coverage** across the 16,657-line workspace (878 lines
+uncovered, mostly host-side parser error paths and the unreachable-by-
+design host stubs for GPU builtins in `kaio/src/gpu_builtins.rs`).
+Measured on RTX 4090 sm_89 via `cargo llvm-cov` with the host test
+suite and the full GPU-only `--ignored` test suite merged:
+
+```sh
+cargo install cargo-llvm-cov           # one-time
+cargo llvm-cov clean --workspace
+cargo llvm-cov --workspace --no-report
+cargo llvm-cov --workspace --no-report -- --ignored
+cargo llvm-cov report --summary-only
+```
+
+The number is static (updated per release, not per CI run) because
+the GPU-ignored tests require actual NVIDIA hardware and can't run on
+standard GitHub Actions runners. See
+[`docs/testing-strategy.md`](docs/testing-strategy.md) for the full
+testing model (host tests, GPU integration tests, `ptxas_verify`
+structural checks, and the `matmul_tc_bench` performance harness).
+
+## How it works
 
 The `#[gpu_kernel]` macro:
 
-1. **Parses** your Rust function body into a kernel IR
-2. **Lowers** expressions to PTX instruction sequences
+1. **Parses** your Rust function body into a kernel IR.
+2. **Lowers** expressions to PTX instruction sequences.
 3. **Generates** a `build_ptx()` function that constructs the IR at
-   runtime (first call only, cached via `OnceLock`)
-4. **Emits** PTX text through `PtxWriter`
+   runtime (first call only, cached via `OnceLock`).
+4. **Emits** PTX text through `PtxWriter`.
 5. **Wraps** everything in a typed `launch()` function that handles
-   device memory and kernel dispatch
+   device memory and kernel dispatch.
 
 The generated PTX is validated against `nvcc` output and passes
 `ptxas --verify` on every tested kernel.
 
-## IR API (Advanced)
+## IR API (advanced)
 
 You can also build kernels directly via the Layer 1 IR API for maximum
 control:
@@ -291,28 +387,36 @@ for a complete end-to-end example.
 
 ## Roadmap
 
-- [x] **Phase 1** — PTX codegen + runtime (IR -> PTX -> GPU execution)
+- [x] **Phase 1** — PTX codegen + runtime (IR → PTX → GPU execution)
 - [x] **Phase 2** — `#[gpu_kernel]` proc macro (arithmetic, control
-      flow, memory access, math builtins)
+  flow, memory access, math builtins)
 - [x] **Phase 3** — Loops, shared memory, reductions, softmax
-- [x] **Phase 4** — Tiled matmul (31% of cuBLAS), `kaio-ops` crate,
-      2D blocks, FMA, PTX inspection tools
-- [x] **Phase 5** — Fused attention, FlashAttention, auto-tuning,
+- [x] **Phase 4** — Tiled matmul (31% of cuBLAS), `kaio-ops` crate, 2D
+  blocks, FMA, PTX inspection tools
+- [x] **Phase 5** — Fused attention + FlashAttention + auto-tuning,
   crates.io v0.1.0
+- [x] **Phase 6** — Tensor cores (`mma.sync` fp16/bf16), async copies
+  (`cp.async`), bank-conflict padding. **82.3% sync / 92.5% async of
+  cuBLAS sgemm at 4096² on Ampere.** Three standalone showcase
+  examples. crates.io v0.2.0.
+- [ ] **Phase 7** — Quantized kernels (INT8/INT4), training
+  integration (`kaio-candle` bridge), `ldmatrix.sync` for further TC
+  headroom, bf16 TC matmul variant.
+- [ ] **Phase 8** — PyO3 bindings (Python access to `kaio-ops`).
 
-See [docs/phases.md](docs/phases.md) for detailed plans and
-[CHANGELOG.md](CHANGELOG.md) for per-sprint progress.
+See [CHANGELOG.md](CHANGELOG.md) for per-release detail and
+[docs/phases.md](docs/phases.md) for deeper phase plans.
 
-## Common Pitfalls
+## Common pitfalls
 
 - **Always bounds-check array writes.** `if idx < n` before every
   global memory access — out-of-bounds GPU writes corrupt memory
   silently.
-- **Shared memory must fit within block limits.** Default is 48KB per
-  block. `shared_mem![f32; 12288]` = 48KB = the limit.
-- **Thread indexing errors are the most common bug.** Double-check your
-  row/col math, especially with 2D blocks. Off-by-one in a kernel
-  doesn't panic — it writes to the wrong address.
+- **Shared memory must fit within block limits.** Default is 48 KB
+  per block. `shared_mem![f32; 12288]` = 48 KB = the limit.
+- **Thread indexing errors are the most common bug.** Double-check
+  your row / col math, especially with 2D blocks. Off-by-one in a
+  kernel doesn't panic — it writes to the wrong address.
 
 ## Feedback
 
@@ -335,6 +439,6 @@ at your option.
 ## Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in the work by you, as defined in the Apache-2.0
-license, shall be dual licensed as above, without any additional terms or
-conditions.
+submitted for inclusion in the work by you, as defined in the
+Apache-2.0 license, shall be dual licensed as above, without any
+additional terms or conditions.

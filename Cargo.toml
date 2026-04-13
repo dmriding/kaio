@@ -1,9 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["kaio-core", "kaio-runtime", "kaio-macros", "kaio", "kaio-ops"]
+exclude = ["examples/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Dave Riding <david@netviper.gr>"]
@@ -21,5 +22,6 @@ repository = "https://github.com/dmriding/kaio"
 # to pass KAIO-emitted PTX text to the driver's cuModuleLoadData. The nvrtc
 # feature just compiles the module containing these types. With dynamic-loading,
 # the NVRTC shared library is only dlopened if compile_ptx() is called (we don't).
-cudarc = { version = "0.19", default-features = false, features = ["driver", "std", "dynamic-loading", "cuda-12080", "nvrtc"] }
+cudarc = { version = "0.19", default-features = false, features = ["driver", "std", "dynamic-loading", "cuda-12080", "nvrtc", "f16"] }
+half = "2"
 thiserror = "2"

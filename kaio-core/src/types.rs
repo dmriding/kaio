@@ -17,23 +17,32 @@ pub enum PtxType {
     U64,
     /// Predicate / boolean (`.pred`)
     Pred,
-    // F16/BF16 intentionally omitted — deferred to Phase 3+ per master plan.
-    // Adding them requires RegKind extensions (%h, %hb) and half-precision deps.
+    /// 16-bit float (`.f16`) — requires SM 5.3+
+    F16,
+    /// Brain float 16 (`.bf16`) — requires SM 8.0+
+    ///
+    /// Type-level support only in Sprint 6.1. Execution-path gating
+    /// and hardware SM checks come in Sprint 6.5 (auto-tuner).
+    BF16,
 }
 
 impl PtxType {
     /// Size of this type in bytes.
     pub fn size_bytes(&self) -> usize {
         match self {
+            Self::F16 | Self::BF16 => 2,
             Self::F32 | Self::S32 | Self::U32 => 4,
             Self::F64 | Self::S64 | Self::U64 => 8,
             Self::Pred => 1,
         }
     }
 
-    /// PTX type suffix string (e.g. `.f32`, `.u64`).
+    /// PTX type suffix string for arithmetic, cvt, mma, and register
+    /// declarations (e.g. `.f32`, `.u64`, `.f16`, `.bf16`).
     pub fn ptx_suffix(&self) -> &'static str {
         match self {
+            Self::F16 => ".f16",
+            Self::BF16 => ".bf16",
             Self::F32 => ".f32",
             Self::F64 => ".f64",
             Self::S32 => ".s32",
@@ -44,6 +53,24 @@ impl PtxType {
         }
     }
 
+    /// PTX type suffix for **memory operations** (`ld`, `st`, and
+    /// `cp.async` variants).
+    ///
+    /// Differs from [`ptx_suffix`](Self::ptx_suffix) for half-precision
+    /// types: the PTX spec (§8.7.9 "ld") lists the valid types as
+    /// `{b8, b16, b32, b64, b128, u8, u16, u32, u64, s8, s16, s32,
+    /// s64, f32, f64}` — `f16` and `bf16` are **not** valid type
+    /// modifiers for scalar `ld`/`st`. To load a 16-bit half into an
+    /// `.f16` register you emit `ld.global.b16 %h, [addr]`.
+    ///
+    /// For every non-half type this matches [`ptx_suffix`](Self::ptx_suffix).
+    pub fn ptx_memory_suffix(&self) -> &'static str {
+        match self {
+            Self::F16 | Self::BF16 => ".b16",
+            _ => self.ptx_suffix(),
+        }
+    }
+
     /// PTX type used in `.reg` declarations.
     ///
     /// Matches `nvcc` convention: integer registers use untyped `.b32`/`.b64`
@@ -51,6 +78,8 @@ impl PtxType {
     /// keep their typed declarations.
     pub fn reg_decl_type(&self) -> &'static str {
         match self {
+            Self::F16 => ".f16",
+            Self::BF16 => ".bf16",
             Self::F32 => ".f32",
             Self::F64 => ".f64",
             Self::S32 | Self::U32 => ".b32",
@@ -62,6 +91,8 @@ impl PtxType {
     /// Which register kind this type maps to.
     pub fn reg_kind(&self) -> RegKind {
         match self {
+            Self::F16 => RegKind::H,
+            Self::BF16 => RegKind::Hb,
             Self::F32 => RegKind::F,
             Self::F64 => RegKind::Fd,
             Self::S32 | Self::U32 => RegKind::R,
@@ -76,6 +107,9 @@ impl PtxType {
 /// Collapses signed/unsigned into the same prefix (both `i32` and `u32`
 /// use `%r`, both `i64` and `u64` use `%rd`). This matches `nvcc` output
 /// conventions.
+///
+/// Models PTX register declaration classes directly, not higher-level
+/// numeric families. This is intentional — see Phase 6.1 design notes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegKind {
     /// `%r` — 32-bit integer (s32, u32)
@@ -88,6 +122,10 @@ pub enum RegKind {
     Fd,
     /// `%p` — predicate (bool)
     P,
+    /// `%h` — 16-bit float (f16)
+    H,
+    /// `%hb` — brain float 16 (bf16)
+    Hb,
 }
 
 impl RegKind {
@@ -99,6 +137,8 @@ impl RegKind {
             Self::F => "%f",
             Self::Fd => "%fd",
             Self::P => "%p",
+            Self::H => "%h",
+            Self::Hb => "%hb",
         }
     }
 
@@ -110,6 +150,8 @@ impl RegKind {
             Self::F => 2,
             Self::Fd => 3,
             Self::P => 4,
+            Self::H => 5,
+            Self::Hb => 6,
         }
     }
 }
@@ -136,6 +178,8 @@ macro_rules! impl_gpu_type {
     };
 }
 
+impl_gpu_type!(half::f16, PtxType::F16);
+impl_gpu_type!(half::bf16, PtxType::BF16);
 impl_gpu_type!(f32, PtxType::F32);
 impl_gpu_type!(f64, PtxType::F64);
 impl_gpu_type!(i32, PtxType::S32);
@@ -150,6 +194,8 @@ mod tests {
 
     #[test]
     fn ptx_type_size_bytes() {
+        assert_eq!(PtxType::F16.size_bytes(), 2);
+        assert_eq!(PtxType::BF16.size_bytes(), 2);
         assert_eq!(PtxType::F32.size_bytes(), 4);
         assert_eq!(PtxType::F64.size_bytes(), 8);
         assert_eq!(PtxType::S32.size_bytes(), 4);
@@ -161,6 +207,8 @@ mod tests {
 
     #[test]
     fn ptx_type_suffix() {
+        assert_eq!(PtxType::F16.ptx_suffix(), ".f16");
+        assert_eq!(PtxType::BF16.ptx_suffix(), ".bf16");
         assert_eq!(PtxType::F32.ptx_suffix(), ".f32");
         assert_eq!(PtxType::F64.ptx_suffix(), ".f64");
         assert_eq!(PtxType::S32.ptx_suffix(), ".s32");
@@ -171,7 +219,24 @@ mod tests {
     }
 
     #[test]
+    fn ptx_type_memory_suffix() {
+        // Half types collapse to .b16 for memory ops (PTX ISA §8.7.9).
+        assert_eq!(PtxType::F16.ptx_memory_suffix(), ".b16");
+        assert_eq!(PtxType::BF16.ptx_memory_suffix(), ".b16");
+        // All other types use their native suffix.
+        assert_eq!(PtxType::F32.ptx_memory_suffix(), ".f32");
+        assert_eq!(PtxType::F64.ptx_memory_suffix(), ".f64");
+        assert_eq!(PtxType::S32.ptx_memory_suffix(), ".s32");
+        assert_eq!(PtxType::U32.ptx_memory_suffix(), ".u32");
+        assert_eq!(PtxType::S64.ptx_memory_suffix(), ".s64");
+        assert_eq!(PtxType::U64.ptx_memory_suffix(), ".u64");
+    }
+
+    #[test]
     fn ptx_type_reg_decl_type() {
+        // Half types keep typed declarations
+        assert_eq!(PtxType::F16.reg_decl_type(), ".f16");
+        assert_eq!(PtxType::BF16.reg_decl_type(), ".bf16");
         // Integers collapse to untyped bit-width (matches nvcc convention)
         assert_eq!(PtxType::S32.reg_decl_type(), ".b32");
         assert_eq!(PtxType::U32.reg_decl_type(), ".b32");
@@ -185,6 +250,9 @@ mod tests {
 
     #[test]
     fn ptx_type_reg_kind() {
+        // Half types
+        assert_eq!(PtxType::F16.reg_kind(), RegKind::H);
+        assert_eq!(PtxType::BF16.reg_kind(), RegKind::Hb);
         // Signed and unsigned 32-bit both map to R
         assert_eq!(PtxType::S32.reg_kind(), RegKind::R);
         assert_eq!(PtxType::U32.reg_kind(), RegKind::R);
@@ -205,10 +273,14 @@ mod tests {
         assert_eq!(RegKind::F.prefix(), "%f");
         assert_eq!(RegKind::Fd.prefix(), "%fd");
         assert_eq!(RegKind::P.prefix(), "%p");
+        assert_eq!(RegKind::H.prefix(), "%h");
+        assert_eq!(RegKind::Hb.prefix(), "%hb");
     }
 
     #[test]
     fn gpu_type_impls() {
+        assert_eq!(<half::f16 as GpuType>::PTX_TYPE, PtxType::F16);
+        assert_eq!(<half::bf16 as GpuType>::PTX_TYPE, PtxType::BF16);
         assert_eq!(<f32 as GpuType>::PTX_TYPE, PtxType::F32);
         assert_eq!(<f64 as GpuType>::PTX_TYPE, PtxType::F64);
         assert_eq!(<i32 as GpuType>::PTX_TYPE, PtxType::S32);
