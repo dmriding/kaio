@@ -247,6 +247,104 @@ mod tests {
     }
 
     #[test]
+    fn logical_operator_rejects_non_bool_operand() {
+        // Regression canary (Sprint 7.0 D4 error path): `&&` / `||` on integer
+        // operands must produce a clear compile-time error, not silently accept
+        // the kernel and emit wrong PTX. If `ensure_bool` ever stops guarding
+        // this, a user writing `if count && flag` (meaning bitwise `&`) would
+        // get confusing behavior.
+        let func = parse_kernel(quote! {
+            fn bad_logical_kernel(a: u32, b: u32, out: &mut [u32], n: u32) {
+                // `a && b` is nonsense — both operands are u32, not bool.
+                // This must error at codegen time, not silently lower.
+                if a && b {
+                    out[0] = 1;
+                }
+            }
+        });
+        let sig = parse_kernel_signature(&func, dummy_config(32)).expect("signature");
+        let body = parse_body(&func.block).expect("body");
+
+        let err = generate_kernel_module(&sig, &body)
+            .expect_err("codegen must reject `u32 && u32` — logical ops require bool");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("&&") && msg.contains("bool"),
+            "expected error mentioning && and bool, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn if_condition_with_logical_or_uses_branch_direct_take_label() {
+        // Regression canary (Sprint 7.0 D4, `||` if-condition path):
+        // `if a || b { body }` must emit the branch-direct form with a
+        // LOGICAL_OR_TAKE label — NOT materialize an intermediate p_out Mov.
+        // The `||` path is structurally distinct from `&&` (short-circuits on
+        // LHS true, not LHS false; uses a local TAKE label the body falls
+        // through to). Losing either the TAKE label or the branch-direct
+        // semantics silently reverts `||` to expression-position materialization.
+        let func = parse_kernel(quote! {
+            fn or_if_kernel(a: u32, b: u32, out: &mut [u32], n: u32) {
+                if a < n || b < n {
+                    out[0] = 1;
+                }
+            }
+        });
+        let sig = parse_kernel_signature(&func, dummy_config(32)).expect("signature");
+        let body = parse_body(&func.block).expect("body");
+
+        let module = generate_kernel_module(&sig, &body).expect("codegen");
+        let output = module.to_string();
+
+        assert!(
+            output.contains("LOGICAL_OR_TAKE"),
+            "expected LOGICAL_OR_TAKE_<n> label from `||` if-condition \
+             branch-direct path, got:\n{}",
+            &output[..output.len().min(1500)]
+        );
+        assert!(
+            !output.contains("ty : PtxType :: Pred"),
+            "if-condition `a || b` should use branch-direct form (no Mov \
+             PtxType::Pred), got:\n{}",
+            &output[..output.len().min(1500)]
+        );
+    }
+
+    #[test]
+    fn logical_or_in_expression_position_materializes_predicate() {
+        // Regression canary (Sprint 7.0 D4 expression-position, `||` variant):
+        // `let m = a || b;` must materialize the short-circuit result via the
+        // LOGICAL_DONE label + mov.pred sequence, with the `||` short-circuit
+        // branching on LHS true (negate=false in BraPred) rather than LHS false.
+        let func = parse_kernel(quote! {
+            fn or_expr_kernel(a: u32, b: u32, out: &mut [u32], n: u32) {
+                let m = a < n || b < n;
+                if m {
+                    out[0] = 1;
+                }
+            }
+        });
+        let sig = parse_kernel_signature(&func, dummy_config(32)).expect("signature");
+        let body = parse_body(&func.block).expect("body");
+
+        let module = generate_kernel_module(&sig, &body).expect("codegen");
+        let output = module.to_string();
+
+        assert!(
+            output.contains("LOGICAL_DONE"),
+            "expected LOGICAL_DONE_<n> label from expression-position `||` \
+             materialization, got:\n{}",
+            &output[..output.len().min(1500)]
+        );
+        assert!(
+            output.contains("ty : PtxType :: Pred"),
+            "expected Mov with PtxType::Pred for materialized `||` short-circuit \
+             result, got:\n{}",
+            &output[..output.len().min(1500)]
+        );
+    }
+
+    #[test]
     fn logical_and_in_expression_position_materializes_predicate() {
         // Regression canary (Sprint 7.0 D4 expression-position path): `let m = a && b;`
         // must materialize the short-circuit result into a .pred register via
