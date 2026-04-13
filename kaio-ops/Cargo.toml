@@ -16,6 +16,13 @@ include = [
     "/README.md",
 ]
 
+# See kaio-core/Cargo.toml for the docs.rs targets rationale.
+[package.metadata.docs.rs]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
 [dependencies]
 kaio = { version = "0.2.1", path = "../kaio" }
 kaio-core = { version = "0.2.1", path = "../kaio-core" }

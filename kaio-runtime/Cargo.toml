@@ -10,6 +10,13 @@ description = "KAIO runtime — CUDA driver API wrapper, kernel launch, and devi
 keywords = ["gpu", "cuda", "ptx", "runtime", "kernel"]
 categories = ["hardware-support"]
 
+# See kaio-core/Cargo.toml for the docs.rs targets rationale.
+[package.metadata.docs.rs]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
 [dependencies]
 cudarc = { workspace = true }
 thiserror = { workspace = true }

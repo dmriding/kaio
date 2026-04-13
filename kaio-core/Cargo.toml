@@ -10,5 +10,17 @@ description = "KAIO core — PTX IR types and emission. Part of the KAIO GPU ker
 keywords = ["gpu", "cuda", "ptx", "codegen", "ir"]
 categories = ["hardware-support", "compilers"]
 
+# docs.rs changes its default on 2026-05-01 to build only one target
+# (x86_64-unknown-linux-gnu) unless crates opt in. KAIO's differentiator
+# includes native Windows support, so explicitly list both Linux and
+# Windows targets here. docs build identically on both — cudarc's
+# dynamic-loading feature resolves the NVIDIA driver at runtime, not
+# build time, so no CUDA toolkit is needed for docs.rs.
+[package.metadata.docs.rs]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
 [dependencies]
 half = { workspace = true }
