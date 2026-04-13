@@ -74,12 +74,37 @@ impl KaioDevice {
     /// no NVRTC compilation occurs. The driver JIT-compiles the PTX for
     /// the current GPU.
     ///
-    /// # Example
+    /// # Deprecated — prefer [`load_module`](Self::load_module)
     ///
+    /// The module path runs
+    /// [`PtxModule::validate`](kaio_core::ir::PtxModule::validate)
+    /// before the driver sees the PTX, catching SM mismatches (e.g.
+    /// `mma.sync` on sub-Ampere targets) with readable
+    /// [`KaioError::Validation`](crate::error::KaioError::Validation)
+    /// errors instead of cryptic `ptxas` failures deep in the driver.
+    ///
+    /// This function remains public for raw-PTX use cases (external PTX
+    /// files, hand-written PTX for research, bypassing validation
+    /// intentionally). It is not scheduled for removal in the 0.2.x line.
+    ///
+    /// # Migration
+    ///
+    /// Before:
     /// ```ignore
+    /// let ptx_text: String = build_my_ptx();
     /// let module = device.load_ptx(&ptx_text)?;
-    /// let func = module.function("vector_add")?;
     /// ```
+    ///
+    /// After:
+    /// ```ignore
+    /// use kaio_core::ir::PtxModule;
+    /// let ptx_module: PtxModule = build_my_module("sm_80");
+    /// let module = device.load_module(&ptx_module)?;
+    /// ```
+    #[deprecated(
+        since = "0.2.1",
+        note = "use load_module(&PtxModule) — runs PtxModule::validate() for readable SM-mismatch errors"
+    )]
     pub fn load_ptx(&self, ptx_text: &str) -> Result<crate::module::KaioModule> {
         let ptx = cudarc::nvrtc::Ptx::from_src(ptx_text);
         let module = self.ctx.load_module(ptx)?;
@@ -113,6 +138,10 @@ impl KaioDevice {
             .map_err(|e| crate::error::KaioError::PtxLoad(format!("emit failed: {e}")))?;
         let ptx_text = w.finish();
 
+        // `load_ptx` is #[deprecated] as a public API to steer users to the
+        // validated module path, but it's still the correct internal
+        // implementation detail after we've emitted the PTX text here.
+        #[allow(deprecated)]
         self.load_ptx(&ptx_text)
     }
 }
