@@ -17,8 +17,8 @@ Master plan: [phase6_master_plan.md](phase6_master_plan.md)
 | [6.6](sprint_6_6.md) | Fused TC attention + causal variant (internal API) | ✅ Complete | `5c3ae53` | 275 host + 133 GPU (+7 host, +11 GPU) |
 | [6.7](sprint_6_7.md) | Multi-warp 64×64 TC matmul + edge tiles + cuBLAS bench (79.9% sync, 85.1% async at 4096²) + matmul_tc/_async promoted to stable pub | ✅ Complete | `a3d5ca3` | 279 host + 148 GPU |
 | 6.7-post | Codex post-review: size-heuristic cache-miss default + doc drift | ✅ Complete | `78b886c` | 280 host + 148 GPU (+1 host) |
-| [6.8](sprint_6_8.md) | Showcase examples (fused SiLU-gate, GELU comparison, RMSNorm) | ✅ Complete | _(final)_ | 280 host + 148 GPU (examples are standalone binaries, not counted) |
-| 6.7b | Vectorized loads (LDG.128) + bank-conflict padding (chase 90%+) | Pending | — | — |
+| [6.8](sprint_6_8.md) | Showcase examples (fused SiLU-gate, GELU comparison, RMSNorm) | ✅ Complete | `6509cae` | 280 host + 148 GPU (examples are standalone binaries, not counted) |
+| [6.7b](sprint_6_7b.md) | Bank-conflict padding + D10 hoist (async 92.5% / sync 82.3% cuBLAS sgemm 4096²); LdGlobalB128 IR primitive landed as unused-future-anchor | ✅ Complete | `6c8e177` (Gate A) + `449dbee` (Gate B) + _(final)_ | 286 host + 148 GPU |
 | [6.9](sprint_6_9.md) | Polish + v0.2.0 publish | Pending | — | — |
 
 ## Key References
@@ -45,7 +45,7 @@ Master plan: [phase6_master_plan.md](phase6_master_plan.md)
                                                        |
                                                   6.8 (showcase examples ✅)
                                                        |
-                                                  6.7b (vectorized loads, chase 90%+)
+                                                  6.7b (padding + D10 hoist — async 92.5% ✅)
                                                        |
                                                   6.9 (publish v0.2.0)
 ```

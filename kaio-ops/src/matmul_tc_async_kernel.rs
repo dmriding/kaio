@@ -113,7 +113,9 @@ const WARPS_PER_BLOCK: u32 = 4;
 // padded col stride (36 B) + rounded data size (2560 B).
 const BYTES_PER_HALF: u32 = 2;
 const BYTES_PER_F32: u32 = 4;
-use crate::matmul_tc_kernel::{TILE_A_BYTES, TILE_A_ROW_STRIDE_BYTES, TILE_B_BYTES, TILE_B_COL_STRIDE_BYTES};
+use crate::matmul_tc_kernel::{
+    TILE_A_BYTES, TILE_A_ROW_STRIDE_BYTES, TILE_B_BYTES, TILE_B_COL_STRIDE_BYTES,
+};
 const TILE_A_TOTAL_BYTES: u32 = 2 * TILE_A_BYTES; // 4096 (2 buffers)
 const TILE_B_TOTAL_BYTES: u32 = 2 * TILE_B_BYTES; // 2 × 2560 = 5120 per async (was 4096 pre-6.7b)
 

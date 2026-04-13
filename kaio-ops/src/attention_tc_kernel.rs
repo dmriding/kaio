@@ -1807,14 +1807,8 @@ pub fn build_attention_tc_module(sm: &str, causal: bool) -> PtxModule {
         r_tid,
         r_d_k_bytes,
     );
-    let frag_kt = load_fragment_b_m16n8k16_shared_col(
-        &mut alloc,
-        &mut kernel,
-        r_k_chunk,
-        r_tid,
-        32,
-        None,
-    );
+    let frag_kt =
+        load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, r_k_chunk, r_tid, 32, None);
     kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
         d: frag_s,
         a: frag_q,
@@ -2163,14 +2157,8 @@ pub fn build_attention_tc_module(sm: &str, causal: bool) -> PtxModule {
         r_tid,
         r_seq_k_bytes_f16,
     );
-    let frag_v = load_fragment_b_m16n8k16_shared_col(
-        &mut alloc,
-        &mut kernel,
-        r_v_chunk,
-        r_tid,
-        32,
-        None,
-    );
+    let frag_v =
+        load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, r_v_chunk, r_tid, 32, None);
     kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
         d: frag_o,
         a: frag_p,

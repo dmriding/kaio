@@ -249,7 +249,7 @@ impl MemoryOp {
     ///
     /// # Panics
     ///
-    /// Panics if any destination register is not [`RegKind::R`] (b32).
+    /// Panics if any destination register is not [`crate::types::RegKind::R`] (b32).
     /// `ld.global.v4.b32` requires 4× 32-bit-wide integer-class
     /// destinations; `.f` / `.rd` / `.h` / `.hb` / `.p` registers are
     /// invalid and ptxas's error message is cryptic. Fail loudly at

@@ -8,7 +8,7 @@
 
 **Rust-native GPU kernel authoring framework.**
 
-KAIO (from the Greek kaio — _to kindle, to ignite_) lets you write GPU
+KAIO (from the Greek καιω — _to burn, to ignite_) lets you write GPU
 compute kernels in Rust and compile them to PTX for execution on NVIDIA
 GPUs. Cross-platform (Windows + Linux), automatic PTX generation, and
 Rust's type safety — no CUDA C++, no Python, no CUDA toolkit required.
@@ -204,15 +204,19 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 | Attention       | `kaio_ops::attention()`, `attention_causal()`              | Supported |
 | FlashAttention  | `kaio_ops::attention_flash()` — O(d_k) memory             | Supported |
 | Auto-tuner      | `kaio_ops::tune_matmul()`, `matmul_auto()`                | Supported |
-| TC matmul       | `kaio_ops::matmul_tc()` / `matmul_tc_async()` / `matmul_auto_tc()` — f16×f16→f32, SM 8.0+, [~80–85% cuBLAS sgemm at 4096²](docs/performance.md) | Supported |
+| TC matmul       | `kaio_ops::matmul_tc()` / `matmul_tc_async()` / `matmul_auto_tc()` — f16×f16→f32, SM 8.0+, [82.3% sync / **92.5% async** of cuBLAS sgemm at 4096²](docs/performance.md) | Supported |
 
 ## Limitations
 
 KAIO is early-stage software. Being honest about what it can't do:
 
 - **NVIDIA only** — SM 7.0+ (Volta through Hopper). No AMD, no Intel.
-- **Not cuBLAS-level performance** — matmul reaches 31% of cuBLAS.
-  Good enough for custom ops, not for replacing vendor libraries.
+- **Not cuBLAS-level performance** — the scalar matmul reaches 31% of
+  cuBLAS sgemm. The tensor-core matmul at Ampere+ closes the gap
+  substantially (82.3% sync / 92.5% async of cuBLAS sgemm at 4096²,
+  fp16 × fp16 → fp32 accumulation) but still trails the vendor
+  library in the general case. Good enough for custom ops, not for
+  replacing vendor libraries.
 - **No autograd / backward pass** — inference and custom compute only,
   not training.
 - **DSL subset** — the kernel DSL supports a subset of Rust. No
@@ -357,8 +361,25 @@ for a complete end-to-end example.
     + `matmul_tc_async` promoted from `#[doc(hidden)]` to stable `pub`.
     See [docs/performance.md](docs/performance.md) for the full table
     and the apples-to-apples disclaimer.
-  - [ ] **6.7b** — Vectorized loads (LDG.128) + bank-conflict padding,
-    chasing the remaining headroom toward 90%+.
+  - [x] **6.8** — Three standalone showcase examples
+    (`fused_silu_gate`, `gelu_comparison`, `rms_norm`) under
+    [`examples/`](examples/). Each is its own Cargo project with a
+    kernel source block, CPU f64 reference, PASS/FAIL correctness
+    check, and median timing. The `gelu_comparison` README includes
+    the "bandwidth-bound teaching moment" explaining why kernel
+    fusion matters more than arithmetic optimisation for ML
+    workloads.
+  - [x] **6.7b** — Bank-conflict padding on shared Tile B (col stride
+    32 → 36 bytes) + D10 fragment-loader hoist (compute `(group_id,
+    tig)` once per block). Measured **82.3% (sync)** / **92.5%
+    (async)** of cuBLAS sgemm at 4096² on RTX 4090 — async past the
+    original 90% stretch target on padding + hoist alone. `MemoryOp::
+    LdGlobalB128` IR primitive landed in kaio-core as a future-
+    sprint anchor (not wired into any kernel in 6.7b per the D9
+    mechanical ship-gate rule).
+  - [ ] **6.9** — Polish pass + v0.2.0 publish. Flip example Cargo
+    manifests from path-dep to `kaio = "0.2.0"`, final doc sweep,
+    release notes.
 - [ ] **Phase 7** — Quantized kernels (INT8/INT4), training integration
   (`kaio-candle` bridge)
 - [ ] **Phase 8** — PyO3 bindings (Python access to kaio-ops)

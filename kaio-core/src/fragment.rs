@@ -882,8 +882,7 @@ mod tests {
         let mut kernel = PtxKernel::new("test");
         let base = alloc.alloc(PtxType::U32);
         let tid = alloc.alloc(PtxType::U32);
-        let _ =
-            load_fragment_a_m16n8k16_shared_row(&mut alloc, &mut kernel, base, tid, 128, None);
+        let _ = load_fragment_a_m16n8k16_shared_row(&mut alloc, &mut kernel, base, tid, 128, None);
 
         // Expect a Mul with ImmU32(128) (row stride) and an Add with
         // ImmU32(1024) (8 * 128 = 8 rows' worth of bytes).
@@ -922,8 +921,7 @@ mod tests {
         let mut kernel = PtxKernel::new("test");
         let base = alloc.alloc(PtxType::U32);
         let tid = alloc.alloc(PtxType::U32);
-        let _ =
-            load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, base, tid, 96, None);
+        let _ = load_fragment_b_m16n8k16_shared_col(&mut alloc, &mut kernel, base, tid, 96, None);
 
         let mut saw_stride_mul = false;
         for instr in &kernel.body {

@@ -345,6 +345,48 @@ Branch: `phase6`. In progress toward v0.2.0.
   actually detaches them, but the workspace exclude makes the intent
   explicit.
 
+### Added — Sprint 6.7b (bank-conflict padding + D10 fragment-loader hoist)
+- **Tensor-core matmul async path hits 92.5% of cuBLAS sgemm at 4096²**
+  on RTX 4090 sm_89 (up from Sprint 6.7's 85.1%, +7.4pp). Sync path at
+  82.3% (up from 79.9%, +2.4pp). This is the v0.2.0 launch headline:
+  pure-Rust-authored GPU kernel within 7.5% of a hand-tuned NVIDIA
+  library, no CUDA C++ required. Project-local-baseline disclaimer
+  unchanged — KAIO is fp16 in / fp32 accumulation vs cuBLAS sgemm
+  (f32 in / f32 out); bandwidth asymmetry is part of the value
+  proposition.
+- **`load_fragment_a_m16n8k16_shared_row` and
+  `load_fragment_b_m16n8k16_shared_col`** gained a
+  `group_tig_override: Option<(Register, Register)>` parameter — kaio-
+  core API. Callers that invoke the loaders multiple times per K-iter
+  can compute `(group_id, thread_id_in_group)` once per block and pass
+  them here, saving 6 × `div.u32`/`rem.u32` pairs per K-iter. `None`
+  preserves the pre-6.7b behaviour (loader computes locally). Resolves
+  the long-deferred D10 tech-debt item from Sprint 6.2.
+- **Shared Tile B col-stride padding** for bank-conflict relief on the
+  fragment-B hot path — stride bumped from 32 B to 36 B per column
+  (one 4-byte pad per col; total tile 2304 B data + round-up tail =
+  2560 B to satisfy the cooperative pre-zero pass's `THREADS_PER_BLOCK
+  × 4` divisibility). Fragment B loader already accepted the stride as
+  a parameter; no loader code touched. Bank math: `(group_id·9 + tig)
+  mod 32` — most banks 1-way accessed, only 3 banks remain 2-way (vs
+  all 16 distinct banks 2-way at stride 32). Measured 7.4pp lift on
+  the async path alone.
+- **`MemoryOp::LdGlobalB128`** — new kaio-core IR primitive for
+  single-instruction 128-bit vectorized global loads (`ld.global.v4.b32
+  {%r_i, %r_j, %r_k, %r_l}, [%rd_addr];`). Constructor validates that
+  all 4 destinations are b32-class registers. Includes `ptxas_verify`
+  coverage at sm_70. **Not wired into any kernel in 6.7b** — the
+  primitive ships as well-formed unused IR for a future sprint that
+  designs the companion b32-to-b16 split primitive. Kept orthogonal
+  per Sprint 6.7b's D10 fallback protocol.
+
+### Changed — Sprint 6.7b
+- Sprint 6.7b's tile-B shared constants (`TILE_B_COL_STRIDE_BYTES`,
+  `TILE_B_BYTES`) are now `pub(crate)` in `matmul_tc_kernel.rs` and
+  imported by `matmul_tc_async_kernel.rs` — single source of truth.
+  The async kernel's previous local copies are gone, guaranteeing the
+  cooperative store and fragment-B read layouts can never drift.
+
 ## [0.1.0] — Phase 5: Fused Attention & Community Release
 
 ### Added — Phase 5

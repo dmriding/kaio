@@ -80,30 +80,51 @@ correctness issue), but adding proper bitops to `ArithOp` would
 produce cleaner PTX and be useful beyond tensor-core fragment math.
 **Added:** Phase 3 / extended Sprint 6.2 | **Sprint:** Phase 4.6 optimization
 
-### `group_id` / `thread_id_in_group` hoisting in fragment helpers
+### `MemoryOp::LdGlobalB128` landed but not wired into any kernel
 
-Every `load_fragment_*` / `store_fragment_*` call in
-`kaio-core/src/fragment.rs` independently emits its own `div.u32` +
-`rem.u32` to derive `groupID` and `threadID_in_group` from `%tid.x`.
-For the Sprint 6.2 gate test (3 helper calls) this is 6 extra
-instructions per warp — negligible. Sprint 6.7's multi-warp
-`emit_warp_quadrant_mma` calls the loaders 6 times per K-iter (2
-FragmentA + 4 FragmentB), but ptxas's CSE optimization handles the
-redundant div/rem cleanly given the constant divisor 4 (it's lowered
-to shift/mask). Measured 6.7 perf at 79.9% (sync) / 85.1% (async)
-of cuBLAS sgemm at 4096² without the hoist — within 6.7b's chase
-range, so the hoist would land alongside vectorized loads where the
-fragment loaders are being rewritten anyway.
+Sprint 6.7b landed the vectorized 128-bit global load IR primitive
+(`ld.global.v4.b32 {...}, [...];`) in `kaio-core/src/instr/memory.rs`
+with constructor validation (4 b32 destinations + 1 u64 address),
+emit path, 6 unit tests, and `ptxas_verify_ld_global_b128` coverage.
+The primitive is well-formed and cleanly isolatable.
 
-Cheapest fix: have the helpers accept `(group_id, thread_id_in_group)`
-registers as an optional parameter, with a `None` → "compute locally"
-fallback. Or: introduce a `FragmentWarpContext` struct holding the
-two registers + `%tid.x`, computed once at kernel start and threaded
-through the helpers.
+**Why it's not used yet:** wiring LDG.128 into the cooperative Tile B
+global load requires a companion "unpack b32 into two b16 half
+values" IR primitive so that the 8 fp16 values in the 4 loaded b32
+registers can be scattered into 8 different col-major shared
+positions (the current layout keeps fragment B's `.row.col`
+requirement intact). The two options are `mov.b32 {h_lo, h_hi},
+src` (vector-splitting move, cleanest PTX) or an `shr` + implicit
+b32-to-b16 store truncation pattern. Neither exists in kaio-core
+today. Adding that primitive under 6.7b's implementation-deadline
+pressure cut against the D10 orthogonality requirement, so 6.7b
+shipped without it and the LDG.128 variant stays as a future-sprint
+anchor.
 
-**Added:** Sprint 6.2 | **Sprint:** Phase 6.7b (alongside vectorized
-loads — the fragment loaders are getting rewritten there anyway, so
-parameterizing them at the same time minimizes churn)
+A dedicated sync-path-optimisation sprint (or Phase 7 work on
+`ldmatrix.sync.aligned`) can pick this up cleanly by designing the
+b32-to-b16 split primitive properly first, then wiring LDG.128 into
+`emit_mw_load_tile_b_16x64` as a per-block-setp-gated fast path
+(interior blocks with `N % 8 == 0`).
+
+**Added:** Sprint 6.7b | **Sprint:** TBD (post-0.2.0)
+
+### ~~`group_id` / `thread_id_in_group` hoisting in fragment helpers~~ RESOLVED (Sprint 6.7b)
+
+`load_fragment_a_m16n8k16_shared_row` and
+`load_fragment_b_m16n8k16_shared_col` in
+`kaio-core/src/fragment.rs` now accept a
+`group_tig_override: Option<(Register, Register)>` parameter. When
+`None`, behaviour matches pre-6.7b (internal `div.u32`/`rem.u32`
+emit). When `Some((g, t))`, the loaders skip the internal compute
+and use the caller-supplied registers. The multi-warp matmul_tc
+kernels compute `(group_id, tig)` once at kernel start and thread
+them through `emit_warp_quadrant_mma` to each of the 6 fragment
+loader calls per K-iter, saving 6 × `div.u32`/`rem.u32` pairs per
+K-iter. Combined with Tile B col-stride padding (32 → 36 B), the
+measured 6.7b uplift over 6.7 was +2.4pp sync / +7.4pp async
+(79.9→82.3 / 85.1→92.5).
+**Resolved:** Sprint 6.7b
 
 ### `PtxModule::validate()` bypass via `load_ptx(&str)`
 

@@ -1,12 +1,9 @@
 # Phase 6 Master Plan — Tensor Cores + Async Copies
 
-**Status:** In progress (6.1–6.8 complete; 6.7b + 6.9 pending)
+**Status:** In progress (6.1–6.8 + 6.7b complete; 6.9 pending)
 **Depends on:** Phase 5 complete (v0.1.0, commit `bbc1c4d`)
-**Current branch tip:** Sprint 6.8 (showcase examples) complete; see PHASE_6_LOG.
-**Sprint order update (2026-04-12):** 6.8 was reordered ahead of 6.7b.
-At 79.9/85.1% of cuBLAS sgemm (4096²) the 6.7 perf story is already
-launch-ready, so showcase examples go next to make v0.2.0 discoverable.
-6.7b (vectorized loads / 90%+ chase) becomes a v0.2.x perf bump.
+**Current branch tip:** Sprint 6.7b complete (padding + D10 hoist, async 92.5% / sync 82.3% of cuBLAS sgemm at 4096²); see PHASE_6_LOG.
+**Sprint order (as executed):** 6.1 → 6.2 → 6.3 → 6.4 → 6.5 → 6.6 → 6.7 → 6.8 → 6.7b → 6.9. 6.8 was moved ahead of 6.7b on 2026-04-12 (showcase examples needed for a discoverable v0.2.0 before chasing incremental perf). 6.7b was then pulled back into the pre-publish window on 2026-04-13 when "92.5% of cuBLAS" became a launch-grade headline worth one more sprint.
 
 See [PHASE_6_LOG.md](PHASE_6_LOG.md) for per-sprint commit hashes
 and test counts.
@@ -103,8 +100,10 @@ No implicit assumptions, no runtime failure as discovery mechanism.
 - Phase 4 baseline: 31% of cuBLAS (scalar FMA)
 - Sprint 6.7 multi-warp result: **79.9% sync / 85.1% async** at 4096² ✅
   (well past the 60% target and 70% stretch)
-- Sprint 6.7b target: 90%+ via vectorized loads (LDG.128) + bank-conflict
-  padding
+- Sprint 6.7b final: **82.3% sync / 92.5% async** at 4096² ✅
+  (async past the 90% stretch on padding + D10 hoist alone; LDG.128
+  IR primitive landed as unused-future-anchor — sync-side improvement
+  deferred to a future sprint with proper b32-to-b16 split primitive)
 - cuBLAS uses tensor cores + vectorized loads + multi-stage pipeline
 
 ### 7. SM Version Requirements
