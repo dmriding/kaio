@@ -197,10 +197,7 @@ pub fn alloc_a_M16N8K32(alloc: &mut RegisterAllocator) -> FragmentA_M16N8K32 {
 #[allow(non_snake_case)]
 pub fn alloc_b_M16N8K32(alloc: &mut RegisterAllocator) -> FragmentB_M16N8K32 {
     FragmentB_M16N8K32 {
-        regs: [
-            alloc.alloc_packed_int8x4(),
-            alloc.alloc_packed_int8x4(),
-        ],
+        regs: [alloc.alloc_packed_int8x4(), alloc.alloc_packed_int8x4()],
     }
 }
 

@@ -2,8 +2,8 @@
 
 use kaio_core::emit::{Emit, PtxWriter};
 use kaio_core::fragment::{
-    alloc_a, alloc_b, alloc_c, load_fragment_a_m16n8k16_shared_row,
-    load_fragment_b_m16n8k16_shared_col,
+    alloc_a, alloc_a_M16N8K32, alloc_b, alloc_b_M16N8K32, alloc_c, alloc_c_M16N8K32,
+    load_fragment_a_m16n8k16_shared_row, load_fragment_b_m16n8k16_shared_col,
 };
 use kaio_core::instr::control::{CmpOp, ControlOp};
 use kaio_core::instr::memory::MemoryOp;
@@ -312,6 +312,71 @@ pub fn build_mma_sync_ptx(sm: &str) -> String {
         a_ty: PtxType::F16,
         b_ty: PtxType::F16,
         c_ty: PtxType::F32,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new(sm);
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
+/// Build a minimal kernel exercising `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`.
+///
+/// Used by `ptxas_verify_mma_int8` (Sprint 7.1 D1a pass gate) to confirm
+/// that the emitted INT8 mma.sync instruction passes the offline assembler
+/// for SM 8.0+. Mirrors [`build_mma_sync_ptx`] but uses the INT8 fragment
+/// sibling types and the [`TensorCoreOp::MmaSyncInt8`] emission path.
+///
+/// `sm` must be Ampere-or-better (sm_80+) — enforced by the caller.
+///
+/// The kernel zero-initializes A/B (`.b32` packed-i8x4) and C (`.s32`
+/// accumulator) registers, emits one `mma.sync.m16n8k32`, and returns.
+/// ptxas verifies the instruction encoding only; runtime behavior is
+/// tested separately in D1b via GPU round-trip.
+#[allow(dead_code)]
+pub fn build_mma_int8_ptx(sm: &str) -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("mma_int8_smoke");
+
+    let a = alloc_a_M16N8K32(&mut alloc);
+    let b = alloc_b_M16N8K32(&mut alloc);
+    let c = alloc_c_M16N8K32(&mut alloc);
+    let d = alloc_c_M16N8K32(&mut alloc);
+
+    // Zero-initialize A/B fragment registers (.b32 holding packed i8x4).
+    for r in &a.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmU32(0),
+            ty: PtxType::U32,
+        });
+    }
+    for r in &b.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmU32(0),
+            ty: PtxType::U32,
+        });
+    }
+    // Zero-initialize C fragment registers (.s32 accumulator).
+    for r in &c.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmI32(0),
+            ty: PtxType::S32,
+        });
+    }
+
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSyncInt8 {
+        d,
+        a,
+        b,
+        c,
     }));
 
     kernel.push(PtxInstruction::Control(ControlOp::Ret));

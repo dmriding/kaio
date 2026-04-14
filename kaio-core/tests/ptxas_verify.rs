@@ -271,6 +271,51 @@ fn ptxas_verify_bitops() {
 
 #[test]
 #[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
+fn ptxas_verify_mma_int8() {
+    // Sprint 7.1 D1a pass gate: verify that
+    // `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32` passes the offline
+    // assembler for SM 8.0+. This is the fork-decision gate for the sprint:
+    // if ptxas accepts the emission, Path FAST (direct s8 mma) is viable;
+    // if it rejects, D1 pivots to the DEQUANT-F16 fallback path.
+    //
+    // Note: ptxas accepting the instruction string only proves encoding
+    // viability (D1a). Operand-layout correctness (D1b) is tested separately
+    // via GPU round-trip against a CPU reference.
+    let ptxas_check = std::process::Command::new("ptxas")
+        .arg("--version")
+        .output();
+    if ptxas_check.is_err() {
+        eprintln!("NOTE: ptxas not found in PATH — skipping PTX verification");
+        return;
+    }
+
+    let sm = sm_target_ampere_or_better();
+    let ptx = common::build_mma_int8_ptx(&sm);
+
+    let tmp = std::env::temp_dir().join("kaio_mma_int8_verify.ptx");
+    std::fs::write(&tmp, &ptx).expect("failed to write temp PTX file");
+
+    let output = std::process::Command::new("ptxas")
+        .args(["--gpu-name", &sm])
+        .arg(tmp.to_str().unwrap())
+        .output()
+        .expect("failed to run ptxas");
+
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        output.status.success(),
+        "ptxas verification FAILED for mma.sync.m16n8k32.s8.s8.s32 ({sm}):\nstdout: {}\nstderr: {}\n\n=== PTX ===\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        ptx
+    );
+
+    eprintln!("ptxas verification PASSED for mma.sync.m16n8k32.s8.s8.s32 ({sm})");
+}
+
+#[test]
+#[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
 fn ptxas_verify_shared_mem() {
     let ptxas_check = std::process::Command::new("ptxas")
         .arg("--version")
