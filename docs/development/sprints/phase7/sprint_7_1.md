@@ -30,7 +30,7 @@ through shared or global.
 
 This paragraph is the reference for what 7.1 actually ships. It appears
 verbatim in the `matmul_int8` rustdoc, the example README, and this log so
-users, reviewers, and future sprints share the same expectations:
+users and future sprints share the same expectations:
 
 **`matmul_int8` in v0.3.0 is:**
 - **symmetric** (no zero point)
@@ -58,7 +58,8 @@ s8 → tensor-core → s32 → scale path with no fallback active.
 `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`. Sibling fragment types
 `FragmentA_M16N8K32` (4 × .b32), `FragmentB_M16N8K32` (2 × .b32),
 `FragmentC_M16N8K32` (4 × .s32) with dedicated allocators —
-no overloading of the f16 infrastructure (AD3). `ptxas_verify_mma_int8`
+no overloading of the f16 infrastructure (distinct types keep layout
+differences visible to readers of the emitted PTX). `ptxas_verify_mma_int8`
 offline-assembler PASS at sm_80+.
 
 **D1b — operand layout correctness (`e9c4a5e`):**
@@ -93,18 +94,19 @@ partial-tile output). `impl_gpu_type!(i8, PtxType::S8)` makes `GpuBuffer<i8>`
 work with the runtime's alloc / h2d / d2h paths. W8A8 rustdoc warning on the
 public surface — the type system enforces W8A8 at compile time, but many
 local-LLM users expect W8A16 by default, so the explicit note prevents
-mental-model confusion (Gemini supplemental review 3.5).
+mental-model confusion.
 
 **D5 — showcase + xtask + bench (`669e0b3`):**
 `examples/int8_matmul/` — full W8A8 pipeline demo: quantize f32 to i8 per
 tensor, run `matmul_int8`, compare against naive f32 CPU matmul. Tolerance
 reflects quantization error, not kernel error. `examples/int8_dequant/`
-stays side-by-side as the DSL shift-and-mask primitive demo (AD6: two
-adopter personas). `cargo xtask showcase int8matmul` wired as the short
+stays side-by-side as the DSL shift-and-mask primitive demo — the two
+examples target different adopter personas (DSL authors vs ops-crate
+consumers). `cargo xtask showcase int8matmul` wired as the short
 name (compact form matching the `layernorm` precedent).
 `kaio-ops/tests/matmul_int8_bench.rs` — internal-regression bench with
 cuBLAS sgemm as a rough compute-density reference (apples-to-oranges loud
-disclaimer per R5; true INT8-vs-INT8 baseline requires raw-FFI
+disclaimer in the bench output; true INT8-vs-INT8 baseline requires raw-FFI
 `cublasGemmEx` which is out of scope for v0.3.0).
 
 **D6 — docs, release prep (this commit):**
@@ -128,23 +130,32 @@ across all 5 crates.
 
 ### Performance
 
-Measured on RTX 4090 sm_89, `cargo test -p kaio-ops --test matmul_int8_bench`:
+Measured on RTX 4090 sm_89, `cargo xtask bench matmul_int8_bench` across
+6 independent runs. Small sizes (≤1024³) are stable within ±5%; larger
+sizes (2048³+) show meaningful run-to-run variance driven by thermal and
+scheduler effects, so a single-run number would mislead — the numbers
+below are medians across 6 runs, with the observed range in parentheses
+where variance is material:
 
-| Size       | KAIO int8 ms | KAIO TOPS | cuBLAS sgemm ms | cuBLAS TF | ratio  |
-|------------|--------------|-----------|-----------------|-----------|--------|
-| 256³       | 0.39         | 0.09      | 0.02            | 1.66      | 5.2%   |
-| 512³       | 0.39         | 0.68      | 0.03            | 10.40     | 6.6%   |
-| 1024³      | 0.42         | 5.07      | 0.06            | 36.77     | 13.8%  |
-| 2048³      | 0.57         | 30.30     | 0.33            | 52.41     | 57.8%  |
-| **4096³**  | **1.71**     | **80.49** | **2.66**        | **51.61** | **155.9%** |
+| Size      | KAIO int8 ms  | KAIO TOPS         | cuBLAS sgemm ms | cuBLAS TF         |
+|-----------|---------------|-------------------|-----------------|-------------------|
+| 256³      | 0.37          | 0.09              | 0.02            | ~1.7              |
+| 512³      | 0.38          | 0.71              | 0.03            | ~11               |
+| 1024³     | 0.40          | ~5.3              | 0.06–0.07       | 32–37             |
+| 2048³     | ~0.54         | **30–35** (med 32)| 0.33–0.40       | 43–53             |
+| **4096³** | **1.46–1.71** | **80–94** (med 89)| 2.35–2.66       | 52–58             |
 
 The "vs cuBLAS" column is apples-to-oranges (int8 ops vs f32 ops), so treat
 it as a rough compute-density indicator, not a headline claim. The useful
 number for regression tracking is the **KAIO TOPS column** — at 4096³,
-80.5 TOPS is the v0.3.0 first-ship baseline. Small-size weakness (5-14% for
-≤1024³) is kernel-launch-dominated and not the optimization target for this
-sprint; the baseline at 2048³+ is where the tensor-core compute balance
-starts to matter.
+the **~89 TOPS median** (80–94 TOPS range) is the v0.3.0 first-ship
+baseline. Small-size weakness (5–18% for ≤1024³) is kernel-launch-dominated
+and not the optimization target for this sprint; the baseline at 2048³+
+is where the tensor-core compute balance starts to matter.
+
+Future regression tracking should compare against the **lower bound of
+this range** (≈80 TOPS at 4096³) so normal variance doesn't trip false
+alarms. Sustained runs below 75 TOPS would indicate a real regression.
 
 **No regressions on the f16 path.** `matmul_tc_bench` post-D3 showed 4096²
 TC async at 114.3% of cuBLAS sgemm, 2.28ms — within run-to-run noise of the
@@ -152,10 +163,12 @@ pre-sprint baseline (100-102%).
 
 ### Forked-decision status
 
-Path FAST is the shipped implementation. Path DEQUANT-F16 (fallback) was
-never activated; it remains specced in the plan as a future mixed-precision
-(W8A16) jumping-off point but is not on the 7.1 merge-to-main surface. 48-hour
-layout-debugging pivot timebox was not consumed — D1b layout passed first try.
+Path FAST is the shipped implementation. Path DEQUANT-F16 was specced
+as a fallback if the direct-s8 mma didn't work on sm_89; it was never
+activated. The design note remains as a future mixed-precision (W8A16)
+jumping-off point but is not on the 7.1 merge-to-main surface. The
+48-hour D1b layout-debugging timebox was not consumed — layout passed
+first try against the full adversarial matrix.
 
 ## Lessons / follow-ups
 
@@ -164,26 +177,17 @@ layout-debugging pivot timebox was not consumed — D1b layout passed first try.
   simplicity. At 4096³ the kernel is already competitive; the transpose
   optimization lands in a follow-up if profiling shows it's load-bound.
 - **Shared-tile bank math matched prediction** — the `+4` padding from the
-  f16 path carried over cleanly to INT8 tile_b (col-stride 36 B), and we
-  didn't need Gemini's 68/72-byte fallback (R4 in plan).
+  f16 path carried over cleanly to INT8 tile_b (col-stride 36 B). Larger
+  paddings (68 / 72 B) were held in reserve as a fallback and not needed;
+  the kernel hits the expected throughput band without them.
 - **Register count** — `ptxas --verbose` wasn't instrumented this sprint;
   tracked as tech-debt for 7.1.5+.
 - **Scale path isolation paid off** — testing raw s32 against CPU `i32` first,
   then scaled f32 against CPU `(i32 as f64) * scale`, meant no scale bugs
   reached the size-matrix tests.
-- **Sprint fit vs original plan** — the sprint shipped faster than the plan's
-  D1-through-D6 branch-out suggested, because D1b's adversarial matrix gave
+- **Sprint fit vs original plan** — the sprint shipped faster than the
+  plan's D1-through-D6 branch-out suggested: D1b's adversarial matrix gave
   enough confidence to collapse D3 into a single pass rather than a gated
-  spike. Direct-call API (AD5) + sibling fragment types (AD3) + marker-type
-  `PtxType::S8` (AD8) all removed scope that would otherwise have been
-  "structural debates per reviewer pass."
-
-## Review trail
-
-| Round | Reviewer | Status |
-|---|---|---|
-| 1 | Owner + pre-plan Opus 4.6 | ✅ |
-| 2 | Opus 4.6 full-plan | ✅ |
-| 3 | Codex 5.4 | ✅ |
-| 3.5 | Gemini 3.1 Pro (supplemental technical-specifics pass) | ✅ |
-| 4 | Owner final sign-off | ✅ |
+  spike. Direct-call public API, sibling fragment types for K=32, and the
+  `PtxType::S8` marker type (no new scalar-arith surface) all removed
+  scope that would otherwise have been open design questions.

@@ -8,12 +8,12 @@
 //! cargo test -p kaio-ops --test matmul_int8_bench -- --ignored --nocapture
 //! ```
 //!
-//! # Apples-to-apples disclaimer (per Sprint 7.1 plan R5, conservative)
+//! # Apples-to-apples disclaimer
 //!
 //! Comparison is against **cuBLAS sgemm** (f32 × f32 → f32) because that
 //! is the cleanly-exposed cuBLAS path in cudarc 0.19. `cublasGemmEx` with
 //! `CUDA_R_8I` inputs would be the true apples-to-apples baseline but
-//! requires dropping to raw FFI — out of scope for 7.1 first-ship.
+//! requires dropping to raw FFI — out of scope for the v0.3.0 first-ship.
 //!
 //! The numbers reported here are a **project-local performance baseline**
 //! for regression tracking across sprints, NOT a claim of apples-to-
@@ -151,7 +151,7 @@ fn benchmark_matmul_int8() {
     );
     eprintln!("Warm-up: 5 | Iterations: 20 | Metric: median (i8 ops × 2) / second");
     eprintln!();
-    eprintln!("APPLES-TO-APPLES DISCLAIMER (per Sprint 7.1 plan R5):");
+    eprintln!("APPLES-TO-APPLES DISCLAIMER:");
     eprintln!("  KAIO matmul_int8 is W8A8 (i8 × i8 → s32 → scale → f32).");
     eprintln!("  cuBLAS column uses sgemm (f32 × f32 → f32) as a rough compute-density");
     eprintln!("  reference; true apples-to-apples vs cublasGemmEx INT8 is out of scope");

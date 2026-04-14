@@ -1,10 +1,9 @@
 //! INT8 symmetric dequantize-matmul — `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`.
 //!
-//! Path FAST (per Sprint 7.1 D1 fork decision): signed-INT8 inputs flow
-//! directly into the tensor core as packed-i8×4 fragments, producing an
-//! `.s32` accumulator that is scaled by a single global scalar `f32` on
-//! the way out to global `.f32` output. No dequant-to-f16 round-trip;
-//! scale is applied post-accumulation only.
+//! Signed-INT8 inputs flow directly into the tensor core as packed-i8×4
+//! fragments, producing an `.s32` accumulator that is scaled by a single
+//! global scalar `f32` on the way out to global `.f32` output. No
+//! dequant-to-f16 round-trip; scale is applied post-accumulation only.
 //!
 //! Structure mirrors [`matmul_tc_kernel`](crate::matmul_tc_kernel):
 //! - Block dim `(32, 4, 1)` — 4 warps per block, 128 threads total.
@@ -15,7 +14,7 @@
 //! - Grid `(N.div_ceil(64), M.div_ceil(64), 1)`. Edge tiles handled
 //!   via bounds predication.
 //!
-//! # Public contract (Sprint 7.1, v0.3.0)
+//! # Public contract (v0.3.0)
 //!
 //! `matmul_int8` in v0.3.0 is intentionally the **reference quant op**,
 //! not the final general-quant API:

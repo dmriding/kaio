@@ -90,20 +90,26 @@ in follow-up sprints as additive refinements.
 
 ### Performance — v0.3.0 `matmul_int8` baseline (RTX 4090 sm_89)
 
-| Size  | matmul_int8 ms | matmul_int8 TOPS | cuBLAS sgemm ms | cuBLAS TF |
-|-------|----------------|------------------|-----------------|-----------|
-| 256³  | 0.39           | 0.09             | 0.02            | 1.66      |
-| 512³  | 0.39           | 0.68             | 0.03            | 10.40     |
-| 1024³ | 0.42           | 5.07             | 0.06            | 36.77     |
-| 2048³ | 0.57           | 30.30            | 0.33            | 52.41     |
-| 4096³ | **1.71**       | **80.49**        | 2.66            | 51.61     |
+Medians across 6 independent bench runs. Small sizes stable within ±5%;
+2048³+ shows meaningful run-to-run variance driven by thermal/scheduler
+effects, so the table reports observed ranges where variance is material:
+
+| Size  | matmul_int8 ms | matmul_int8 TOPS    | cuBLAS sgemm ms | cuBLAS TF |
+|-------|----------------|---------------------|-----------------|-----------|
+| 256³  | 0.37           | 0.09                | 0.02            | ~1.7      |
+| 512³  | 0.38           | 0.71                | 0.03            | ~11       |
+| 1024³ | 0.40           | ~5.3                | 0.06–0.07       | 32–37     |
+| 2048³ | ~0.54          | **30–35** (med 32)  | 0.33–0.40       | 43–53     |
+| 4096³ | **1.46–1.71**  | **80–94** (med ~89) | 2.35–2.66       | 52–58     |
 
 Apples-to-oranges disclaimer: int8 vs sgemm indicates compute density, not
 equivalent-work throughput. The **KAIO TOPS column** is the regression
-baseline. Small-size weakness (≤1024³) is kernel-launch-dominated and not
-the 7.1 optimization target; 2048³+ is where the tensor-core compute
-balance matters. The f16 TC path shows no regression: post-7.1
-`matmul_tc_async` at 4096² runs at 114.3% of cuBLAS sgemm (2.28ms).
+baseline. At 4096³ the sprint-over-sprint regression floor is ~80 TOPS
+(lower bound of observed range); sustained runs below 75 TOPS would
+indicate a real regression. Small-size weakness (≤1024³) is kernel-
+launch-dominated and not the 7.1 optimization target. The f16 TC path
+shows no regression: post-7.1 `matmul_tc_async` at 4096² runs at ~108% of
+cuBLAS sgemm, within run-to-run noise of the pre-sprint baseline.
 
 ## [0.2.2] — 2026-04-14 — Sprint 7.0.5: Ergonomics fast-track before Phase 7.1
 
