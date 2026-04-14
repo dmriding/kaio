@@ -10,14 +10,15 @@ KAIO looks like.
 
 ## Examples
 
-| Short name  | Directory            | Kernel                                           | Why it matters                                       |
-|-------------|----------------------|--------------------------------------------------|------------------------------------------------------|
-| `silu`      | `fused_silu_gate/`   | `out = x * sigmoid(x) * gate`                    | Every LLaMA / Mistral feedforward layer              |
-| `gelu`      | `gelu_comparison/`   | Exact (tanh) vs fast (sigmoid) GELU side by side | BERT / GPT activations + kernel-variant workflow     |
-| `rms`       | `rms_norm/`          | Single-block RMSNorm                             | LLaMA-family normalization (replaces LayerNorm)      |
-| `layernorm` | `layer_norm/`        | Single-block LayerNorm                           | Classic transformer normalization (BERT, GPT-2, T5)  |
-| `softmax`   | `softmax/`           | Single-block softmax with max-sub stability      | Attention normalization; reduction-heavy primitive   |
-| `int8`      | `int8_dequant/`      | Symmetric INT8 dequantization                    | Quantized-weight unpack; signed-shift DSL showcase   |
+| Short name   | Directory            | Kernel                                           | Why it matters                                       |
+|--------------|----------------------|--------------------------------------------------|------------------------------------------------------|
+| `silu`       | `fused_silu_gate/`   | `out = x * sigmoid(x) * gate`                    | Every LLaMA / Mistral feedforward layer              |
+| `gelu`       | `gelu_comparison/`   | Exact (tanh) vs fast (sigmoid) GELU side by side | BERT / GPT activations + kernel-variant workflow     |
+| `rms`        | `rms_norm/`          | Single-block RMSNorm                             | LLaMA-family normalization (replaces LayerNorm)      |
+| `layernorm`  | `layer_norm/`        | Single-block LayerNorm                           | Classic transformer normalization (BERT, GPT-2, T5)  |
+| `softmax`    | `softmax/`           | Single-block softmax with max-sub stability      | Attention normalization; reduction-heavy primitive   |
+| `int8`       | `int8_dequant/`      | Symmetric INT8 dequantization                    | Quantized-weight unpack; signed-shift DSL showcase   |
+| `int8matmul` | `int8_matmul/`       | W8A8 symmetric tensor-core matmul                | Full quantize → `matmul_int8` → f32 pipeline (v0.3.0)|
 
 Each example ships with a `Cargo.toml`, an `src/main.rs` (kernel + CPU
 reference + PASS/FAIL + median timing), and a `README.md` that leads
@@ -30,7 +31,7 @@ The fastest way to see them all run, with no `cd` required:
 ```sh
 git clone https://github.com/dmriding/kaio.git
 cd kaio
-cargo xtask showcase              # all six in sequence
+cargo xtask showcase              # all seven in sequence
 cargo xtask showcase silu         # just fused_silu_gate
 cargo xtask showcase --list       # list available names
 ```

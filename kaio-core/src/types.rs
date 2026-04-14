@@ -24,16 +24,44 @@ pub enum PtxType {
     /// Type-level support only in Sprint 6.1. Execution-path gating
     /// and hardware SM checks come in Sprint 6.5 (auto-tuner).
     BF16,
+    /// 8-bit signed integer (`.s8`) — **marker / packed type only**.
+    ///
+    /// There is no scalar `.s8` register on NVIDIA GPUs. `s8` values
+    /// live **packed four-per-`.b32`** inside register fragments and
+    /// are addressed in bulk by memory operations (`ld/st.s8`) and by
+    /// `mma.sync` instructions that declare `.s8` operand types in
+    /// their suffix (e.g. `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`).
+    ///
+    /// Consequently:
+    /// - `ptx_suffix()` → `.s8` (used in mma + memory-op suffixes)
+    /// - `ptx_memory_suffix()` → `.s8` (PTX allows `ld.s8` / `st.s8`)
+    /// - `reg_decl_type()` → `.b32` (s8 values share the `.b32` register
+    ///   class; inventing a fake `.s8` register kind would lie about the
+    ///   hardware reality)
+    /// - `size_bytes()` → 1
+    /// - `reg_kind()` → [`RegKind::R`] (the `%r` integer-register class)
+    ///
+    /// **Do not treat `S8` as a general scalar arithmetic type.** It is
+    /// for memory loads/stores of packed bytes and for `mma.sync` operand
+    /// suffix declarations only. Scalar integer arithmetic (add, sub,
+    /// shift, etc.) continues to use [`S32`](Self::S32) / [`U32`](Self::U32);
+    /// dequant inside a kernel casts `S8` → `S32` before any arithmetic,
+    /// via shift-and-arith-shift sign-extension (see
+    /// `examples/int8_dequant` for the reference pattern).
+    ///
+    /// Introduced in Sprint 7.1 for the `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`
+    /// path (requires SM 8.0+).
+    S8,
 }
 
 impl PtxType {
     /// Size of this type in bytes.
     pub fn size_bytes(&self) -> usize {
         match self {
+            Self::S8 | Self::Pred => 1,
             Self::F16 | Self::BF16 => 2,
             Self::F32 | Self::S32 | Self::U32 => 4,
             Self::F64 | Self::S64 | Self::U64 => 8,
-            Self::Pred => 1,
         }
     }
 
@@ -45,6 +73,7 @@ impl PtxType {
             Self::BF16 => ".bf16",
             Self::F32 => ".f32",
             Self::F64 => ".f64",
+            Self::S8 => ".s8",
             Self::S32 => ".s32",
             Self::U32 => ".u32",
             Self::S64 => ".s64",
@@ -82,7 +111,9 @@ impl PtxType {
             Self::BF16 => ".bf16",
             Self::F32 => ".f32",
             Self::F64 => ".f64",
-            Self::S32 | Self::U32 => ".b32",
+            // S8 shares the `.b32` register class: s8 values live packed
+            // four-per-register, there is no scalar `.s8` register.
+            Self::S8 | Self::S32 | Self::U32 => ".b32",
             Self::S64 | Self::U64 => ".b64",
             Self::Pred => ".pred",
         }
@@ -95,7 +126,9 @@ impl PtxType {
             Self::BF16 => RegKind::Hb,
             Self::F32 => RegKind::F,
             Self::F64 => RegKind::Fd,
-            Self::S32 | Self::U32 => RegKind::R,
+            // S8 uses the `%r` class (same as S32/U32) because s8 values
+            // live packed four-per-`.b32` register.
+            Self::S8 | Self::S32 | Self::U32 => RegKind::R,
             Self::S64 | Self::U64 => RegKind::Rd,
             Self::Pred => RegKind::P,
         }
@@ -182,6 +215,7 @@ impl_gpu_type!(half::f16, PtxType::F16);
 impl_gpu_type!(half::bf16, PtxType::BF16);
 impl_gpu_type!(f32, PtxType::F32);
 impl_gpu_type!(f64, PtxType::F64);
+impl_gpu_type!(i8, PtxType::S8);
 impl_gpu_type!(i32, PtxType::S32);
 impl_gpu_type!(u32, PtxType::U32);
 impl_gpu_type!(i64, PtxType::S64);
@@ -198,6 +232,7 @@ mod tests {
         assert_eq!(PtxType::BF16.size_bytes(), 2);
         assert_eq!(PtxType::F32.size_bytes(), 4);
         assert_eq!(PtxType::F64.size_bytes(), 8);
+        assert_eq!(PtxType::S8.size_bytes(), 1);
         assert_eq!(PtxType::S32.size_bytes(), 4);
         assert_eq!(PtxType::U32.size_bytes(), 4);
         assert_eq!(PtxType::S64.size_bytes(), 8);
@@ -211,6 +246,7 @@ mod tests {
         assert_eq!(PtxType::BF16.ptx_suffix(), ".bf16");
         assert_eq!(PtxType::F32.ptx_suffix(), ".f32");
         assert_eq!(PtxType::F64.ptx_suffix(), ".f64");
+        assert_eq!(PtxType::S8.ptx_suffix(), ".s8");
         assert_eq!(PtxType::S32.ptx_suffix(), ".s32");
         assert_eq!(PtxType::U32.ptx_suffix(), ".u32");
         assert_eq!(PtxType::S64.ptx_suffix(), ".s64");
@@ -226,6 +262,8 @@ mod tests {
         // All other types use their native suffix.
         assert_eq!(PtxType::F32.ptx_memory_suffix(), ".f32");
         assert_eq!(PtxType::F64.ptx_memory_suffix(), ".f64");
+        // S8 uses .s8 for memory ops (PTX ISA lists s8 as valid for ld/st).
+        assert_eq!(PtxType::S8.ptx_memory_suffix(), ".s8");
         assert_eq!(PtxType::S32.ptx_memory_suffix(), ".s32");
         assert_eq!(PtxType::U32.ptx_memory_suffix(), ".u32");
         assert_eq!(PtxType::S64.ptx_memory_suffix(), ".s64");
@@ -237,7 +275,10 @@ mod tests {
         // Half types keep typed declarations
         assert_eq!(PtxType::F16.reg_decl_type(), ".f16");
         assert_eq!(PtxType::BF16.reg_decl_type(), ".bf16");
-        // Integers collapse to untyped bit-width (matches nvcc convention)
+        // Integers collapse to untyped bit-width (matches nvcc convention).
+        // S8 shares the .b32 register class because s8 values are packed
+        // four-per-register; there is no scalar .s8 register.
+        assert_eq!(PtxType::S8.reg_decl_type(), ".b32");
         assert_eq!(PtxType::S32.reg_decl_type(), ".b32");
         assert_eq!(PtxType::U32.reg_decl_type(), ".b32");
         assert_eq!(PtxType::S64.reg_decl_type(), ".b64");
@@ -253,6 +294,8 @@ mod tests {
         // Half types
         assert_eq!(PtxType::F16.reg_kind(), RegKind::H);
         assert_eq!(PtxType::BF16.reg_kind(), RegKind::Hb);
+        // S8 shares the %r class with S32/U32 (packed four-per-b32 register).
+        assert_eq!(PtxType::S8.reg_kind(), RegKind::R);
         // Signed and unsigned 32-bit both map to R
         assert_eq!(PtxType::S32.reg_kind(), RegKind::R);
         assert_eq!(PtxType::U32.reg_kind(), RegKind::R);
@@ -283,6 +326,7 @@ mod tests {
         assert_eq!(<half::bf16 as GpuType>::PTX_TYPE, PtxType::BF16);
         assert_eq!(<f32 as GpuType>::PTX_TYPE, PtxType::F32);
         assert_eq!(<f64 as GpuType>::PTX_TYPE, PtxType::F64);
+        assert_eq!(<i8 as GpuType>::PTX_TYPE, PtxType::S8);
         assert_eq!(<i32 as GpuType>::PTX_TYPE, PtxType::S32);
         assert_eq!(<u32 as GpuType>::PTX_TYPE, PtxType::U32);
         assert_eq!(<i64 as GpuType>::PTX_TYPE, PtxType::S64);

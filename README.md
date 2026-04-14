@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](https://github.com/dmriding/kaio)
 [![Rust](https://img.shields.io/badge/rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 
-**High-performance GPU kernels in pure Rust. PTX at build time. No CUDA C++, no Python, no toolkit.**
+**High-performance GPU kernels in pure Rust. Lowered to PTX IR at compile time, validated against the current GPU and JIT-compiled by the driver at launch. No CUDA C++, no Python, no toolkit.**
 
 KAIO (from the Greek καιω — _to burn, to ignite_) is for Rust engineers
 who need custom GPU kernels today — fused attention variants,
@@ -24,8 +24,11 @@ CUDA C++ because their framework doesn't support them.
 - **No CUDA toolkit required** — just the NVIDIA display driver. Build
   in CI on a standard GitHub runner; host tests pass without a GPU.
 - **Pure-Rust kernel authorship.** The `#[gpu_kernel]` proc macro lowers
-  Rust to PTX at build time. Type-safe kernel signatures catch dtype
-  mismatches at compile time, not as silent GPU corruption at runtime.
+  Rust to a PTX IR module at compile time; at launch the module is
+  validated against the current GPU's SM target, emitted to PTX text, and
+  handed to the CUDA driver for JIT compilation. Type-safe kernel
+  signatures catch dtype mismatches at compile time, not as silent GPU
+  corruption at runtime.
 
 ## Try KAIO in 30 seconds
 
@@ -37,7 +40,7 @@ cd kaio
 cargo xtask showcase
 ```
 
-You'll see `fused_silu_gate`, `gelu_comparison`, `rms_norm`, `layer_norm`, `softmax`, and `int8_dequant` compile, launch, verify correctness against a CPU reference, and report median latency. The six examples span activations, normalizations, reductions, and quantization: the canonical transformer-primitive arc.
+You'll see `fused_silu_gate`, `gelu_comparison`, `rms_norm`, `layer_norm`, `softmax`, `int8_dequant`, and `int8_matmul` compile, launch, verify correctness against a CPU reference, and report median latency. The seven examples span activations, normalizations, reductions, and the quantize → matmul pipeline: the canonical transformer-primitive arc plus the v0.3.0 W8A8 headline op.
 
 Want the performance pitch instead? `cargo xtask bench` runs the tensor-core matmul benchmark against cuBLAS sgemm across five sizes. Or `cargo xtask all` for both. `cargo xtask --help` for the full tooling surface.
 
@@ -93,8 +96,8 @@ use kaio::prelude::*;
 
 // Gated SiLU — the feedforward activation in every LLaMA / Mistral /
 // Qwen block. llama.cpp, vLLM, and TensorRT-LLM all ship hand-written
-// CUDA for it. With KAIO it's 7 lines of Rust, compiled to PTX at
-// build time.
+// CUDA for it. With KAIO it's 7 lines of Rust, lowered to a PTX IR
+// module at compile time and JIT-loaded at launch.
 #[gpu_kernel(block_size = 256)]
 fn fused_silu_gate(x: &[f32], gate: &[f32], out: &mut [f32], n: u32) {
     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
@@ -250,12 +253,13 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 
 | Feature                                  | Notes                                                                      |
 | ---------------------------------------- | -------------------------------------------------------------------------- |
-| `#[gpu_kernel]` proc macro               | Rust → PTX at build time. Type-safe launch wrapper auto-generated.         |
+| `#[gpu_kernel]` proc macro               | Rust → PTX IR at compile time; PTX emitted + JIT-loaded at launch. Type-safe launch wrapper auto-generated. |
 | Shared memory + reductions + warp shuffles | `shared_mem![]`, `bar_sync()`, `block_reduce_sum/max`, `shfl_sync_*`.    |
 | 2D blocks, FMA, math builtins            | `block_size = (16,16)`, `fma`, `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max`. |
 | Scalar tiled matmul                      | `kaio_ops::matmul` / `matmul_auto` — 31% of cuBLAS sgemm. Any SM.          |
 | Fused attention + FlashAttention         | `kaio_ops::attention`, `attention_flash` (O(d_k) memory). Any SM.          |
 | Tensor-core matmul                       | `kaio_ops::matmul_tc` / `matmul_tc_async` / `matmul_auto_tc` — f16 → f32, SM 8.0+, **82.3% sync / 92.5% async of cuBLAS sgemm at 4096²**. |
+| INT8 dequantize-matmul (W8A8)            | `kaio_ops::matmul_int8` — symmetric i8 × i8 → f32 with single-scalar scale, SM 8.0+, K%32==0. **80–94 TOPS at 4096³ on RTX 4090 sm_89 (median ~89 across 6 runs).** v0.3.0 reference quant op. |
 | Auto-tuner + cache                       | `tune_matmul`, `matmul_auto`, `matmul_auto_tc` with JSON cache.            |
 | PTX inspection                           | `KAIO_DUMP_PTX=1`, `KAIO_PTX_STATS=1`, `KAIO_PTX_ANNOTATE=1`.              |
 
@@ -356,11 +360,15 @@ for "did it compile → launch → produce right output?"
 
 ## Test coverage
 
-**94.8% line coverage** across the 17,735-line workspace (925 lines
-uncovered, mostly host-side parser error paths and the unreachable-by-
-design host stubs for GPU builtins in `kaio/src/gpu_builtins.rs`).
-Measured on RTX 4090 sm_89 via `cargo llvm-cov` with the host test
-suite and the full GPU-only `--ignored` test suite merged:
+**93.65% line coverage** across the 20,156-line workspace (1,280 lines
+uncovered, mostly host-side parser error paths, the `xtask` repo-tooling
+binary, and the unreachable-by-design host stubs for GPU builtins in
+`kaio/src/gpu_builtins.rs`). Shipped kernel crates are well above the
+workspace average — `kaio-ops/src/matmul_int8_kernel.rs` at 97.77%,
+`matmul_tc_kernel.rs` at 97.74%, `matmul_tc_async_kernel.rs` at 99.40%,
+`attention_tc_kernel.rs` at 98.82%. Measured on RTX 4090 sm_89 via
+`cargo llvm-cov` with the host test suite and the full GPU-only
+`--ignored` test suite merged:
 
 ```sh
 cargo install cargo-llvm-cov           # one-time

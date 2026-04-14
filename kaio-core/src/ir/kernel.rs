@@ -112,7 +112,9 @@ impl PtxKernel {
                 PtxInstruction::TensorCore(op) => {
                     s.total_instructions += 1;
                     match op {
-                        TensorCoreOp::MmaSync { .. } => s.mma += 1,
+                        TensorCoreOp::MmaSync { .. } | TensorCoreOp::MmaSyncInt8 { .. } => {
+                            s.mma += 1
+                        }
                     }
                 }
                 PtxInstruction::Control(op) => {

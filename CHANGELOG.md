@@ -10,25 +10,117 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
-### Added
-- Three new standalone showcase examples under `examples/`:
+## [0.3.0] — 2026-04-15 — Sprint 7.1: INT8 dequantize-matmul (Phase 7 quant headline)
+
+Sprint 7.1 ships the **reference INT8 symmetric dequantize-matmul**, the
+first substantial new public op since Phase 6's v0.2.0 tensor-core matmul.
+`matmul_int8` is W8A8 (both operands quantized), symmetric (no zero point),
+uses a single global scalar scale applied post-accumulation, and is
+sync-only for v0.3.0 (async INT8 follow-up tracked for 7.1.5+). This is
+positioned as the **reference quant op, not the final general-quant API** —
+GPTQ / AWQ / per-channel / per-group / asymmetric / INT4 / W8A16 all land
+in follow-up sprints as additive refinements.
+
+### Added — Sprint 7.1
+- **`kaio_ops::matmul_int8`** — `matmul_int8(&device, a: &GpuBuffer<i8>,
+  b: &GpuBuffer<i8>, c: &mut GpuBuffer<f32>, scale: f32, m, n, k)`.
+  IR-authored fused kernel at
+  [`kaio-ops/src/matmul_int8_kernel.rs`](kaio-ops/src/matmul_int8_kernel.rs)
+  using the Ampere+ `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`
+  instance shape directly (Path FAST per the Sprint 7.1 D1 fork decision).
+  Block tile 64×64, 4 warps in 2×2 quadrants, 8 mma.sync per K-iter per
+  warp. Scale is applied post-accumulation via `cvt.rn.f32.s32 + mul.f32`.
+  `K % 32 == 0` is required (validated before launch with a readable
+  `KaioError::InvalidConfig`). SM 8.0+ enforced by `PtxModule::validate`.
+- **`PtxType::S8`** in `kaio-core` — marker / packed type for memory ops
+  and mma operand suffixes only, not a scalar arithmetic type. Register
+  declaration is `.b32` (packed four-per-register); instruction suffix
+  is `.s8`.
+- **`MmaShape::M16N8K32`** variant — `min_sm = 80`, token `"m16n8k32"`.
+  Routes through the existing `PtxModule::validate` SM-gating path.
+- **`TensorCoreOp::MmaSyncInt8`** — emits the full INT8 mma mnemonic.
+  Sibling fragment types `FragmentA_M16N8K32` (4 × .b32),
+  `FragmentB_M16N8K32` (2 × .b32), `FragmentC_M16N8K32` (4 × .s32) —
+  distinct from the f16 fragment infrastructure so layout differences
+  stay visible.
+- **Fragment load/store helpers** for the K=32 INT8 layout (global and
+  shared-source variants following the f16 stride-parameterized pattern).
+- **`impl GpuType for i8`** — public API takes `GpuBuffer<i8>` directly.
+- **`examples/int8_matmul/`** — new showcase demonstrating the full W8A8
+  pipeline (quantize f32 to i8, run `matmul_int8`, compare vs naive f32
+  CPU matmul). `cargo xtask showcase int8matmul` wired as the short name.
+  `examples/int8_dequant/` stays side-by-side as the DSL primitive demo.
+- **`kaio-ops/tests/matmul_int8_bench.rs`** — internal-regression bench.
+- **`kaio-ops/tests/matmul_int8_e2e.rs`** (9 ignored GPU tests) — bit-exact
+  round-trip at small sizes, within-tolerance at 256³, edge-M (M=17),
+  edge-N (N=13), boundary i8 values, K=31 validation-error.
+- **Adversarial fragment-layout test matrix** in `kaio/tests/mma_sync_int8_fragment.rs`
+  (7 ignored GPU tests, all bit-exact PASS on sm_89): identity, all-ones,
+  ascending-byte canary, single-hot row/col, alternating sign, boundary
+  values (`i8::MIN`, `i8::MAX`, ±1, 0), comprehensive random.
+- **ptxas-verify tests** — `ptxas_verify_mma_int8`,
+  `ptxas_verify_mma_int8_shared` (9/9 total ptxas_verify tests green).
+
+### Test coverage — Sprint 7.1
+
+Workspace totals at v0.3.0: **329 host tests + 187 `#[ignore]`d GPU
+tests**. Sprint 7.1 contributed 16 new GPU tests (7 adversarial
+fragment-layout tests in `kaio/tests/mma_sync_int8_fragment.rs` + 9
+end-to-end round-trip tests in `kaio-ops/tests/matmul_int8_e2e.rs`)
+plus 2 new `ptxas_verify_mma_int8*` host tests and 5 new
+`matmul_int8_kernel` structure tests. GPU tests are gated behind
+`--ignored` and require an Ampere+ NVIDIA GPU — host CI remains green
+without a GPU.
+
+### Added — pre-promotion (landed during Sprint 7.0.5 post-v0.2.2 → rolled up)
+- Three standalone showcase examples under `examples/`:
   [`layer_norm/`](examples/layer_norm/) (classic transformer LayerNorm,
   two block-wide reductions), [`softmax/`](examples/softmax/)
   (single-block softmax with subtract-max numerical-stability pattern),
   [`int8_dequant/`](examples/int8_dequant/) (symmetric INT8
   dequantization demonstrating the signed/unsigned shift distinction
-  from v0.2.1). `cargo xtask showcase` now runs six examples; new
-  short names `layernorm`, `softmax`, `int8` alongside the existing
-  `silu`, `gelu`, `rms`.
+  from v0.2.1). `cargo xtask showcase` now runs seven examples total;
+  new short names `layernorm`, `softmax`, `int8`, `int8matmul`.
 
-### Changed
+### Changed — Sprint 7.1
+- `docs/phases.md` — Phase 7.1 row marked complete with the observed
+  80–94 TOPS band at 4096³ (median ~89 across 6 runs).
+- `phase7_master_plan.md` — corrected the stale `m16n8k16.s8.s8.s32`
+  reference to the correct `m16n8k32.row.col.s32.s8.s8.s32` mnemonic.
+- Version bumps 0.2.2 → **0.3.0** across all 5 crates (`kaio`, `kaio-core`,
+  `kaio-macros`, `kaio-runtime`, `kaio-ops`). First minor bump since
+  Phase 6's v0.2.0 — `matmul_int8` is a real new public op, not a polish
+  release.
+
+### Changed — pre-promotion
 - Cleaned stale "after v0.2.0 publishes" Cargo.toml comments across
-  all six showcase examples (v0.2.0 shipped in Phase 6, so the
-  copy-out instructions were outdated).
+  all showcase examples.
 - `examples/softmax` reuses `local_max` in the `exp(...)` step
   instead of re-reading `input[tid]`, avoiding a redundant global
-  load per thread. Behavior is identical; cleaner in the general-n
-  case.
+  load per thread.
+
+### Performance — v0.3.0 `matmul_int8` baseline (RTX 4090 sm_89)
+
+Medians across 6 independent bench runs. Small sizes stable within ±5%;
+2048³+ shows meaningful run-to-run variance driven by thermal/scheduler
+effects, so the table reports observed ranges where variance is material:
+
+| Size  | matmul_int8 ms | matmul_int8 TOPS    | cuBLAS sgemm ms | cuBLAS TF |
+|-------|----------------|---------------------|-----------------|-----------|
+| 256³  | 0.37           | 0.09                | 0.02            | ~1.7      |
+| 512³  | 0.38           | 0.71                | 0.03            | ~11       |
+| 1024³ | 0.40           | ~5.3                | 0.06–0.07       | 32–37     |
+| 2048³ | ~0.54          | **30–35** (med 32)  | 0.33–0.40       | 43–53     |
+| 4096³ | **1.46–1.71**  | **80–94** (med ~89) | 2.35–2.66       | 52–58     |
+
+Apples-to-oranges disclaimer: int8 vs sgemm indicates compute density, not
+equivalent-work throughput. The **KAIO TOPS column** is the regression
+baseline. At 4096³ the sprint-over-sprint regression floor is ~80 TOPS
+(lower bound of observed range); sustained runs below 75 TOPS would
+indicate a real regression. Small-size weakness (≤1024³) is kernel-
+launch-dominated and not the 7.1 optimization target. The f16 TC path
+shows no regression: post-7.1 `matmul_tc_async` at 4096² runs at ~108% of
+cuBLAS sgemm, within run-to-run noise of the pre-sprint baseline.
 
 ## [0.2.2] — 2026-04-14 — Sprint 7.0.5: Ergonomics fast-track before Phase 7.1
 

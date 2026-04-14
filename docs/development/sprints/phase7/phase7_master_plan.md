@@ -1,12 +1,24 @@
 # Phase 7 Master Plan — Quantized Kernels & Training Integration
 
-**Status:** In progress (7.0 complete; 7.1 planning pending)
+**Status:** In progress (7.0 complete v0.2.1; 7.0.5 complete v0.2.2;
+7.1 INT8 dequantize-matmul complete v0.3.0; 7.1.5 / 7.2 / 7.3 / 7.4
+planned)
 **Depends on:** Phase 6 complete (v0.2.1, 2026-04-14)
-**Current branch tip:** Sprint 7.0 complete on `phase7`. See PHASE_7_LOG
-(to be created at 7.1 kickoff) for per-sprint commit hashes.
-**Sprint order (as planned):** 7.0 → 7.1 → 7.2 → 7.3 → 7.4. May fold /
-split as each sprint is scoped; 7.0 is the only fixed-scope sprint at
-plan time.
+**Per-sprint logs:** see
+[`sprint_7_0.md`](sprint_7_0.md),
+[`sprint_7_0_5.md`](sprint_7_0_5.md),
+[`sprint_7_1.md`](sprint_7_1.md) for commit hashes and results. Older
+sprints may reference a `PHASE_7_LOG` file that was never created —
+the per-sprint logs serve that role.
+**Sprint order (as planned):** 7.0 → 7.0.5 → 7.1 → 7.1.5 → 7.2 → 7.3 →
+7.4. May fold / split as each sprint is scoped.
+
+> **Note:** This document is the long-form Phase 7 planning reference.
+> It captures architecture, risks, and sprint sequencing as they were
+> understood at planning time. Authoritative state for shipped work
+> lives in the per-sprint log files above and in
+> [`docs/phases.md`](../../../phases.md). If this plan disagrees with
+> a sprint log, the sprint log wins.
 
 ## Goal
 
@@ -79,11 +91,17 @@ Fused kernel:
 - Dequantize: `w = (w_q as f32) * scale`.
 - Feed into existing `mma.sync.m16n8k16.f16.f16.f32` after `cvt.f16.f32`.
 
-**Open question (for 7.1 planning):** does the `mma.sync` shape accept
-signed INT8 operands directly? `mma.sync.m16n8k16.s8.s8.s32` exists on
-Ampere+ (SM 8.0+) — if so, we may skip the dequant-to-f16 step
-entirely for INT8 × INT8 matmul and only dequantize the output. Needs
-investigation at 7.1 kickoff.
+**Resolved (Sprint 7.1 D1):** `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`
+works as expected on Ampere+ (SM 8.0+). Path FAST landed for v0.3.0:
+INT8 flows directly into the tensor core, scale is applied only to the
+s32 accumulator post-accumulation. DEQUANT-F16 fallback was never needed.
+
+**Shape correction (Sprint 7.1 D1 pre-work):** Earlier drafts of this
+doc referenced `mma.sync.m16n8k16.s8.s8.s32`. That was wrong. The INT8
+mma shape on sm_80+ is `m16n8k32` (K = 32, not K = 16 — twice the
+K-tile of the f16 path). The `.row.col` layout qualifiers are
+mandatory in the instruction string, not optional. Sprint 7.1's plan
+doc captures the full string.
 
 ### 3. INT4 dequantize-matmul (Sprint 7.2 — planned)
 
@@ -242,10 +260,10 @@ Both are substantial enough to deserve their own sprint. Sequenced between quant
    128-thread CTAs). Mitigation: ptxas --verbose register-count
    check in 7.1 and 7.2 acceptance, split-kernel dispatch if
    occupancy drops.
-4. **INT8 mma.sync shape discovery at 7.1 kickoff.** The
-   `m16n8k16.s8.s8.s32` shape needs verification — if it doesn't
-   behave as expected, 7.1 falls back to the dequant-to-f16 path
-   which is slower but still shippable.
+4. **INT8 mma.sync shape discovery at 7.1 kickoff. — RESOLVED.**
+   `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32` works on sm_80+
+   as expected. Path FAST shipped in v0.3.0 (Sprint 7.1); DEQUANT-F16
+   fallback was specced but never activated.
 5. **candle API stability.** `candle-core::CustomOp` may change
    across candle versions. Mitigation (at 7.4 planning): pin a
    specific candle version; decide between supporting a single
