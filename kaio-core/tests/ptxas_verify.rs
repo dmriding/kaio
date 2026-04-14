@@ -316,6 +316,48 @@ fn ptxas_verify_mma_int8() {
 
 #[test]
 #[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
+fn ptxas_verify_mma_int8_shared() {
+    // Sprint 7.1 D2: confirm that the shared-source INT8 fragment load
+    // helpers (`load_fragment_{a,b}_m16n8k32_shared_{row,col}`) emit PTX
+    // that ptxas accepts at sm_80+. Correctness (bit-exact vs CPU) for
+    // the global-source path was already proved by the D1b adversarial
+    // test matrix; this test is instruction-level-syntax only, same
+    // pattern as the existing `ptxas_verify_mma_sync_shared`.
+    let ptxas_check = std::process::Command::new("ptxas")
+        .arg("--version")
+        .output();
+    if ptxas_check.is_err() {
+        eprintln!("NOTE: ptxas not found in PATH — skipping PTX verification");
+        return;
+    }
+
+    let sm = sm_target_ampere_or_better();
+    let ptx = common::build_mma_int8_shared_ptx(&sm);
+
+    let tmp = std::env::temp_dir().join("kaio_mma_int8_shared_verify.ptx");
+    std::fs::write(&tmp, &ptx).expect("failed to write temp PTX file");
+
+    let output = std::process::Command::new("ptxas")
+        .args(["--gpu-name", &sm])
+        .arg(tmp.to_str().unwrap())
+        .output()
+        .expect("failed to run ptxas");
+
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        output.status.success(),
+        "ptxas verification FAILED for mma.sync.m16n8k32.s8 shared-source ({sm}):\nstdout: {}\nstderr: {}\n\n=== PTX ===\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        ptx
+    );
+
+    eprintln!("ptxas verification PASSED for shared-source m16n8k32.s8 fragment loaders ({sm})");
+}
+
+#[test]
+#[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
 fn ptxas_verify_shared_mem() {
     let ptxas_check = std::process::Command::new("ptxas")
         .arg("--version")

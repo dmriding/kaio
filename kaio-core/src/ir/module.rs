@@ -207,6 +207,52 @@ mod tests {
         assert!(module.validate().is_ok());
     }
 
+    fn tc_int8_kernel() -> PtxKernel {
+        use crate::fragment::{alloc_a_M16N8K32, alloc_b_M16N8K32, alloc_c_M16N8K32};
+        let mut alloc = RegisterAllocator::new();
+        let mut k = PtxKernel::new("has_mma_int8");
+        k.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSyncInt8 {
+            d: alloc_c_M16N8K32(&mut alloc),
+            a: alloc_a_M16N8K32(&mut alloc),
+            b: alloc_b_M16N8K32(&mut alloc),
+            c: alloc_c_M16N8K32(&mut alloc),
+        }));
+        k
+    }
+
+    #[test]
+    fn validate_rejects_mma_int8_on_sm_70() {
+        let mut module = PtxModule::new("sm_70");
+        module.add_kernel(tc_int8_kernel());
+        let err = module.validate().unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::SmTooLow {
+                required: 80,
+                actual: 70,
+                feature: "mma.sync.m16n8k32.s8.s8.s32".to_string(),
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "mma.sync.m16n8k32.s8.s8.s32 requires sm_80+, target is sm_70"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_mma_int8_on_sm_80() {
+        let mut module = PtxModule::new("sm_80");
+        module.add_kernel(tc_int8_kernel());
+        assert!(module.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_mma_int8_on_sm_89() {
+        let mut module = PtxModule::new("sm_89");
+        module.add_kernel(tc_int8_kernel());
+        assert!(module.validate().is_ok());
+    }
+
     #[test]
     fn validate_rejects_cp_async_on_sm_75() {
         let mut module = PtxModule::new("sm_75");

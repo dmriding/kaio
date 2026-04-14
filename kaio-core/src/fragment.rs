@@ -1011,6 +1011,153 @@ pub fn load_fragment_b_m16n8k16_shared_col(
     frag
 }
 
+// ============================================================================
+// 4b. m16n8k32 INT8 shared-source load helpers
+// ============================================================================
+//
+// Sibling to the m16n8k32 global-source helpers above. Same thread-data
+// map for the m16n8k32.s8 shape (see the comment block in section 3b).
+// Since the byte-level offsets match the f16 m16n8k16 shared helpers,
+// the implementation below is the f16 shared-helper code with adjusted
+// fragment return types and the natural-stride default appropriate for
+// byte-wide INT8 tiles.
+
+/// Load one A-fragment for `mma.sync.m16n8k32.s8` from a 16×32 row-major
+/// i8 tile in **shared** memory.
+///
+/// Parameters mirror [`load_fragment_a_m16n8k16_shared_row`]:
+///
+/// - `row_stride_bytes` — caller-supplied row stride of the shared tile.
+///   For a natively packed 16×32 i8 tile, pass `32` (32 cols × 1 byte).
+///   Multi-warp / bank-conflict-padded tiles pass their actual stride.
+/// - `group_tig_override` — optional pre-computed `(groupID, tig)`
+///   registers to skip the internal `div`/`rem`. See the f16 variant's
+///   docstring for the hoist rationale.
+#[allow(non_snake_case)]
+pub fn load_fragment_a_m16n8k32_shared_row(
+    alloc: &mut crate::ir::RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_base_shared: crate::ir::Register,
+    tid_x: crate::ir::Register,
+    row_stride_bytes: u32,
+    group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
+) -> FragmentA_M16N8K32 {
+    let (group_id, tig) = match group_tig_override {
+        Some(pair) => pair,
+        None => compute_group_thread_ids(alloc, kernel, tid_x),
+    };
+
+    // row_off = groupID * row_stride_bytes
+    let row_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: row_off,
+        lhs: Operand::Reg(group_id),
+        rhs: Operand::ImmU32(row_stride_bytes),
+        ty: PtxType::U32,
+    }));
+
+    // base_off = tig * 4 + row_off   (each register = 4 i8 bytes)
+    let base_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: base_off,
+        a: Operand::Reg(tig),
+        b: Operand::ImmU32(4),
+        c: Operand::Reg(row_off),
+        ty: PtxType::U32,
+        mode: crate::instr::MadMode::Lo,
+    }));
+
+    // base_off_plus_8rows = base_off + 8 * row_stride_bytes
+    let base_off_plus_8rows = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: base_off_plus_8rows,
+        lhs: Operand::Reg(base_off),
+        rhs: Operand::ImmU32(8 * row_stride_bytes),
+        ty: PtxType::U32,
+    }));
+
+    //   reg[0]: A[groupID,   4*tig + 0..3 ] → base_off
+    //   reg[1]: A[groupID+8, 4*tig + 0..3 ] → base_off_plus_8rows
+    //   reg[2]: A[groupID,   4*tig + 16..19] → base_off + 16
+    //   reg[3]: A[groupID+8, 4*tig + 16..19] → base_off_plus_8rows + 16
+    let addr0 = u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off, 0);
+    let addr1 =
+        u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off_plus_8rows, 0);
+    let addr2 = u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off, 16);
+    let addr3 =
+        u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off_plus_8rows, 16);
+
+    let frag = alloc_a_M16N8K32(alloc);
+    for (reg, addr) in frag.regs.iter().zip([addr0, addr1, addr2, addr3]) {
+        kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+            dst: *reg,
+            addr,
+            ty: PtxType::U32,
+        }));
+    }
+
+    frag
+}
+
+/// Load one B-fragment for `mma.sync.m16n8k32.s8` from a 32×8 column-major
+/// i8 tile in **shared** memory.
+///
+/// `col_stride_bytes` is the bytes between consecutive columns of the B
+/// tile. Natively packed 32×8 i8 tile = `32` (32 rows × 1 byte).
+/// Multi-warp kernels with bank-conflict padding pass their actual
+/// col stride (likely in the 36–72 byte range for INT8 B — see R4 in
+/// the Sprint 7.1 plan for the bank-math analysis).
+#[allow(non_snake_case)]
+pub fn load_fragment_b_m16n8k32_shared_col(
+    alloc: &mut crate::ir::RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_base_shared: crate::ir::Register,
+    tid_x: crate::ir::Register,
+    col_stride_bytes: u32,
+    group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
+) -> FragmentB_M16N8K32 {
+    let (group_id, tig) = match group_tig_override {
+        Some(pair) => pair,
+        None => compute_group_thread_ids(alloc, kernel, tid_x),
+    };
+
+    // col_off = groupID * col_stride_bytes
+    let col_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: col_off,
+        lhs: Operand::Reg(group_id),
+        rhs: Operand::ImmU32(col_stride_bytes),
+        ty: PtxType::U32,
+    }));
+
+    // base_off = tig * 4 + col_off
+    let base_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: base_off,
+        a: Operand::Reg(tig),
+        b: Operand::ImmU32(4),
+        c: Operand::Reg(col_off),
+        ty: PtxType::U32,
+        mode: crate::instr::MadMode::Lo,
+    }));
+
+    // reg[0]: column groupID, rows 4*tig .. 4*tig+3   → base_off
+    // reg[1]: column groupID, rows 4*tig+16 .. 4*tig+19 → base_off + 16
+    let addr0 = u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off, 0);
+    let addr1 = u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off, 16);
+
+    let frag = alloc_b_M16N8K32(alloc);
+    for (reg, addr) in frag.regs.iter().zip([addr0, addr1]) {
+        kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+            dst: *reg,
+            addr,
+            ty: PtxType::U32,
+        }));
+    }
+
+    frag
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
