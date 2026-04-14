@@ -90,6 +90,22 @@ impl RegisterAllocator {
         self.alloc(PtxType::U32)
     }
 
+    /// Allocate a `.b32` register intended to hold **four signed 8-bit
+    /// values packed into 32 bits** — the storage format
+    /// `mma.sync.m16n8k32.s8` expects for its A and B fragment operands.
+    ///
+    /// Same hardware register class as [`alloc_packed_half2`](Self::alloc_packed_half2)
+    /// (both live in `%r` / `.b32`); the separate method is a naming hook
+    /// so INT8-path call sites document their intent and so `grep` for
+    /// `alloc_packed_int8x4` finds every INT8 fragment-storage
+    /// allocation in the codebase.
+    ///
+    /// Introduced in Sprint 7.1 for the
+    /// `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32` path.
+    pub fn alloc_packed_int8x4(&mut self) -> Register {
+        self.alloc(PtxType::U32)
+    }
+
     /// All registers allocated so far, in allocation order.
     pub fn allocated(&self) -> &[Register] {
         &self.allocated

@@ -105,6 +105,65 @@ pub fn alloc_b(alloc: &mut RegisterAllocator) -> FragmentB {
     }
 }
 
+// ----------------------------------------------------------------------------
+// INT8 sibling types for `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`.
+// ----------------------------------------------------------------------------
+//
+// Register counts match the fp16 m16n8k16 path by coincidence of the PTX ISA
+// design (A = 4×.b32, B = 2×.b32, C/D = 4 accumulator), but the SEMANTICS
+// differ:
+//   - A/B registers hold packed i8x4 (four signed bytes per register), not
+//     packed half2 (two fp16 values per register).
+//   - C/D registers hold .s32 accumulator values, not .f32.
+//
+// Per AD3 in the Sprint 7.1 plan: new sibling types, no overloading of the
+// f16 fragment infrastructure. Generic fragment types would hide the layout
+// difference from readers; separate types document that the INT8 path is
+// its own thing.
+//
+// Underscored names (`FragmentA_M16N8K32` etc.) mirror the existing design
+// note's suggested shape-qualified naming. The `#[allow(non_camel_case_types)]`
+// is isolated to these struct definitions so the convention deviation is
+// visible in one place rather than drifting.
+
+/// A-matrix fragment for `mma.sync.m16n8k32.s8`.
+///
+/// Holds 4 × `.b32` packed-i8x4 registers per thread (16 signed 8-bit values
+/// per thread across the warp → 16×32 matrix in total).
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentA_M16N8K32 {
+    /// The four `%r` (`.b32`) registers holding the thread's A-fragment
+    /// slice. Each register packs four signed i8 values. Layout is fixed
+    /// by PTX ISA for the `.m16n8k32.s8` shape.
+    pub regs: [Register; 4],
+}
+
+/// B-matrix fragment for `mma.sync.m16n8k32.s8`.
+///
+/// Holds 2 × `.b32` packed-i8x4 registers per thread (8 signed 8-bit values
+/// per thread across the warp → 32×8 matrix in total).
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentB_M16N8K32 {
+    /// The two `%r` (`.b32`) registers holding the thread's B-fragment
+    /// slice. Each register packs four signed i8 values.
+    pub regs: [Register; 2],
+}
+
+/// C/D-matrix fragment for `mma.sync.m16n8k32.s32` (INT8 accumulator).
+///
+/// Holds 4 × `.s32` registers per thread (16×8 i32 matrix total across the
+/// warp). Used as both the input accumulator (`C`) and output (`D`) of
+/// the INT8 `mma.sync`. Distinct from [`FragmentC`] which holds `.f32`
+/// for the fp16 path.
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentC_M16N8K32 {
+    /// The four `%r` (`.s32`, declared `.b32` at register level) registers.
+    pub regs: [Register; 4],
+}
+
 /// Allocate a fresh [`FragmentC`] — four `.f32` registers.
 ///
 /// Used for both the `C` accumulator input and the `D` output of
@@ -117,6 +176,48 @@ pub fn alloc_c(alloc: &mut RegisterAllocator) -> FragmentC {
             alloc.alloc(PtxType::F32),
             alloc.alloc(PtxType::F32),
             alloc.alloc(PtxType::F32),
+        ],
+    }
+}
+
+/// Allocate a fresh [`FragmentA_M16N8K32`] — four packed-i8x4 `.b32` registers.
+#[allow(non_snake_case)]
+pub fn alloc_a_M16N8K32(alloc: &mut RegisterAllocator) -> FragmentA_M16N8K32 {
+    FragmentA_M16N8K32 {
+        regs: [
+            alloc.alloc_packed_int8x4(),
+            alloc.alloc_packed_int8x4(),
+            alloc.alloc_packed_int8x4(),
+            alloc.alloc_packed_int8x4(),
+        ],
+    }
+}
+
+/// Allocate a fresh [`FragmentB_M16N8K32`] — two packed-i8x4 `.b32` registers.
+#[allow(non_snake_case)]
+pub fn alloc_b_M16N8K32(alloc: &mut RegisterAllocator) -> FragmentB_M16N8K32 {
+    FragmentB_M16N8K32 {
+        regs: [
+            alloc.alloc_packed_int8x4(),
+            alloc.alloc_packed_int8x4(),
+        ],
+    }
+}
+
+/// Allocate a fresh [`FragmentC_M16N8K32`] — four `.s32` accumulator registers.
+///
+/// Used for both the `C` accumulator input and the `D` output of the INT8
+/// `mma.sync`. Distinct from [`alloc_c`] (which allocates `.f32` registers
+/// for the fp16 path).
+#[allow(non_snake_case)]
+pub fn alloc_c_M16N8K32(alloc: &mut RegisterAllocator) -> FragmentC_M16N8K32 {
+    use crate::types::PtxType;
+    FragmentC_M16N8K32 {
+        regs: [
+            alloc.alloc(PtxType::S32),
+            alloc.alloc(PtxType::S32),
+            alloc.alloc(PtxType::S32),
+            alloc.alloc(PtxType::S32),
         ],
     }
 }
