@@ -29,7 +29,7 @@ CUDA C++ because their framework doesn't support them.
 
 ## Try KAIO in 30 seconds
 
-Clone the repo, run one command, see three real ML kernels build and execute on your GPU:
+Clone the repo, run one command, see six real ML kernels build and execute on your GPU:
 
 ```sh
 git clone https://github.com/dmriding/kaio.git
@@ -37,7 +37,7 @@ cd kaio
 cargo xtask showcase
 ```
 
-You'll see each of `fused_silu_gate`, `gelu_comparison`, and `rms_norm` compile, launch, verify correctness against a CPU reference, and report median latency. Total wall time: ~45 seconds on a warm build.
+You'll see `fused_silu_gate`, `gelu_comparison`, `rms_norm`, `layer_norm`, `softmax`, and `int8_dequant` compile, launch, verify correctness against a CPU reference, and report median latency. The six examples span activations, normalizations, reductions, and quantization: the canonical transformer-primitive arc.
 
 Want the performance pitch instead? `cargo xtask bench` runs the tensor-core matmul benchmark against cuBLAS sgemm across five sizes. Or `cargo xtask all` for both. `cargo xtask --help` for the full tooling surface.
 
@@ -117,10 +117,13 @@ Correctness:       PASS  (max_abs_err = 1.49e-8)
 Median latency:    188.8 μs  (of 100 timed runs, 5 warm-ups skipped)
 ```
 
-Or run all three showcases in sequence with `cargo xtask showcase`:
+Or run all six showcases in sequence with `cargo xtask showcase`:
 [fused SiLU-gate](examples/fused_silu_gate/),
 [exact vs fast GELU](examples/gelu_comparison/),
-[single-block RMSNorm](examples/rms_norm/). Each is a complete
+[single-block RMSNorm](examples/rms_norm/),
+[single-block LayerNorm](examples/layer_norm/),
+[single-block softmax](examples/softmax/),
+[INT8 dequantization](examples/int8_dequant/). Each is a complete
 standalone project with correctness + timing (with its own `Cargo.toml`
 so you can copy the directory out of the repo as a reference for your
 own kernel); the GELU comparison's README explains why kernel fusion
