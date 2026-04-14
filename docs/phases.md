@@ -270,7 +270,9 @@ operation every local LLM runner currently reaches for through CUDA C++
 crate layered on top of the forward kernels.
 
 **Status:** In progress (7.0 DSL completeness complete, v0.2.1; 7.0.5
-ergonomics fast-track in progress)
+ergonomics fast-track complete, v0.2.2; **7.1 INT8 dequantize-matmul
+complete, v0.3.0** — 4096² at 80.5 TOPS i8 ops on RTX 4090 sm_89, bit-
+exact vs CPU reference across the adversarial test matrix)
 
 **Depends on:** Phase 6 complete (v0.2.1, 2026-04-14).
 
@@ -293,8 +295,8 @@ for the detailed sprint breakdown, architectural decisions, and risks.
 | Sprint | Scope | Status |
 |--------|-------|--------|
 | 7.0 | DSL completeness (bitops + short-circuit `&&` / `\|\|` + compound bitwise assign) + Phase 6 closeout + Phase 7 scaffold | Complete (v0.2.1, combined with Sprint 6.10) |
-| 7.0.5 | Pre-7.1 ergonomics fast-track — debug-build performance note, proc-macro error-span audit, consolidated debugging guide | In progress (v0.2.2) |
-| 7.1 | INT8 dequantize-matmul (forward) — folds in integer-arithmetic DSL support | Planned |
+| 7.0.5 | Pre-7.1 ergonomics fast-track — debug-build performance note, proc-macro error-span audit, consolidated debugging guide | Complete (v0.2.2) |
+| 7.1 | INT8 dequantize-matmul (forward) — `kaio_ops::matmul_int8`, W8A8 symmetric, single-scalar scale, `K%32==0`, sync-only. Path FAST (direct `mma.sync.m16n8k32.s8.s8.s32`). 80.5 TOPS i8 ops at 4096² on RTX 4090 sm_89. | **Complete (v0.3.0)** |
 | 7.1.5 | Warp + block reductions in DSL (optional, between quant milestones) | Planned |
 | 7.2 | INT4 dequantize-matmul (GPTQ-style packed 4-bit) | Planned |
 | 7.3 | Quant + attention integration | Planned |

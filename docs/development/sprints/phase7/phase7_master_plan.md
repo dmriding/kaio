@@ -79,11 +79,10 @@ Fused kernel:
 - Dequantize: `w = (w_q as f32) * scale`.
 - Feed into existing `mma.sync.m16n8k16.f16.f16.f32` after `cvt.f16.f32`.
 
-**Open question (for 7.1 planning):** does the `mma.sync` shape accept
-signed INT8 operands directly? `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`
-exists on Ampere+ (SM 8.0+) — if so, we may skip the dequant-to-f16
-step entirely for INT8 × INT8 matmul and apply the scale only to the
-s32 accumulator. Needs investigation at 7.1 kickoff.
+**Resolved (Sprint 7.1 D1):** `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`
+works as expected on Ampere+ (SM 8.0+). Path FAST landed for v0.3.0:
+INT8 flows directly into the tensor core, scale is applied only to the
+s32 accumulator post-accumulation. DEQUANT-F16 fallback was never needed.
 
 **Shape correction (Sprint 7.1 D1 pre-work):** Earlier drafts of this
 doc referenced `mma.sync.m16n8k16.s8.s8.s32`. That was wrong. The INT8
@@ -249,10 +248,10 @@ Both are substantial enough to deserve their own sprint. Sequenced between quant
    128-thread CTAs). Mitigation: ptxas --verbose register-count
    check in 7.1 and 7.2 acceptance, split-kernel dispatch if
    occupancy drops.
-4. **INT8 mma.sync shape discovery at 7.1 kickoff.** The
-   `m16n8k16.s8.s8.s32` shape needs verification — if it doesn't
-   behave as expected, 7.1 falls back to the dequant-to-f16 path
-   which is slower but still shippable.
+4. **INT8 mma.sync shape discovery at 7.1 kickoff. — RESOLVED.**
+   `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32` works on sm_80+
+   as expected. Path FAST shipped in v0.3.0 (Sprint 7.1); DEQUANT-F16
+   fallback was specced but never activated.
 5. **candle API stability.** `candle-core::CustomOp` may change
    across candle versions. Mitigation (at 7.4 planning): pin a
    specific candle version; decide between supporting a single

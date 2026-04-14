@@ -24,8 +24,8 @@ targets = [
 ]
 
 [dependencies]
-kaio = { version = "0.2.2", path = "../kaio" }
-kaio-core = { version = "0.2.2", path = "../kaio-core" }
+kaio = { version = "0.3.0", path = "../kaio" }
+kaio-core = { version = "0.3.0", path = "../kaio-core" }
 cudarc = { workspace = true }
 half = { workspace = true }
 serde = { version = "1", features = ["derive"] }

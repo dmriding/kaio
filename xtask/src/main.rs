@@ -95,7 +95,7 @@ fn print_help() {
 
 Usage:
   cargo xtask showcase [<name>|--list]   Run one or all showcase examples.
-  cargo xtask bench                      Run the matmul tensor-core benchmark.
+  cargo xtask bench [<name>|--list]      Run one or all benchmarks (matmul_tc_bench, matmul_int8_bench).
   cargo xtask all                        Run showcase + bench in sequence.
   cargo xtask --help                     Show this message.
 
@@ -218,10 +218,26 @@ fn run_showcase(args: &[&str]) -> ExitCode {
     }
 }
 
-/// `cargo xtask bench` entry point. Runs the matmul TC benchmark
-/// (`kaio-ops/tests/matmul_tc_bench.rs`) with `--ignored --nocapture` so
-/// the result table streams to the user's terminal.
-fn run_bench(_args: &[&str]) -> ExitCode {
+/// Ordered list of benchmark test harnesses wired to `cargo xtask bench`.
+/// `(header, test_name, description)`. The short `--list` form mirrors
+/// `cargo xtask showcase --list`; passing a name filters to that bench.
+const BENCHES: &[(&str, &str, &str)] = &[
+    (
+        "=== Matmul tensor-core benchmark (KAIO f16 × f16 → f32 vs cuBLAS sgemm) ===",
+        "matmul_tc_bench",
+        "f16 × f16 → f32 TC sync + async vs cuBLAS sgemm",
+    ),
+    (
+        "=== matmul_int8 benchmark (KAIO i8 × i8 → f32 vs cuBLAS sgemm, rough reference) ===",
+        "matmul_int8_bench",
+        "W8A8 symmetric INT8 matmul; cuBLAS sgemm column is apples-to-oranges",
+    ),
+];
+
+/// `cargo xtask bench [<name>|--list]` entry point. Runs one or all
+/// benchmark harnesses with `--ignored --nocapture`. Continue-on-error
+/// so one failing bench doesn't block the others from running.
+fn run_bench(args: &[&str]) -> ExitCode {
     let repo_root = match find_repo_root() {
         Ok(path) => path,
         Err(e) => {
@@ -230,53 +246,101 @@ fn run_bench(_args: &[&str]) -> ExitCode {
         }
     };
 
-    println!();
-    println!("=== Matmul tensor-core benchmark (KAIO vs cuBLAS sgemm) ===");
-    println!();
-    println!("  Hardware: uses the first CUDA device visible to the driver.");
-    println!("  Sizes: 256, 512, 1024, 2048, 4096 (square).");
-    println!("  Methodology: 5 warmup + 20 timed iterations per size (median TFLOPS).");
-    println!("  Apples-to-apples note: KAIO TC is fp16 × fp16 → fp32; cuBLAS is sgemm.");
-    println!();
+    if args.contains(&"--list") {
+        println!("Available benchmarks:");
+        for (_, test_name, desc) in BENCHES {
+            println!("  {test_name:<22} {desc}");
+        }
+        return ExitCode::SUCCESS;
+    }
 
-    let t0 = Instant::now();
-    let status = Command::new("cargo")
-        .current_dir(&repo_root)
-        .args([
-            "test",
-            "-p",
-            "kaio-ops",
-            "--release",
-            "--test",
-            "matmul_tc_bench",
-            "--",
-            "--ignored",
-            "--nocapture",
-        ])
-        .status();
+    let targets: Vec<&(&str, &str, &str)> = if let Some(filter) = args.first() {
+        match BENCHES
+            .iter()
+            .find(|(_, test_name, _)| *test_name == *filter)
+        {
+            Some(matched) => vec![matched],
+            None => {
+                eprintln!(
+                    "xtask: unknown benchmark `{filter}`. Use `cargo xtask bench --list` \
+                     to see available names."
+                );
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        BENCHES.iter().collect()
+    };
 
-    let elapsed = t0.elapsed();
-    match status {
-        Ok(s) if s.success() => {
-            println!();
-            println!("---");
-            println!("Benchmark completed in {:.1}s.", elapsed.as_secs_f32());
-            ExitCode::SUCCESS
+    let mut failures: Vec<&str> = Vec::new();
+    let t_total = Instant::now();
+
+    for (header, test_name, _desc) in &targets {
+        println!();
+        println!("{header}");
+        println!();
+        println!("  Hardware: uses the first CUDA device visible to the driver.");
+        println!("  Sizes: 256, 512, 1024, 2048, 4096 (square).");
+        println!("  Methodology: 5 warmup + 20 timed iterations per size.");
+        println!();
+
+        let t0 = Instant::now();
+        let status = Command::new("cargo")
+            .current_dir(&repo_root)
+            .args([
+                "test",
+                "-p",
+                "kaio-ops",
+                "--release",
+                "--test",
+                test_name,
+                "--",
+                "--ignored",
+                "--nocapture",
+            ])
+            .status();
+
+        let elapsed = t0.elapsed();
+        match status {
+            Ok(s) if s.success() => {
+                println!();
+                println!("---");
+                println!("{test_name} completed in {:.1}s.", elapsed.as_secs_f32());
+            }
+            Ok(s) => {
+                eprintln!();
+                eprintln!(
+                    "[fail] {test_name} exited with code {:?} after {:.1}s",
+                    s.code(),
+                    elapsed.as_secs_f32()
+                );
+                failures.push(test_name);
+            }
+            Err(e) => {
+                eprintln!();
+                eprintln!("[fail] could not launch {test_name}: {e}");
+                failures.push(test_name);
+            }
         }
-        Ok(s) => {
-            eprintln!();
-            eprintln!(
-                "[fail] benchmark exited with code {:?} after {:.1}s",
-                s.code(),
-                elapsed.as_secs_f32()
-            );
-            ExitCode::from(1)
-        }
-        Err(e) => {
-            eprintln!();
-            eprintln!("[fail] could not launch benchmark: {e}");
-            ExitCode::from(1)
-        }
+    }
+
+    println!();
+    println!("===");
+    let total_elapsed = t_total.elapsed().as_secs_f32();
+    if failures.is_empty() {
+        println!(
+            "All {} benchmark(s) completed in {total_elapsed:.1}s.",
+            targets.len()
+        );
+        ExitCode::SUCCESS
+    } else {
+        eprintln!(
+            "{}/{} benchmark(s) failed after {total_elapsed:.1}s: {}",
+            failures.len(),
+            targets.len(),
+            failures.join(", ")
+        );
+        ExitCode::from(1)
     }
 }
 
