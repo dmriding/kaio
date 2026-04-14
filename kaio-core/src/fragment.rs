@@ -532,6 +532,233 @@ pub fn store_fragment_c_m16n8k16_global_row(
 }
 
 // ============================================================================
+// 3b. m16n8k32 INT8 global-source load / global-dest store helpers
+// ============================================================================
+//
+// Sibling helpers for the `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`
+// path (Sprint 7.1). The NVIDIA thread-data map for m16n8k32.s8 mirrors the
+// m16n8k16.f16 map in terms of per-thread register positions — each thread
+// still holds a 4-register A fragment, a 2-register B fragment, and a
+// 4-register C/D fragment. What differs is the **element interpretation**:
+//
+//   - A/B registers pack 4 × i8 per `.b32` (vs 2 × f16 for the fp16 path)
+//   - C/D registers hold one `.s32` value per register (vs one `.f32`)
+//
+// The **byte-level offsets are identical** to the f16 path, because both
+// matrix shapes happen to produce the same row stride (16 × 2 = 32 bytes
+// for f16; 32 × 1 = 32 bytes for i8), and both "+16-byte" reg[2]/reg[3]
+// increments advance the same 16 bytes. A row-major 16×32 i8 matrix has
+// the same storage layout for these helpers as a row-major 16×16 f16
+// matrix of the same byte extent.
+//
+// For A (16×32, row-major i8): thread `tid` with `groupID=tid/4` and
+// `tig=tid%4` holds:
+//   reg[0] = i8x4(A[groupID,   4*tig + 0..3 ])
+//   reg[1] = i8x4(A[groupID+8, 4*tig + 0..3 ])
+//   reg[2] = i8x4(A[groupID,   4*tig + 16..19])
+//   reg[3] = i8x4(A[groupID+8, 4*tig + 16..19])
+//
+// For B (32×8, column-major i8): thread `tid` holds:
+//   reg[0] = i8x4(B[4*tig + 0..3 , groupID])
+//   reg[1] = i8x4(B[4*tig + 16..19, groupID])
+//
+// For C/D (16×8, row-major s32): thread `tid` holds:
+//   reg[0] = D[groupID,   2*tig    ]
+//   reg[1] = D[groupID,   2*tig + 1]
+//   reg[2] = D[groupID+8, 2*tig    ]
+//   reg[3] = D[groupID+8, 2*tig + 1]
+
+/// Load one A-fragment for `mma.sync.m16n8k32.s8` from a 16×32 row-major
+/// i8 matrix in global memory.
+///
+/// Uses the canonical NVIDIA thread-data mapping for the m16n8k32.s8 shape
+/// (see module-level comment block above). Emits:
+///
+/// - `div.u32` + `rem.u32` to split `tid_x` into `groupID` / `tig`
+/// - Four `ld.global.b32` instructions, one per packed-i8x4 register
+///
+/// `matrix_base_global` must point to row 0 column 0 of A in **global
+/// address space** (apply `cvta.to.global.u64` before calling).
+#[allow(non_snake_case)]
+pub fn load_fragment_a_m16n8k32_global_row(
+    alloc: &mut crate::ir::RegisterAllocator,
+    kernel: &mut PtxKernel,
+    matrix_base_global: crate::ir::Register,
+    tid_x: crate::ir::Register,
+) -> FragmentA_M16N8K32 {
+    let (group_id, tig) = compute_group_thread_ids(alloc, kernel, tid_x);
+
+    // Row stride for 16×32 i8 row-major = 32 bytes — identical to f16 16×16.
+    // base_off = groupID * 32 + tig * 4
+    let row_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: row_off,
+        lhs: Operand::Reg(group_id),
+        rhs: Operand::ImmU32(FRAGMENT_HALF_ROW_STRIDE_BYTES as u32),
+        ty: PtxType::U32,
+    }));
+    let base_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: base_off,
+        a: Operand::Reg(tig),
+        b: Operand::ImmU32(4),
+        c: Operand::Reg(row_off),
+        ty: PtxType::U32,
+        mode: crate::instr::MadMode::Lo,
+    }));
+
+    // reg[1]/reg[3] live 8 rows below → +256 bytes.
+    let base_off_plus_8rows = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: base_off_plus_8rows,
+        lhs: Operand::Reg(base_off),
+        rhs: Operand::ImmU32((8 * FRAGMENT_HALF_ROW_STRIDE_BYTES) as u32),
+        ty: PtxType::U32,
+    }));
+
+    // Addresses for reg[0..3]:
+    //   reg[0]: A[groupID,   4*tig + 0..3 ] → base_off
+    //   reg[1]: A[groupID+8, 4*tig + 0..3 ] → base_off_plus_8rows
+    //   reg[2]: A[groupID,   4*tig + 16..19] → base_off + 16
+    //   reg[3]: A[groupID+8, 4*tig + 16..19] → base_off_plus_8rows + 16
+    let addr0 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off, 0);
+    let addr1 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off_plus_8rows, 0);
+    let addr2 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off, 16);
+    let addr3 =
+        u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off_plus_8rows, 16);
+
+    let frag = alloc_a_M16N8K32(alloc);
+    for (reg, addr) in frag.regs.iter().zip([addr0, addr1, addr2, addr3]) {
+        kernel.push(PtxInstruction::Memory(MemoryOp::LdGlobal {
+            dst: *reg,
+            addr,
+            // Load as .b32 — 4 packed i8 lanes per register, as mma.sync wants.
+            ty: PtxType::U32,
+        }));
+    }
+
+    frag
+}
+
+/// Load one B-fragment for `mma.sync.m16n8k32.s8` from a 32×8 column-major
+/// i8 matrix in global memory.
+///
+/// Column-major means column `j` occupies 32 contiguous i8 bytes; rows
+/// `4*tig..4*tig+3` of column `groupID` are therefore 4 contiguous bytes,
+/// loadable as a single `ld.global.b32`.
+#[allow(non_snake_case)]
+pub fn load_fragment_b_m16n8k32_global_col(
+    alloc: &mut crate::ir::RegisterAllocator,
+    kernel: &mut PtxKernel,
+    matrix_base_global: crate::ir::Register,
+    tid_x: crate::ir::Register,
+) -> FragmentB_M16N8K32 {
+    let (group_id, tig) = compute_group_thread_ids(alloc, kernel, tid_x);
+
+    // Column stride = 32 i8 elements = 32 bytes (matches f16 col stride).
+    // base_off = groupID * 32 + tig * 4
+    let col_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: col_off,
+        lhs: Operand::Reg(group_id),
+        rhs: Operand::ImmU32(FRAGMENT_HALF_ROW_STRIDE_BYTES as u32),
+        ty: PtxType::U32,
+    }));
+    let base_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: base_off,
+        a: Operand::Reg(tig),
+        b: Operand::ImmU32(4),
+        c: Operand::Reg(col_off),
+        ty: PtxType::U32,
+        mode: crate::instr::MadMode::Lo,
+    }));
+
+    // reg[0]: column groupID, rows 4*tig .. 4*tig+3   → base_off
+    // reg[1]: column groupID, rows 4*tig+16 .. 4*tig+19 → base_off + 16
+    let addr0 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off, 0);
+    let addr1 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off, 16);
+
+    let frag = alloc_b_M16N8K32(alloc);
+    for (reg, addr) in frag.regs.iter().zip([addr0, addr1]) {
+        kernel.push(PtxInstruction::Memory(MemoryOp::LdGlobal {
+            dst: *reg,
+            addr,
+            ty: PtxType::U32,
+        }));
+    }
+
+    frag
+}
+
+/// Store one C/D-fragment for `mma.sync.m16n8k32.s32` (INT8 accumulator /
+/// output) to a **row-major s32 matrix** in global memory.
+///
+/// The fragment represents a 16×8 output sub-tile. The caller supplies the
+/// enclosing matrix's **row stride in bytes** via `row_stride_bytes`:
+///
+/// - For a standalone 16×8 matrix, pass `32` (= 8 × `size_of::<i32>`).
+/// - For a 16×8 tile inside a larger `M × N` s32 matrix, pass `N * 4`.
+///
+/// Emits 4 × `st.global.s32`, one per fragment register.
+#[allow(non_snake_case)]
+pub fn store_fragment_c_m16n8k32_global_row(
+    alloc: &mut crate::ir::RegisterAllocator,
+    kernel: &mut PtxKernel,
+    matrix_base_global: crate::ir::Register,
+    tid_x: crate::ir::Register,
+    fragment: FragmentC_M16N8K32,
+    row_stride_bytes: u32,
+) {
+    let (group_id, tig) = compute_group_thread_ids(alloc, kernel, tid_x);
+
+    // base_off = groupID * row_stride_bytes + tig * 8
+    //   (per-thread column pair occupies 2 * 4 = 8 bytes)
+    let row_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: row_off,
+        lhs: Operand::Reg(group_id),
+        rhs: Operand::ImmU32(row_stride_bytes),
+        ty: PtxType::U32,
+    }));
+    let base_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: base_off,
+        a: Operand::Reg(tig),
+        b: Operand::ImmU32(8),
+        c: Operand::Reg(row_off),
+        ty: PtxType::U32,
+        mode: crate::instr::MadMode::Lo,
+    }));
+
+    let base_off_plus_8rows = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: base_off_plus_8rows,
+        lhs: Operand::Reg(base_off),
+        rhs: Operand::ImmU32(8 * row_stride_bytes),
+        ty: PtxType::U32,
+    }));
+
+    // Addresses for reg[0..3]:
+    //   reg[0]: d[groupID,   2*tig    ] → base_off
+    //   reg[1]: d[groupID,   2*tig + 1] → base_off + 4
+    //   reg[2]: d[groupID+8, 2*tig    ] → base_off_plus_8rows
+    //   reg[3]: d[groupID+8, 2*tig + 1] → base_off_plus_8rows + 4
+    let addr0 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off, 0);
+    let addr1 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off, 4);
+    let addr2 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off_plus_8rows, 0);
+    let addr3 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off_plus_8rows, 4);
+
+    for (reg, addr) in fragment.regs.iter().zip([addr0, addr1, addr2, addr3]) {
+        kernel.push(PtxInstruction::Memory(MemoryOp::StGlobal {
+            addr,
+            src: *reg,
+            ty: PtxType::S32,
+        }));
+    }
+}
+
+// ============================================================================
 // 4. m16n8k16 shared-source load helpers
 // ============================================================================
 //
