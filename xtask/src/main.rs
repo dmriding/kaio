@@ -60,6 +60,11 @@ const SHOWCASES: &[(&str, &str, &str)] = &[
         "int8_dequant",
         "Symmetric INT8 dequantization (quantized-weight unpack)",
     ),
+    (
+        "int8matmul",
+        "int8_matmul",
+        "Symmetric INT8 dequantize-matmul (tensor-core W8A8)",
+    ),
 ];
 
 fn main() -> ExitCode {
@@ -101,6 +106,7 @@ Showcase names:
   layernorm  Single-block LayerNorm (classic transformer normalization)
   softmax    Single-block softmax (attention normalization with max-sub)
   int8       Symmetric INT8 dequantization (quantized-weight unpack)
+  int8matmul Symmetric INT8 dequantize-matmul (tensor-core W8A8)
 
 Prerequisites:
   - Rust 1.94+ (pinned via rust-toolchain.toml)
