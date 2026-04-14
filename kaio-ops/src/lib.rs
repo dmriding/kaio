@@ -43,6 +43,7 @@
 
 mod attention_kernel;
 mod attention_tc_kernel;
+mod matmul_int8_kernel;
 mod matmul_kernel;
 mod matmul_tc_async_kernel;
 mod matmul_tc_kernel;
@@ -67,6 +68,14 @@ pub use matmul_kernel::matmul_naive;
 // inputs, f32 accumulation, SM 8.0+ (Ampere).
 pub use matmul_tc_async_kernel::matmul_tc_async;
 pub use matmul_tc_kernel::matmul_tc;
+
+// Sprint 7.1 — INT8 symmetric dequantize-matmul (W8A8, i8 × i8 → f32).
+// Path FAST: direct mma.sync.m16n8k32.s8.s8.s32 with s32 accumulator,
+// single global scalar scale applied post-accumulation. Reference quant
+// op for v0.3.0 — GPTQ/AWQ/per-channel/asymmetric/INT4 land as future
+// additive refinements. Sync-only; async INT8 deferred to 7.1.5+.
+// Requires SM 8.0+ (Ampere) and K%32==0.
+pub use matmul_int8_kernel::matmul_int8;
 
 // TEMP: Sprint 6.6 final `attention_tc` + `attention_tc_causal` —
 // fused TC scaled dot-product attention. #[doc(hidden)] pub use
