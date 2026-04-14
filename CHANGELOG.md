@@ -10,6 +10,26 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+### Added
+- Three new standalone showcase examples under `examples/`:
+  [`layer_norm/`](examples/layer_norm/) (classic transformer LayerNorm,
+  two block-wide reductions), [`softmax/`](examples/softmax/)
+  (single-block softmax with subtract-max numerical-stability pattern),
+  [`int8_dequant/`](examples/int8_dequant/) (symmetric INT8
+  dequantization demonstrating the signed/unsigned shift distinction
+  from v0.2.1). `cargo xtask showcase` now runs six examples; new
+  short names `layernorm`, `softmax`, `int8` alongside the existing
+  `silu`, `gelu`, `rms`.
+
+### Changed
+- Cleaned stale "after v0.2.0 publishes" Cargo.toml comments across
+  all six showcase examples (v0.2.0 shipped in Phase 6, so the
+  copy-out instructions were outdated).
+- `examples/softmax` reuses `local_max` in the `exp(...)` step
+  instead of re-reading `input[tid]`, avoiding a redundant global
+  load per thread. Behavior is identical; cleaner in the general-n
+  case.
+
 ## [0.2.2] — 2026-04-14 — Sprint 7.0.5: Ergonomics fast-track before Phase 7.1
 
 Sprint 7.0.5 is a narrow pre-7.1 ergonomics sprint. It ships a targeted set of adoption-friction fixes that set the table for first-time users arriving via the quant-kernels story. Bigger ergonomics items (module cache, buffer API, reductions, atomics) stay deferred — see [`docs/development/sprints/phase7/phase7_master_plan.md`](docs/development/sprints/phase7/phase7_master_plan.md) for sequencing.

@@ -1,5 +1,5 @@
 [package]
-name = "fused_silu_gate"
+name = "int8_dequant"
 version = "0.1.0"
 edition = "2024"
 publish = false

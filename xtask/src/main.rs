@@ -45,6 +45,21 @@ const SHOWCASES: &[(&str, &str, &str)] = &[
         "rms_norm",
         "Single-block RMSNorm (LLaMA normalization)",
     ),
+    (
+        "layernorm",
+        "layer_norm",
+        "Single-block LayerNorm (classic transformer normalization)",
+    ),
+    (
+        "softmax",
+        "softmax",
+        "Single-block softmax (attention normalization with max-sub)",
+    ),
+    (
+        "int8",
+        "int8_dequant",
+        "Symmetric INT8 dequantization (quantized-weight unpack)",
+    ),
 ];
 
 fn main() -> ExitCode {
@@ -83,6 +98,9 @@ Showcase names:
   silu       Fused SiLU gate (LLaMA feedforward primitive)
   gelu       Exact vs fast GELU (BERT/GPT activations)
   rms        Single-block RMSNorm (LLaMA normalization)
+  layernorm  Single-block LayerNorm (classic transformer normalization)
+  softmax    Single-block softmax (attention normalization with max-sub)
+  int8       Symmetric INT8 dequantization (quantized-weight unpack)
 
 Prerequisites:
   - Rust 1.94+ (pinned via rust-toolchain.toml)

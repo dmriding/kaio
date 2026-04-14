@@ -7,8 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-# Path-dep form keeps this example buildable from the KAIO repo. The
-# version pin matches the published KAIO crate — after v0.2.0 publishes
-# to crates.io, this example can be copied out of the repo and the path
-# can be dropped; cargo will resolve via crates.io automatically.
+# Path-dep form keeps this example buildable from a local KAIO checkout.
+# To copy this directory outside the repo, drop `path = ...` and cargo
+# resolves `kaio` via crates.io.
 kaio = { path = "../../kaio", version = "0.2.2" }
