@@ -2,7 +2,8 @@
 
 Items identified during development that are deferred but should be
 addressed before the next release milestone. v0.1.0 shipped (Phase 5);
-v0.2.0 is tracked under Phase 6. Organized by priority.
+v0.2.0 shipped (Phase 6); v0.3.0 ships with Sprint 7.1 (INT8
+dequantize-matmul). Organized by priority.
 
 ## High Priority (before Phase 5)
 

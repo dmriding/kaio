@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](https://github.com/dmriding/kaio)
 [![Rust](https://img.shields.io/badge/rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 
-**High-performance GPU kernels in pure Rust. PTX at build time. No CUDA C++, no Python, no toolkit.**
+**High-performance GPU kernels in pure Rust. Lowered to PTX IR at compile time, validated against the current GPU and JIT-compiled by the driver at launch. No CUDA C++, no Python, no toolkit.**
 
 KAIO (from the Greek καιω — _to burn, to ignite_) is for Rust engineers
 who need custom GPU kernels today — fused attention variants,
@@ -24,8 +24,11 @@ CUDA C++ because their framework doesn't support them.
 - **No CUDA toolkit required** — just the NVIDIA display driver. Build
   in CI on a standard GitHub runner; host tests pass without a GPU.
 - **Pure-Rust kernel authorship.** The `#[gpu_kernel]` proc macro lowers
-  Rust to PTX at build time. Type-safe kernel signatures catch dtype
-  mismatches at compile time, not as silent GPU corruption at runtime.
+  Rust to a PTX IR module at compile time; at launch the module is
+  validated against the current GPU's SM target, emitted to PTX text, and
+  handed to the CUDA driver for JIT compilation. Type-safe kernel
+  signatures catch dtype mismatches at compile time, not as silent GPU
+  corruption at runtime.
 
 ## Try KAIO in 30 seconds
 
@@ -93,8 +96,8 @@ use kaio::prelude::*;
 
 // Gated SiLU — the feedforward activation in every LLaMA / Mistral /
 // Qwen block. llama.cpp, vLLM, and TensorRT-LLM all ship hand-written
-// CUDA for it. With KAIO it's 7 lines of Rust, compiled to PTX at
-// build time.
+// CUDA for it. With KAIO it's 7 lines of Rust, lowered to a PTX IR
+// module at compile time and JIT-loaded at launch.
 #[gpu_kernel(block_size = 256)]
 fn fused_silu_gate(x: &[f32], gate: &[f32], out: &mut [f32], n: u32) {
     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
@@ -250,7 +253,7 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 
 | Feature                                  | Notes                                                                      |
 | ---------------------------------------- | -------------------------------------------------------------------------- |
-| `#[gpu_kernel]` proc macro               | Rust → PTX at build time. Type-safe launch wrapper auto-generated.         |
+| `#[gpu_kernel]` proc macro               | Rust → PTX IR at compile time; PTX emitted + JIT-loaded at launch. Type-safe launch wrapper auto-generated. |
 | Shared memory + reductions + warp shuffles | `shared_mem![]`, `bar_sync()`, `block_reduce_sum/max`, `shfl_sync_*`.    |
 | 2D blocks, FMA, math builtins            | `block_size = (16,16)`, `fma`, `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max`. |
 | Scalar tiled matmul                      | `kaio_ops::matmul` / `matmul_auto` — 31% of cuBLAS sgemm. Any SM.          |

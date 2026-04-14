@@ -1,12 +1,24 @@
 # Phase 7 Master Plan — Quantized Kernels & Training Integration
 
-**Status:** In progress (7.0 complete; 7.1 planning pending)
+**Status:** In progress (7.0 complete v0.2.1; 7.0.5 complete v0.2.2;
+7.1 INT8 dequantize-matmul complete v0.3.0; 7.1.5 / 7.2 / 7.3 / 7.4
+planned)
 **Depends on:** Phase 6 complete (v0.2.1, 2026-04-14)
-**Current branch tip:** Sprint 7.0 complete on `phase7`. See PHASE_7_LOG
-(to be created at 7.1 kickoff) for per-sprint commit hashes.
-**Sprint order (as planned):** 7.0 → 7.1 → 7.2 → 7.3 → 7.4. May fold /
-split as each sprint is scoped; 7.0 is the only fixed-scope sprint at
-plan time.
+**Per-sprint logs:** see
+[`sprint_7_0.md`](sprint_7_0.md),
+[`sprint_7_0_5.md`](sprint_7_0_5.md),
+[`sprint_7_1.md`](sprint_7_1.md) for commit hashes and results. Older
+sprints may reference a `PHASE_7_LOG` file that was never created —
+the per-sprint logs serve that role.
+**Sprint order (as planned):** 7.0 → 7.0.5 → 7.1 → 7.1.5 → 7.2 → 7.3 →
+7.4. May fold / split as each sprint is scoped.
+
+> **Note:** This document is the long-form Phase 7 planning reference.
+> It captures architecture, risks, and sprint sequencing as they were
+> understood at planning time. Authoritative state for shipped work
+> lives in the per-sprint log files above and in
+> [`docs/phases.md`](../../../phases.md). If this plan disagrees with
+> a sprint log, the sprint log wins.
 
 ## Goal
 

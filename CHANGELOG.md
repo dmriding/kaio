@@ -72,8 +72,8 @@ in follow-up sprints as additive refinements.
   new short names `layernorm`, `softmax`, `int8`, `int8matmul`.
 
 ### Changed — Sprint 7.1
-- `docs/phases.md` — Phase 7.1 row marked complete with the 80.5 TOPS
-  baseline.
+- `docs/phases.md` — Phase 7.1 row marked complete with the observed
+  80–94 TOPS band at 4096³ (median ~89 across 6 runs).
 - `phase7_master_plan.md` — corrected the stale `m16n8k16.s8.s8.s32`
   reference to the correct `m16n8k32.row.col.s32.s8.s8.s32` mnemonic.
 - Version bumps 0.2.2 → **0.3.0** across all 5 crates (`kaio`, `kaio-core`,
