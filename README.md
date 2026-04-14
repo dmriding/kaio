@@ -360,11 +360,15 @@ for "did it compile → launch → produce right output?"
 
 ## Test coverage
 
-**94.8% line coverage** across the 17,735-line workspace (925 lines
-uncovered, mostly host-side parser error paths and the unreachable-by-
-design host stubs for GPU builtins in `kaio/src/gpu_builtins.rs`).
-Measured on RTX 4090 sm_89 via `cargo llvm-cov` with the host test
-suite and the full GPU-only `--ignored` test suite merged:
+**93.65% line coverage** across the 20,156-line workspace (1,280 lines
+uncovered, mostly host-side parser error paths, the `xtask` repo-tooling
+binary, and the unreachable-by-design host stubs for GPU builtins in
+`kaio/src/gpu_builtins.rs`). Shipped kernel crates are well above the
+workspace average — `kaio-ops/src/matmul_int8_kernel.rs` at 97.77%,
+`matmul_tc_kernel.rs` at 97.74%, `matmul_tc_async_kernel.rs` at 99.40%,
+`attention_tc_kernel.rs` at 98.82%. Measured on RTX 4090 sm_89 via
+`cargo llvm-cov` with the host test suite and the full GPU-only
+`--ignored` test suite merged:
 
 ```sh
 cargo install cargo-llvm-cov           # one-time

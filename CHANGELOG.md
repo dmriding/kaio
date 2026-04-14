@@ -61,6 +61,17 @@ in follow-up sprints as additive refinements.
 - **ptxas-verify tests** — `ptxas_verify_mma_int8`,
   `ptxas_verify_mma_int8_shared` (9/9 total ptxas_verify tests green).
 
+### Test coverage — Sprint 7.1
+
+Workspace totals at v0.3.0: **329 host tests + 187 `#[ignore]`d GPU
+tests**. Sprint 7.1 contributed 16 new GPU tests (7 adversarial
+fragment-layout tests in `kaio/tests/mma_sync_int8_fragment.rs` + 9
+end-to-end round-trip tests in `kaio-ops/tests/matmul_int8_e2e.rs`)
+plus 2 new `ptxas_verify_mma_int8*` host tests and 5 new
+`matmul_int8_kernel` structure tests. GPU tests are gated behind
+`--ignored` and require an Ampere+ NVIDIA GPU — host CI remains green
+without a GPU.
+
 ### Added — pre-promotion (landed during Sprint 7.0.5 post-v0.2.2 → rolled up)
 - Three standalone showcase examples under `examples/`:
   [`layer_norm/`](examples/layer_norm/) (classic transformer LayerNorm,
