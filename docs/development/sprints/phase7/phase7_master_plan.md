@@ -80,10 +80,17 @@ Fused kernel:
 - Feed into existing `mma.sync.m16n8k16.f16.f16.f32` after `cvt.f16.f32`.
 
 **Open question (for 7.1 planning):** does the `mma.sync` shape accept
-signed INT8 operands directly? `mma.sync.m16n8k16.s8.s8.s32` exists on
-Ampere+ (SM 8.0+) — if so, we may skip the dequant-to-f16 step
-entirely for INT8 × INT8 matmul and only dequantize the output. Needs
-investigation at 7.1 kickoff.
+signed INT8 operands directly? `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`
+exists on Ampere+ (SM 8.0+) — if so, we may skip the dequant-to-f16
+step entirely for INT8 × INT8 matmul and apply the scale only to the
+s32 accumulator. Needs investigation at 7.1 kickoff.
+
+**Shape correction (Sprint 7.1 D1 pre-work):** Earlier drafts of this
+doc referenced `mma.sync.m16n8k16.s8.s8.s32`. That was wrong. The INT8
+mma shape on sm_80+ is `m16n8k32` (K = 32, not K = 16 — twice the
+K-tile of the f16 path). The `.row.col` layout qualifiers are
+mandatory in the instruction string, not optional. Sprint 7.1's plan
+doc captures the full string.
 
 ### 3. INT4 dequantize-matmul (Sprint 7.2 — planned)
 
