@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/kaio.svg)](https://crates.io/crates/kaio)
 [![Documentation](https://docs.rs/kaio/badge.svg)](https://docs.rs/kaio)
 [![Build Status](https://github.com/dmriding/kaio/actions/workflows/ci.yml/badge.svg)](https://github.com/dmriding/kaio/actions)
-[![Coverage](https://img.shields.io/badge/coverage-94.8%25-brightgreen)](#test-coverage)
+[![Coverage](https://img.shields.io/badge/coverage-93.65%25-brightgreen)](#test-coverage)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](https://github.com/dmriding/kaio)
 [![Rust](https://img.shields.io/badge/rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 
