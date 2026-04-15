@@ -1441,6 +1441,128 @@ pub(crate) fn validate_dims_qkv_int4(
     Ok(())
 }
 
+/// Fused tri-output INT4 QKV projection — **W4A16** (f16 activations,
+/// packed signed-INT4 weights, f16 group scales).
+///
+/// Sprint 7.3 contingent ship. One kernel launch produces three
+/// `GpuBuffer<f16>` outputs (Q, K, V) ready to feed
+/// [`attention_tc`][crate::attention_tc] from a shared activation `x`,
+/// three packed-INT4 weight tensors, and three group-scale tensors.
+/// Saves 2× global activation reads vs three separate
+/// [`matmul_int4`][crate::matmul_int4] calls and amortizes kernel-launch
+/// overhead — dominant at autoregressive-decode batch sizes.
+///
+/// # Packing convention (matches `matmul_int4`)
+///
+/// Each `w_*_packed` tensor has logical shape `[K/8, N]` stored
+/// **col-major** as `u32`, with 8 signed `s4` nibbles packed K-contiguous
+/// per word. For logical weight `B[k, n]`:
+///
+/// ```text
+/// word_index   = (k / 8) + n * (K / 8)   // index into w_*_packed
+/// nibble_index = k % 8                   // lane within the word
+/// nibble_bits  = (w[word_index] >> (4 * nibble_index)) & 0xF
+/// signed_value = sign_extend_from_4_bits(nibble_bits)  // in [-8, +7]
+/// ```
+///
+/// See `examples/int4_matmul/` for a CPU reference packer that produces
+/// this layout from f16 weights. **Not** a drop-in for AutoGPTQ /
+/// exllama / GGUF formats.
+///
+/// # Group scales
+///
+/// Each `scales_*` tensor has shape `[K/group_size, N]` stored
+/// **row-major** as `f16`. For group `g = k / group_size`,
+/// `scales[g * N + n]` is the shared scale for all `group_size` weights
+/// in column `n` over K-range `[g * group_size, (g + 1) * group_size)`.
+/// `group_size = 128` is fixed in v1; `K % 128 == 0` is required.
+///
+/// # Contract (v0.4.0 unreleased)
+///
+/// - **`x`**: `f16` row-major `[M, K]`.
+/// - **`w_q_packed`, `w_k_packed`, `w_v_packed`**: each `u32` packed-INT4
+///   col-major `[K/8, N]`. Three distinct allocations.
+/// - **`scales_q`, `scales_k`, `scales_v`**: each `f16` row-major
+///   `[K/128, N]`. Three distinct allocations.
+/// - **`q_out`, `k_out`, `v_out`**: each `f16` row-major `[M, N]`.
+///   **MHA**: `N_q == N_k == N_v == N` enforced.
+/// - **`group_size = 128`** required (parameterization is a follow-up).
+/// - **`K % 128 == 0`** and **`N % 2 == 0`** required.
+///
+/// # Hardware
+///
+/// Requires NVIDIA Ampere or newer (SM 8.0+) for the
+/// `mma.sync.m16n8k16.f16.f16.f32` instance shape.
+///
+/// # Out of scope
+///
+/// Asymmetric INT4 (zero-points), non-128 group sizes, GGUF / AWQ
+/// packings, bias / activation fusion, GQA, async pipelining, and
+/// auto-tuning — all are follow-up sprints. See
+/// `docs/development/sprints/phase7/` for the roadmap.
+#[allow(clippy::too_many_arguments)]
+pub fn qkv_project_int4(
+    device: &KaioDevice,
+    x: &GpuBuffer<half::f16>,
+    w_q_packed: &GpuBuffer<u32>,
+    w_k_packed: &GpuBuffer<u32>,
+    w_v_packed: &GpuBuffer<u32>,
+    scales_q: &GpuBuffer<half::f16>,
+    scales_k: &GpuBuffer<half::f16>,
+    scales_v: &GpuBuffer<half::f16>,
+    q_out: &mut GpuBuffer<half::f16>,
+    k_out: &mut GpuBuffer<half::f16>,
+    v_out: &mut GpuBuffer<half::f16>,
+    m: u32,
+    n: u32,
+    k: u32,
+    group_size: u32,
+) -> Result<()> {
+    use cudarc::driver::{LaunchConfig, PushKernelArg};
+
+    validate_dims_qkv_int4(
+        x, w_q_packed, w_k_packed, w_v_packed, scales_q, scales_k, scales_v, q_out, k_out, v_out,
+        m, n, k, group_size,
+    )?;
+
+    let info = device.info()?;
+    let (major, minor) = info.compute_capability;
+    let sm = format!("sm_{major}{minor}");
+    let module = build_qkv_project_int4_module(&sm);
+
+    let kmodule = device.load_module(&module)?;
+    let func = kmodule.function("qkv_project_int4")?;
+
+    let grid = (n.div_ceil(BN_BLOCK), m.div_ceil(BM_BLOCK), 1);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (32, WARPS_PER_BLOCK, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(func.inner())
+            .arg(x.inner())
+            .arg(w_q_packed.inner())
+            .arg(w_k_packed.inner())
+            .arg(w_v_packed.inner())
+            .arg(scales_q.inner())
+            .arg(scales_k.inner())
+            .arg(scales_v.inner())
+            .arg(q_out.inner_mut())
+            .arg(k_out.inner_mut())
+            .arg(v_out.inner_mut())
+            .arg(&m)
+            .arg(&n)
+            .arg(&k)
+            .launch(cfg)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1852,6 +1974,44 @@ mod tests {
             expected,
             "frag_c grids alias — {} duplicates",
             all_dst_regs.len() - unique.len()
+        );
+    }
+
+    /// D6 host-API smoke test: launches `qkv_project_int4` with canonical
+    /// shapes (M=64, N=16, K=128 = exactly one group). Verifies module loads,
+    /// kernel launches, and outputs are written without driver error.
+    /// Correctness vs reference is the D7 e2e suite's job.
+    #[test]
+    fn qkv_project_int4_launches_without_error() {
+        let Ok(device) = make_device() else {
+            return;
+        };
+        let m = BM_BLOCK;
+        let n = BN_BLOCK;
+        let k = GROUP_SIZE; // exactly one group
+        let x = device.alloc_zeros::<half::f16>((m * k) as usize).unwrap();
+        let w_packed_len = ((k / NIBBLES_PER_U32) * n) as usize;
+        let w_q = device.alloc_zeros::<u32>(w_packed_len).unwrap();
+        let w_k = device.alloc_zeros::<u32>(w_packed_len).unwrap();
+        let w_v = device.alloc_zeros::<u32>(w_packed_len).unwrap();
+        let scales_len = ((k / GROUP_SIZE) * n) as usize;
+        let s_q = device.alloc_zeros::<half::f16>(scales_len).unwrap();
+        let s_k = device.alloc_zeros::<half::f16>(scales_len).unwrap();
+        let s_v = device.alloc_zeros::<half::f16>(scales_len).unwrap();
+        let mut q_out = device.alloc_zeros::<half::f16>((m * n) as usize).unwrap();
+        let mut k_out = device.alloc_zeros::<half::f16>((m * n) as usize).unwrap();
+        let mut v_out = device.alloc_zeros::<half::f16>((m * n) as usize).unwrap();
+        qkv_project_int4(
+            &device, &x, &w_q, &w_k, &w_v, &s_q, &s_k, &s_v, &mut q_out, &mut k_out, &mut v_out, m,
+            n, k, GROUP_SIZE,
+        )
+        .expect("qkv_project_int4 launch failed on canonical shape");
+        device.stream().synchronize().expect("device sync failed");
+        let q_host = q_out.to_host(&device).expect("dtoh");
+        let zero = half::f16::from_f32(0.0);
+        assert!(
+            q_host.iter().all(|h: &half::f16| *h == zero),
+            "expected all-zero Q output for zero inputs"
         );
     }
 

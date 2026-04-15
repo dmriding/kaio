@@ -106,6 +106,13 @@ pub use matmul_int4_kernel::matmul_int4;
 // Design-S K-tile cadence. Requires SM 8.0+ and K%16==0, N%2==0.
 pub use qkv_project_int8_kernel::qkv_project_int8;
 
+// Sprint 7.3 contingent — fused tri-output INT4 QKV projection (W4A16:
+// f16 activations × packed-INT4 weights × f16 group scales, group_size=128).
+// Same Design-S serial fusion as the INT8 path; group-scale reload folds
+// into the per-projection W load epoch on group-boundary K-tiles. Per-block
+// tile 64×16 (Rollback #1 mirror). Requires SM 8.0+ and K%128==0, N%2==0.
+pub use qkv_project_int4_kernel::qkv_project_int4;
+
 // TEMP: Sprint 6.6 final `attention_tc` + `attention_tc_causal` —
 // fused TC scaled dot-product attention. #[doc(hidden)] pub use
 // until Phase 7 lifts the divisibility + seq_k constraints and adds
