@@ -13,7 +13,7 @@
 //! [`matmul_int8`][crate::matmul_int8] (Sprint 7.1) is **W8A8** (`i8`
 //! activations × `i8` weights, native `mma.sync.m16n8k32.s8.s8.s32`).
 //! `qkv_project_int8` is **W8A16** (`f16` activations × `i8` weights,
-//! `mma.sync.m16n8k16.f16.f16.f32` after per-weight `cvt.rn.f16.s8`).
+//! `mma.sync.m16n8k16.f16.f16.f32` after per-weight `cvt.f16.s8`).
 //! The W8A16 contract lets the op drop in between f16-boundary layers
 //! of a real LLM without forcing the caller to quantize X at every
 //! attention block. Users who genuinely need W8A8 call `matmul_int8`
@@ -26,7 +26,7 @@
 //! `K_TILE_SHARED = 16`. Fragment-C layout and the store-out helper
 //! ([`emit_store_fragment_c_f32_to_f16_packed`][super::store_out::emit_store_fragment_c_f32_to_f16_packed]
 //! once wired) are shared — only fragment-B dequant differs
-//! (INT8: `cvt.rn.f16.s8` + scalar scale; INT4: nibble-extract +
+//! (INT8: `cvt.f16.s8` + scalar scale; INT4: nibble-extract +
 //! sign-extend + group-scale fold).
 //!
 //! # Tri-output design (Serial fusion, Design S)
@@ -101,7 +101,7 @@ pub(crate) const TILE_X_ROW_STRIDE_BYTES: u32 = K_TILE_SHARED * BYTES_PER_F16; /
 /// W_P_i8 tile in shared: `K_TILE_SHARED` rows × `BN_BLOCK` cols, i8 row-major.
 /// 16 × 32 × 1 = 512 B. Row-major in shared — the fragment-B dequant helper
 /// (D3.2) reads per-lane i8 values at `(k_row, n_col)` offsets and produces
-/// `cvt.rn.f16.s8` + `MovPack` packed pairs. We pay no padding for bank-
+/// `cvt.f16.s8` + `MovPack` packed pairs. We pay no padding for bank-
 /// conflict relief because the per-lane loads are 1-byte reads with fanout
 /// across lanes, not the dense-stripe pattern that causes 32-bank contention.
 #[allow(dead_code)] // wired up in D3
@@ -409,6 +409,186 @@ pub(crate) fn emit_pre_zero_shared_tiles_qkv_int8(
     kernel.push(PtxInstruction::Control(ControlOp::BarSync {
         barrier_id: 0,
     }));
+}
+
+/// Per-lane dequant of one `FragmentB_M16N8K16` for the INT8 W8A16 path.
+///
+/// Sprint 7.3 D3.2. Reads 4 `s8` bytes from the shared W tile, converts
+/// each to `f16` via `cvt.f16.s8`, and `MovPack`s them into 2 `.b32`
+/// registers holding two packed f16 values each — the standard feed
+/// format for the `mma.sync.m16n8k16.f16.f16.f32` B operand. No scale
+/// is applied here; the INT8 variant folds its **scalar** per-projection
+/// scale into the store-out chain (see
+/// [`crate::store_out::emit_store_fragment_c_f32_to_f16_packed`]).
+///
+/// # Fragment-B layout (PTX ISA §9.7.13.5.8.1 for m16n8k16.f16)
+///
+/// Lane `l ∈ 0..32` owns fragment-B col `group_id = l / 4` (0..8) and
+/// the four rows `{2*tig, 2*tig+1, 2*tig+8, 2*tig+9}` where `tig = l % 4`:
+///
+/// ```text
+///   lane.reg[0] = pack( f16[row = 2*tig + 0, col = group_id],
+///                       f16[row = 2*tig + 1, col = group_id] )
+///   lane.reg[1] = pack( f16[row = 2*tig + 8, col = group_id],
+///                       f16[row = 2*tig + 9, col = group_id] )
+/// ```
+///
+/// # Shared tile assumption
+///
+/// The W tile has been cooperatively loaded in **row-major** layout (K
+/// as row, N as column, stride = [`TILE_W_ROW_STRIDE_BYTES`] = 32 B)
+/// by [`emit_mw_load_tile_w_int8_16x32`]. Per-lane byte addresses:
+///
+/// ```text
+///   byte(k, n) = tile_w_shared + k * 32 + n
+/// ```
+///
+/// Each lane issues 4 × `ld.shared.s8` at four `(k, n_col_abs)` positions,
+/// one per K-row the lane owns.
+///
+/// # Why row-major shared
+///
+/// Alternative col-major shared would let each lane issue a single
+/// `ld.shared.u32` (4 adjacent K-bytes in one word) instead of 4 `ld.s8`,
+/// but would force the cooperative loader to transpose during the
+/// `st.shared` epoch — 4 byte-wide stores per thread instead of one
+/// 4-byte store. Design choice: keep the cooperative load simple and
+/// coalesced (one b32 per thread) and pay the per-lane fragment-B read
+/// cost in 4 byte loads. The INT8 dequant chain is already dominated by
+/// the 4 `cvt.f16.s8` and 2 `MovPack` instructions; 4 × 1-byte shared
+/// loads add negligible marginal cost relative to the arithmetic.
+#[allow(dead_code)] // wired up in D3.3
+pub(crate) fn emit_fragment_b_int8_per_lane(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_w_shared: Register,
+    n_stripe_col_base: Register,
+    lane_within_warp: Register,
+) -> kaio_core::fragment::FragmentB {
+    // group_id = lane / 4   (0..8 — N-col within the 8-col fragment)
+    let group_id = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: group_id,
+        lhs: Operand::Reg(lane_within_warp),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    // tig = lane % 4
+    let tig = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: tig,
+        lhs: Operand::Reg(lane_within_warp),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    // col_abs = n_stripe_col_base + group_id (N-col in tile, 0..32)
+    let col_abs = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: col_abs,
+        lhs: Operand::Reg(n_stripe_col_base),
+        rhs: Operand::Reg(group_id),
+        ty: PtxType::U32,
+    }));
+
+    // two_tig = tig * 2  (K-row base for reg[0])
+    let two_tig = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: two_tig,
+        lhs: Operand::Reg(tig),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    // two_tig_plus_8 = two_tig + 8  (K-row base for reg[1])
+    let two_tig_plus_8 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: two_tig_plus_8,
+        lhs: Operand::Reg(two_tig),
+        rhs: Operand::ImmU32(8),
+        ty: PtxType::U32,
+    }));
+
+    // Load one s8 byte from shared at (k_row, col_abs) and cvt.f16.s8
+    // to an f16 register. Returns the f16 register holding the dequanted value.
+    let load_one_s8_to_f16 =
+        |alloc: &mut RegisterAllocator, kernel: &mut PtxKernel, k_row: Register| -> Register {
+            // shared_off = k_row * TILE_W_ROW_STRIDE_BYTES + col_abs
+            let row_off = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+                dst: row_off,
+                lhs: Operand::Reg(k_row),
+                rhs: Operand::ImmU32(TILE_W_ROW_STRIDE_BYTES),
+                ty: PtxType::U32,
+            }));
+            let total_off = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: total_off,
+                lhs: Operand::Reg(row_off),
+                rhs: Operand::Reg(col_abs),
+                ty: PtxType::U32,
+            }));
+            let addr = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: addr,
+                lhs: Operand::Reg(tile_w_shared),
+                rhs: Operand::Reg(total_off),
+                ty: PtxType::U32,
+            }));
+            // ld.shared.s8 %r_byte, [addr] — lands in the %r integer-register
+            // class per the `PtxType::S8` doc (kaio-core/types.rs:38).
+            let s8_reg = alloc.alloc(PtxType::S8);
+            kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+                dst: s8_reg,
+                addr,
+                ty: PtxType::S8,
+            }));
+            // cvt.f16.s8 %h, %r — sign-extend-then-convert, per ISA.
+            let h = alloc.alloc(PtxType::F16);
+            kernel.push(PtxInstruction::Cvt {
+                dst: h,
+                src: s8_reg,
+                dst_ty: PtxType::F16,
+                src_ty: PtxType::S8,
+            });
+            h
+        };
+
+    // k_row0 = two_tig, k_row1 = two_tig + 1 (reg[0] inputs)
+    let k_row1 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: k_row1,
+        lhs: Operand::Reg(two_tig),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let h0 = load_one_s8_to_f16(alloc, kernel, two_tig);
+    let h1 = load_one_s8_to_f16(alloc, kernel, k_row1);
+
+    // k_row2 = two_tig + 8, k_row3 = two_tig + 9 (reg[1] inputs)
+    let k_row3 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: k_row3,
+        lhs: Operand::Reg(two_tig_plus_8),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let h2 = load_one_s8_to_f16(alloc, kernel, two_tig_plus_8);
+    let h3 = load_one_s8_to_f16(alloc, kernel, k_row3);
+
+    // Pack adjacent-K f16 pairs into b32 registers for the mma feed.
+    let reg0 = alloc.alloc_packed_half2();
+    kernel.push(PtxInstruction::MovPack {
+        dst: reg0,
+        srcs: vec![h0, h1],
+        ty: PtxType::U32,
+    });
+    let reg1 = alloc.alloc_packed_half2();
+    kernel.push(PtxInstruction::MovPack {
+        dst: reg1,
+        srcs: vec![h2, h3],
+        ty: PtxType::U32,
+    });
+
+    kaio_core::fragment::FragmentB { regs: [reg0, reg1] }
 }
 
 /// Validate shape + alignment preconditions for `qkv_project_int8`.
@@ -755,6 +935,89 @@ mod tests {
         assert!(
             ptx.contains("@!") && ptx.contains("bra W_SKIP_I8_TILE_LOAD"),
             "expected negated-predicate branch to the skip label; got:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn frag_b_int8_emits_four_cvt_f16_s8_and_two_mov_b32_packs() {
+        // Per-lane chain: 4 × ld.shared.s8 → 4 × cvt.f16.s8 → 2 × mov.b32 pack.
+        // Plus address math: 4 × (mul row_stride) + 4 × (add col_abs) + 4 × (add base).
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let tile_w = alloc.alloc(PtxType::U32);
+        let n_stripe = alloc.alloc(PtxType::U32);
+        let lane = alloc.alloc(PtxType::U32);
+        let _frag = emit_fragment_b_int8_per_lane(&mut alloc, &mut kernel, tile_w, n_stripe, lane);
+        let ptx = emit_text(&kernel);
+        assert_eq!(
+            ptx.matches("ld.shared.s8").count(),
+            4,
+            "expected 4 ld.shared.s8 per lane (2*tig, +1, +8, +9); got:\n{ptx}"
+        );
+        assert_eq!(
+            ptx.matches("cvt.f16.s8").count(),
+            4,
+            "expected 4 cvt.f16.s8 per lane (one per loaded byte); got:\n{ptx}"
+        );
+        assert_eq!(
+            ptx.matches("mov.b32").count(),
+            2,
+            "expected 2 mov.b32 packed pairs per lane (reg[0] and reg[1]); got:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn frag_b_int8_emits_no_mul_or_group_scale_load() {
+        // INT8 W8A16 does NOT fold a scale into fragment B (scalar scale is
+        // applied post-accumulation at store-out). There should be zero
+        // multiplications and zero ld.shared.f16 reads in the emitted chain.
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let tile_w = alloc.alloc(PtxType::U32);
+        let n_stripe = alloc.alloc(PtxType::U32);
+        let lane = alloc.alloc(PtxType::U32);
+        let _ = emit_fragment_b_int8_per_lane(&mut alloc, &mut kernel, tile_w, n_stripe, lane);
+        let ptx = emit_text(&kernel);
+        // We expect mul.u32 for address math (row * stride, tig * 2) but
+        // zero mul.f16 / mul.f32 (no scale fold).
+        assert_eq!(
+            ptx.matches("mul.f16").count(),
+            0,
+            "expected no mul.f16 (no pre-mma scale fold in INT8); got:\n{ptx}"
+        );
+        assert_eq!(
+            ptx.matches("mul.f32").count(),
+            0,
+            "expected no mul.f32 (no pre-mma scale fold in INT8); got:\n{ptx}"
+        );
+        // And no ld.shared.b16 (no group-scale load — would be the f16 idiom).
+        assert_eq!(
+            ptx.matches("ld.shared.b16").count(),
+            0,
+            "expected no ld.shared.b16 (no group scale read in INT8); got:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn frag_b_int8_emits_tig_based_k_row_indexing() {
+        // Fragment-B layout requires K-row offsets of `2*tig`, `2*tig+1`,
+        // `2*tig+8`, `2*tig+9`. PTX address math should contain literal
+        // +1, +8, +9 immediates in its computation of the per-byte k_row
+        // values. (+8 comes from the `two_tig + 8` constant; +1 and the
+        // implicit +0 handle the adjacent-K pairs inside reg[0] and reg[1].)
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let tile_w = alloc.alloc(PtxType::U32);
+        let n_stripe = alloc.alloc(PtxType::U32);
+        let lane = alloc.alloc(PtxType::U32);
+        let _ = emit_fragment_b_int8_per_lane(&mut alloc, &mut kernel, tile_w, n_stripe, lane);
+        let ptx = emit_text(&kernel);
+        // Constant +8 appears when computing `two_tig + 8`.
+        assert!(
+            ptx.contains(", 8;"),
+            "expected immediate +8 in K-row address math; got:\n{ptx}"
+        );
+        // Row stride multiplier (32) — TILE_W_ROW_STRIDE_BYTES.
+        assert!(
+            ptx.contains(", 32;"),
+            "expected row stride 32 in shared address math; got:\n{ptx}"
         );
     }
 
