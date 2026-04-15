@@ -48,6 +48,11 @@ mod matmul_int8_kernel;
 mod matmul_kernel;
 mod matmul_tc_async_kernel;
 mod matmul_tc_kernel;
+// Sprint 7.3 — fused tri-output QKV projection. INT8 (W8A16) is the MVS
+// deliverable; INT4 (W4A16) is contingent on D2.5 register budget and
+// D5/D6/D7 correctness gates. Public `pub use` wiring lands at D4 / D6.
+mod qkv_project_int4_kernel;
+mod qkv_project_int8_kernel;
 mod tuner;
 
 pub use attention_kernel::{attention, attention_causal, attention_flash, attention_flash_causal};
