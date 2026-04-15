@@ -651,7 +651,8 @@ const _: RegKind = RegKind::R;
 /// `shl_count = 28 - 4 * nibble_index`. Passed as `Operand` so the
 /// caller can use either an immediate (for a compile-time nibble
 /// position) or a register (for a runtime per-lane `tig`).
-fn emit_unpack_s4_x2_scale_to_f16_pair(
+#[allow(dead_code)] // re-exported via crate::matmul_int4_kernel for qkv_project_int4 reuse
+pub(crate) fn emit_unpack_s4_x2_scale_to_f16_pair(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
     packed: Register,
@@ -720,7 +721,8 @@ fn emit_unpack_s4_x2_scale_to_f16_pair(
 /// `{2*tig+8, 2*tig+9}` for reg[1], where `tig = l%4`. Per fragment-B
 /// per lane: 4 nibbles at positions `(2*tig, 2*tig+1)` → shift counts
 /// `(28 - 8*tig, 24 - 8*tig)` applied to both u32 words.
-fn emit_fragment_b_int4_per_lane(
+#[allow(dead_code)] // re-exported for qkv_project_int4
+pub(crate) fn emit_fragment_b_int4_per_lane(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
     tile_b_shared: Register,

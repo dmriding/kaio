@@ -40,6 +40,11 @@
 //! is authored.
 
 use kaio::prelude::*;
+use kaio_core::instr::ArithOp;
+use kaio_core::instr::control::{CmpOp, ControlOp};
+use kaio_core::instr::memory::MemoryOp;
+use kaio_core::ir::{Operand, PtxInstruction, PtxKernel, Register, RegisterAllocator};
+use kaio_core::types::PtxType;
 
 // --- mma.sync.m16n8k16 instance shape (f16 inputs, f32 accumulator) ---
 // Matches qkv_project_int8 and matmul_int4.
@@ -48,19 +53,27 @@ pub(crate) const BM: u32 = 16; // mma m dim
 #[allow(dead_code)] // wired up in D5
 pub(crate) const BN: u32 = 8; // mma n dim
 
-// --- Multi-warp block tiling (halved N vs matmul_int4 for tri-output accumulators) ---
+// --- Multi-warp block tiling (Rollback #1 mirrors qkv_project_int8) ---
+//
+// INT4 has identical fragment-C live state to INT8 (3 grids × 4 sub-tiles ×
+// 4 f32 = 48 regs/lane at the original BN_BLOCK=32) plus extra register
+// pressure from the group-scale reload + nibble-extract dequant chain.
+// INT8 already overshot the 64-reg cliff at the original tile (80 regs);
+// INT4 would be worse. Apply Rollback #1 preemptively: drop
+// `MMAS_PER_WARP_N` 2 → 1, output tile becomes 64×16 per block. Same
+// economic argument: more blocks launch, X-reuse still favors fusion.
 #[allow(dead_code)] // wired up in D5
 pub(crate) const BM_BLOCK: u32 = 64;
 #[allow(dead_code)] // wired up in D5
-pub(crate) const BN_BLOCK: u32 = 32;
+pub(crate) const BN_BLOCK: u32 = 16; // Rollback #1 (was 32)
 #[allow(dead_code)] // wired up in D5
 pub(crate) const WARP_QUAD_M: u32 = 32;
 #[allow(dead_code)] // wired up in D5
-pub(crate) const WARP_QUAD_N: u32 = 16;
+pub(crate) const WARP_QUAD_N: u32 = 8; // Rollback #1 (was 16)
 #[allow(dead_code)] // wired up in D5
 pub(crate) const MMAS_PER_WARP_M: u32 = WARP_QUAD_M / BM; // 2
 #[allow(dead_code)] // wired up in D5
-pub(crate) const MMAS_PER_WARP_N: u32 = WARP_QUAD_N / BN; // 2
+pub(crate) const MMAS_PER_WARP_N: u32 = WARP_QUAD_N / BN; // 1 (Rollback #1)
 #[allow(dead_code)] // wired up in D5
 pub(crate) const WARPS_PER_BLOCK: u32 = 4;
 #[allow(dead_code)] // wired up in D5
@@ -80,6 +93,1234 @@ pub(crate) const K_TILE_SHARED: u32 = 16;
 // group_idx = k_tile / K_TILE_GROUP_RATIO; reload every time k_tile crosses a group boundary.
 #[allow(dead_code)] // wired up in D5
 pub(crate) const K_TILE_GROUP_RATIO: u32 = GROUP_SIZE / K_TILE_SHARED; // 8 K-tiles per group
+
+// --- Shared tile byte sizes ---
+
+/// Bytes per element for f16 activations and f16 group scales.
+const BYTES_PER_F16: u32 = 2;
+/// Bytes per packed-INT4 word (8 nibbles per `u32`).
+const BYTES_PER_B32: u32 = 4;
+
+/// X tile in shared: `BM_BLOCK` rows × `K_TILE_SHARED` cols, f16 row-major.
+/// 64 × 16 × 2 = 2048 B. Matches `matmul_int4_kernel::TILE_A_BYTES` so the
+/// cooperative A-loader can be reused unchanged.
+#[allow(dead_code)] // wired up in D5
+pub(crate) const TILE_X_BYTES: u32 = BM_BLOCK * K_TILE_SHARED * BYTES_PER_F16; // 2048
+
+/// X tile row stride in bytes.
+#[allow(dead_code)] // wired up in D5
+pub(crate) const TILE_X_ROW_STRIDE_BYTES: u32 = K_TILE_SHARED * BYTES_PER_F16; // 32
+
+/// W_packed tile col-stride bytes — matches `matmul_int4_kernel::TILE_B_COL_STRIDE_BYTES`.
+/// 2 packed u32s per K-tile col + 4 B padding = 12 B (bank-conflict avoidance,
+/// see matmul_int4 D3 design note).
+#[allow(dead_code)] // wired up in D5
+pub(crate) const TILE_W_COL_STRIDE_BYTES: u32 = 12;
+
+/// W_packed tile in shared: `BN_BLOCK` cols × `TILE_W_COL_STRIDE_BYTES` data,
+/// padded to a 512-B multiple so the cooperative pre-zero pattern stays
+/// 4-bytes-per-thread × 128 threads = 512 B per issue. After Rollback #1:
+/// 16 × 12 = 192 B data, padded to 512 B. Same sizing approach as
+/// `matmul_int4_kernel::TILE_B_BYTES` which lands at 1024 B with BN_BLOCK=64.
+#[allow(dead_code)] // wired up in D5
+pub(crate) const TILE_W_BYTES: u32 = {
+    let data = BN_BLOCK * TILE_W_COL_STRIDE_BYTES;
+    let chunk = THREADS_PER_BLOCK * 4;
+    let pad = (chunk - data % chunk) % chunk;
+    data + pad
+}; // 512 (192 data + 320 pad)
+
+/// Group-scale tile: one f16 per output column, BN_BLOCK f16 per tile.
+/// Reloaded once per group transition (every 8 K-tiles). Tiny enough to fit
+/// in a fraction of one warp's coalesced load. After Rollback #1: 16 × 2 = 32 B.
+#[allow(dead_code)] // wired up in D5
+pub(crate) const TILE_SCALES_BYTES: u32 = BN_BLOCK * BYTES_PER_F16; // 32
+
+/// Pre-zero issue size — cooperative pre-zero writes one b32 per thread per
+/// issue. `TILE_X_BYTES = 2048 B` = 4 issues per thread; `TILE_W_BYTES = 512 B`
+/// = 1 issue per thread; `TILE_SCALES_BYTES = 32 B` = handled by predicating
+/// the first 8 threads (32/4 = 8) — covered in the pre-zero helper.
+#[allow(dead_code)]
+const PRE_ZERO_BYTES_PER_ISSUE: u32 = THREADS_PER_BLOCK * 4; // 512
+
+/// Cooperative load of the 64×16 f16 X block tile from global into shared.
+/// Delegates to [`super::matmul_int4_kernel::emit_mw_load_tile_a_f16_64x16`]
+/// — same shape, dtype, and row-major convention as `matmul_int4`'s A.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // wired up in D5
+pub(crate) fn emit_mw_load_tile_x_f16_64x16(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    x_block_base_global: Register,
+    tile_x_shared: Register,
+    flat_tid: Register,
+    block_row: Register,
+    m: Register,
+    k_bytes: Register,
+    label_suffix: &str,
+) {
+    super::matmul_int4_kernel::emit_mw_load_tile_a_f16_64x16(
+        alloc,
+        kernel,
+        x_block_base_global,
+        tile_x_shared,
+        flat_tid,
+        block_row,
+        m,
+        k_bytes,
+        label_suffix,
+    );
+}
+
+/// Cooperative load of the packed-INT4 W tile from global into shared, sized
+/// for `BN_BLOCK = 16` columns × 2 packed `u32` words per col.
+///
+/// # Tile shape
+/// - 16 cols × 2 u32/col = 32 packed words = 128 B of real data per tile.
+/// - Each thread issues 1 b32 if its `(col_in_tile, word_idx_local)` falls
+///   inside the 32-word range; the remaining 96 threads idle through the
+///   skip label.
+///
+/// # Per-thread layout
+///
+/// ```text
+/// col_in_tile     = flat_tid / 2     // 0..64; valid only when < BN_BLOCK
+/// word_idx_local  = flat_tid % 2     // 0 or 1 (the 2 u32s for the K-tile)
+/// ```
+///
+/// # Edge handling
+///
+/// - **Tile predicate** (Rollback #1): `col_in_tile < BN_BLOCK = 16`. Threads
+///   with `col_in_tile ≥ 16` skip — they cover the inactive half of the
+///   per-thread layout and would otherwise read past the block's owned cols.
+/// - **N-edge predicate**: `block_col + col_in_tile < N`. OOB cols fall
+///   through to the pre-zeroed slot.
+///
+/// `w_packed_block_base_global` must already include both the block-column
+/// offset (`block_col * (K/8) * 4` bytes, col-major INT4) and the per-K-tile
+/// word offset (`k_tile * 2 * 4` bytes per col).
+///
+/// `label_suffix` differentiates the skip-label across the three
+/// per-projection calls per K-tile; pass `"Q"` / `"K"` / `"V"`.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // wired up in D5
+pub(crate) fn emit_mw_load_tile_w_packed_int4_2x16(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    w_packed_block_base_global: Register, // u64
+    tile_w_shared: Register,              // u32
+    flat_tid: Register,                   // u32 — 0..128
+    block_col: Register,                  // u32
+    n: Register,                          // u32
+    k_words: Register,                    // u32 — K / NIBBLES_PER_U32 (rows of packed storage)
+    label_suffix: &str,
+) {
+    let skip_label = if label_suffix.is_empty() {
+        "WP_SKIP_I4_TILE_LOAD".to_string()
+    } else {
+        format!("WP_SKIP_I4_TILE_LOAD_{label_suffix}")
+    };
+
+    // col_in_tile = flat_tid / 2
+    let col_in_tile = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: col_in_tile,
+        lhs: Operand::Reg(flat_tid),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    let word_idx_local = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: word_idx_local,
+        lhs: Operand::Reg(flat_tid),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+
+    // Tile predicate: skip if col_in_tile >= BN_BLOCK (Rollback #1).
+    let p_in_tile = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_in_tile,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(col_in_tile),
+        rhs: Operand::ImmU32(BN_BLOCK),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_in_tile,
+        target: skip_label.clone(),
+        negate: true,
+    }));
+
+    // N-edge predicate.
+    let col_global = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: col_global,
+        lhs: Operand::Reg(block_col),
+        rhs: Operand::Reg(col_in_tile),
+        ty: PtxType::U32,
+    }));
+    let p_n_edge = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_n_edge,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(col_global),
+        rhs: Operand::Reg(n),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_n_edge,
+        target: skip_label.clone(),
+        negate: true,
+    }));
+
+    // Shared offset = col_in_tile * TILE_W_COL_STRIDE_BYTES + word_idx_local * 4.
+    let col_stride_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: col_stride_off,
+        lhs: Operand::Reg(col_in_tile),
+        rhs: Operand::ImmU32(TILE_W_COL_STRIDE_BYTES),
+        ty: PtxType::U32,
+    }));
+    let word_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: word_off,
+        lhs: Operand::Reg(word_idx_local),
+        rhs: Operand::ImmU32(BYTES_PER_B32),
+        ty: PtxType::U32,
+    }));
+    let shared_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: shared_off,
+        lhs: Operand::Reg(col_stride_off),
+        rhs: Operand::Reg(word_off),
+        ty: PtxType::U32,
+    }));
+    let shared_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: shared_addr,
+        lhs: Operand::Reg(tile_w_shared),
+        rhs: Operand::Reg(shared_off),
+        ty: PtxType::U32,
+    }));
+
+    // Global offset (col-major packed): (col_in_tile * k_words + word_idx_local) * 4.
+    let col_off_words = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: col_off_words,
+        lhs: Operand::Reg(col_in_tile),
+        rhs: Operand::Reg(k_words),
+        ty: PtxType::U32,
+    }));
+    let total_word_idx = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: total_word_idx,
+        lhs: Operand::Reg(col_off_words),
+        rhs: Operand::Reg(word_idx_local),
+        ty: PtxType::U32,
+    }));
+    let global_byte_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: global_byte_off,
+        lhs: Operand::Reg(total_word_idx),
+        rhs: Operand::ImmU32(BYTES_PER_B32),
+        src_ty: PtxType::U32,
+    }));
+    let global_addr = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: global_addr,
+        lhs: Operand::Reg(w_packed_block_base_global),
+        rhs: Operand::Reg(global_byte_off),
+        ty: PtxType::U64,
+    }));
+
+    let tmp = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdGlobal {
+        dst: tmp,
+        addr: global_addr,
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+        addr: shared_addr,
+        src: tmp,
+        ty: PtxType::U32,
+    }));
+
+    kernel.push(PtxInstruction::Label(skip_label));
+}
+
+/// Cooperative load of the `BN_BLOCK = 16` f16 group-scale slice for the
+/// current group transition. `scales[num_groups, N]` row-major.
+///
+/// Per block, on each group transition, reads `scales[g, block_col..+16]`
+/// as 8 `.b32` words (2 f16 packed per b32). Lanes 0..7 cooperate; lanes
+/// 8..127 idle through the skip label. N-edge predication drops loads where
+/// `block_col + flat_tid*2 + 1 >= N` to avoid reading past N.
+///
+/// `scales_base_global` must be `&scales[g * N]` (row origin for the current
+/// group — caller resolves `g = k_tile / K_TILE_GROUP_RATIO`).
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // wired up in D5
+pub(crate) fn emit_cooperative_load_group_scales_int4(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    scales_base_global: Register, // u64
+    tile_scales_shared: Register, // u32
+    flat_tid: Register,           // u32 — 0..128
+    block_col: Register,          // u32
+    n: Register,                  // u32
+    label_suffix: &str,
+) {
+    let skip_label = if label_suffix.is_empty() {
+        "SCALES_SKIP_QKV_I4".to_string()
+    } else {
+        format!("SCALES_SKIP_QKV_I4_{label_suffix}")
+    };
+    // active_threads = BN_BLOCK / 2 = 8 (each thread loads one b32 = 2 f16).
+    let active_threads = BN_BLOCK / 2;
+
+    let p_active = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_active,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(flat_tid),
+        rhs: Operand::ImmU32(active_threads),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_active,
+        target: skip_label.clone(),
+        negate: true,
+    }));
+
+    // col_pair_idx = flat_tid (0..8); col_global = block_col + flat_tid * 2.
+    let col_off_pair = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: col_off_pair,
+        lhs: Operand::Reg(flat_tid),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    let col_global = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: col_global,
+        lhs: Operand::Reg(block_col),
+        rhs: Operand::Reg(col_off_pair),
+        ty: PtxType::U32,
+    }));
+    // N-edge: skip if col_global + 1 >= N (need 2 contiguous f16).
+    let col_global_plus_one = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: col_global_plus_one,
+        lhs: Operand::Reg(col_global),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_n_edge = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_n_edge,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(col_global_plus_one),
+        rhs: Operand::Reg(n),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_n_edge,
+        target: skip_label.clone(),
+        negate: true,
+    }));
+
+    // Shared addr = tile_scales + flat_tid * 4 (each thread writes one b32 pair).
+    let shared_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: shared_off,
+        lhs: Operand::Reg(flat_tid),
+        rhs: Operand::ImmU32(BYTES_PER_B32),
+        ty: PtxType::U32,
+    }));
+    let shared_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: shared_addr,
+        lhs: Operand::Reg(tile_scales_shared),
+        rhs: Operand::Reg(shared_off),
+        ty: PtxType::U32,
+    }));
+
+    // Global addr = scales_base + col_global * 2 (f16).
+    let col_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: col_bytes,
+        lhs: Operand::Reg(col_global),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+    let col_bytes_u64 = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: col_bytes_u64,
+        src: col_bytes,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+    let global_addr = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: global_addr,
+        lhs: Operand::Reg(scales_base_global),
+        rhs: Operand::Reg(col_bytes_u64),
+        ty: PtxType::U64,
+    }));
+
+    let tmp = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdGlobal {
+        dst: tmp,
+        addr: global_addr,
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+        addr: shared_addr,
+        src: tmp,
+        ty: PtxType::U32,
+    }));
+
+    kernel.push(PtxInstruction::Label(skip_label));
+}
+
+/// Cooperative pre-zero of the X + W_packed + scales shared tiles, then a
+/// single `bar.sync 0`. X is 2048 B (4 issues/thread), W is 512 B (1 issue/
+/// thread, padded), scales is 32 B (8 active threads, 1 issue each).
+#[allow(dead_code)] // wired up in D5
+pub(crate) fn emit_pre_zero_shared_tiles_qkv_int4(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_x: Register,
+    tile_w: Register,
+    tile_scales: Register,
+    flat_tid: Register,
+) {
+    debug_assert!(TILE_X_BYTES.is_multiple_of(PRE_ZERO_BYTES_PER_ISSUE));
+    debug_assert!(TILE_W_BYTES.is_multiple_of(PRE_ZERO_BYTES_PER_ISSUE));
+
+    let r_zero = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_zero,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+
+    // X + W: full-occupancy 4-bytes-per-thread issues.
+    for (tile_base, total_bytes) in [(tile_x, TILE_X_BYTES), (tile_w, TILE_W_BYTES)] {
+        let bytes_per_thread = total_bytes / THREADS_PER_BLOCK;
+        let issues_per_thread = bytes_per_thread / 4;
+
+        let r_thread_off = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: r_thread_off,
+            lhs: Operand::Reg(flat_tid),
+            rhs: Operand::ImmU32(bytes_per_thread),
+            ty: PtxType::U32,
+        }));
+        let base_off = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: base_off,
+            lhs: Operand::Reg(tile_base),
+            rhs: Operand::Reg(r_thread_off),
+            ty: PtxType::U32,
+        }));
+        for i in 0..issues_per_thread {
+            let addr = if i == 0 {
+                base_off
+            } else {
+                let a = alloc.alloc(PtxType::U32);
+                kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                    dst: a,
+                    lhs: Operand::Reg(base_off),
+                    rhs: Operand::ImmU32(i * 4),
+                    ty: PtxType::U32,
+                }));
+                a
+            };
+            kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+                addr,
+                src: r_zero,
+                ty: PtxType::U32,
+            }));
+        }
+    }
+
+    // Scales: predicated single-issue on the first TILE_SCALES_BYTES/4 threads.
+    let scales_active = TILE_SCALES_BYTES / 4;
+    let p_scales_active = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_scales_active,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(flat_tid),
+        rhs: Operand::ImmU32(scales_active),
+        ty: PtxType::U32,
+    }));
+    let scales_skip = "PRE_ZERO_SCALES_SKIP_QKV_I4".to_string();
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_scales_active,
+        target: scales_skip.clone(),
+        negate: true,
+    }));
+    let r_scales_thread_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_scales_thread_off,
+        lhs: Operand::Reg(flat_tid),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    let scales_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: scales_addr,
+        lhs: Operand::Reg(tile_scales),
+        rhs: Operand::Reg(r_scales_thread_off),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+        addr: scales_addr,
+        src: r_zero,
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Label(scales_skip));
+
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+        barrier_id: 0,
+    }));
+}
+
+/// Per-warp-quadrant tri-output INT4 mma sweep for one projection.
+///
+/// Mirrors [`super::matmul_int4_kernel::emit_fragment_b_int4_per_lane`]'s
+/// nibble-extract dequant + scale-fold chain (sign-extend via `shr.s32`,
+/// `cvt` to f16, multiply by group-scale, `MovPack`), then runs the 2×1
+/// inner mma grid into `frag_c` (Rollback #1: MMAS_PER_WARP_M=2,
+/// MMAS_PER_WARP_N=1). Reuses the matmul_int4 dequant verbatim — INT4
+/// fragment-B is projection-agnostic; only the A-tile's M offset and the
+/// caller-provided frag_c grid differ across Q/K/V.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // wired up in D5
+pub(crate) fn emit_warp_quadrant_mma_int4_per_projection(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_x_shared: Register,
+    tile_w_shared: Register,
+    tile_scales_shared: Register,
+    warp_quad_row_base_in_tile_x: Register, // 0 or 32
+    warp_quad_col_base_in_tile_w: Register, // 0 or 8
+    tid_x_in_warp: Register,
+    frag_c_grid: &mut [[kaio_core::fragment::FragmentC; MMAS_PER_WARP_N as usize];
+             MMAS_PER_WARP_M as usize],
+) {
+    use kaio_core::fragment::load_fragment_a_m16n8k16_shared_row;
+    use kaio_core::instr::{MmaShape, TensorCoreOp};
+
+    // Pre-compute the warp-quadrant byte row-shift into the shared X tile.
+    let row_offset_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: row_offset_bytes,
+        lhs: Operand::Reg(warp_quad_row_base_in_tile_x),
+        rhs: Operand::ImmU32(TILE_X_ROW_STRIDE_BYTES),
+        ty: PtxType::U32,
+    }));
+
+    for n_stripe in 0..MMAS_PER_WARP_N {
+        // n_stripe_col_base = warp_quad_col_base + n_stripe * BN
+        let n_stripe_col_base = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: n_stripe_col_base,
+            lhs: Operand::Reg(warp_quad_col_base_in_tile_w),
+            rhs: Operand::ImmU32(n_stripe * BN),
+            ty: PtxType::U32,
+        }));
+
+        // Per-lane fragment B (nibble-extract + sign-extend + cvt + scale fold).
+        let frag_b = super::matmul_int4_kernel::emit_fragment_b_int4_per_lane(
+            alloc,
+            kernel,
+            tile_w_shared,
+            tile_scales_shared,
+            n_stripe_col_base,
+            tid_x_in_warp,
+        );
+
+        for m_stripe in 0..MMAS_PER_WARP_M {
+            let m_stripe_shift = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: m_stripe_shift,
+                lhs: Operand::Reg(row_offset_bytes),
+                rhs: Operand::ImmU32(m_stripe * BM * TILE_X_ROW_STRIDE_BYTES),
+                ty: PtxType::U32,
+            }));
+            let shifted_tile_x = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: shifted_tile_x,
+                lhs: Operand::Reg(tile_x_shared),
+                rhs: Operand::Reg(m_stripe_shift),
+                ty: PtxType::U32,
+            }));
+            let frag_a = load_fragment_a_m16n8k16_shared_row(
+                alloc,
+                kernel,
+                shifted_tile_x,
+                tid_x_in_warp,
+                TILE_X_ROW_STRIDE_BYTES,
+                None,
+            );
+
+            let frag_d = kaio_core::fragment::alloc_c(alloc);
+            let frag_c_in = frag_c_grid[m_stripe as usize][n_stripe as usize];
+            kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+                d: frag_d,
+                a: frag_a,
+                b: frag_b,
+                c: frag_c_in,
+                shape: MmaShape::M16N8K16,
+                d_ty: PtxType::F32,
+                a_ty: PtxType::F16,
+                b_ty: PtxType::F16,
+                c_ty: PtxType::F32,
+            }));
+            for (c_reg, d_reg) in frag_c_in.regs.iter().zip(frag_d.regs.iter()) {
+                kernel.push(PtxInstruction::Mov {
+                    dst: *c_reg,
+                    src: Operand::Reg(*d_reg),
+                    ty: PtxType::F32,
+                });
+            }
+        }
+    }
+}
+
+/// Build the full IR module for `qkv_project_int4` targeting `sm`.
+///
+/// Sprint 7.3 D5 — INT4 contingent. Tri-output W4A16 kernel: f16 activations,
+/// 3 packed-INT4 weight tensors (one per projection), 3 f16 group-scale
+/// tensors (group_size = 128). Single launch produces three `f16` outputs
+/// ready to feed `attention_tc`.
+///
+/// # Kernel signature (in launch order)
+///
+/// `x_ptr: *const f16, w_q_packed_ptr: *const u32, w_k_packed_ptr: *const u32,
+///  w_v_packed_ptr: *const u32, scales_q_ptr: *const f16, scales_k_ptr,
+///  scales_v_ptr, q_out_ptr, k_out_ptr, v_out_ptr, m, n, k`.
+///
+/// # Per-K-tile barrier cadence
+///
+/// 1 X-load sync + (1 W_P+scales sync + 1 W release sync) × 3 = **7 barriers
+/// per K-tile** (Design S serial fusion). On group-transition K-tiles the
+/// scale reload folds into the W_P load epoch — same barrier count, just
+/// extra `ld.global` traffic on those iterations.
+#[allow(dead_code)] // wired up in D6
+pub(crate) fn build_qkv_project_int4_module(sm: &str) -> kaio_core::ir::PtxModule {
+    use kaio_core::fragment::{FragmentC, alloc_c};
+    use kaio_core::instr::MadMode;
+    use kaio_core::ir::{PtxModule, PtxParam, SharedDecl};
+
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("qkv_project_int4");
+
+    // --- Kernel signature ---
+    kernel.add_param(PtxParam::pointer("x_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("w_q_packed_ptr", PtxType::U32));
+    kernel.add_param(PtxParam::pointer("w_k_packed_ptr", PtxType::U32));
+    kernel.add_param(PtxParam::pointer("w_v_packed_ptr", PtxType::U32));
+    kernel.add_param(PtxParam::pointer("scales_q_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("scales_k_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("scales_v_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("q_out_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("k_out_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("v_out_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::scalar("m", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("n", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("k", PtxType::U32));
+
+    // --- Shared decls (Design S: single W slot + single scales slot reused) ---
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_x".to_string(),
+        align: 4,
+        size_bytes: TILE_X_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_w".to_string(),
+        align: 4,
+        size_bytes: TILE_W_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_scales".to_string(),
+        align: 4,
+        size_bytes: TILE_SCALES_BYTES,
+    });
+
+    // --- Load + cvta the 10 pointer params ---
+    let load_and_cvta =
+        |name: &str, alloc: &mut RegisterAllocator, kernel: &mut PtxKernel| -> Register {
+            let rd = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+                dst: rd,
+                param_name: name.to_string(),
+                ty: PtxType::U64,
+            }));
+            let rd_g = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+                dst: rd_g,
+                src: rd,
+            }));
+            rd_g
+        };
+    let rd_x = load_and_cvta("x_ptr", &mut alloc, &mut kernel);
+    let rd_w_q = load_and_cvta("w_q_packed_ptr", &mut alloc, &mut kernel);
+    let rd_w_k = load_and_cvta("w_k_packed_ptr", &mut alloc, &mut kernel);
+    let rd_w_v = load_and_cvta("w_v_packed_ptr", &mut alloc, &mut kernel);
+    let rd_s_q = load_and_cvta("scales_q_ptr", &mut alloc, &mut kernel);
+    let rd_s_k = load_and_cvta("scales_k_ptr", &mut alloc, &mut kernel);
+    let rd_s_v = load_and_cvta("scales_v_ptr", &mut alloc, &mut kernel);
+    let rd_q_out = load_and_cvta("q_out_ptr", &mut alloc, &mut kernel);
+    let rd_k_out = load_and_cvta("k_out_ptr", &mut alloc, &mut kernel);
+    let rd_v_out = load_and_cvta("v_out_ptr", &mut alloc, &mut kernel);
+
+    // --- Load 3 dim scalars ---
+    let load_scalar = |name: &str,
+                       ty: PtxType,
+                       alloc: &mut RegisterAllocator,
+                       kernel: &mut PtxKernel|
+     -> Register {
+        let r = alloc.alloc(ty);
+        kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+            dst: r,
+            param_name: name.to_string(),
+            ty,
+        }));
+        r
+    };
+    let r_m = load_scalar("m", PtxType::U32, &mut alloc, &mut kernel);
+    let r_n = load_scalar("n", PtxType::U32, &mut alloc, &mut kernel);
+    let r_k = load_scalar("k", PtxType::U32, &mut alloc, &mut kernel);
+
+    // --- Derived dim scalars ---
+    let r_k_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_bytes,
+        lhs: Operand::Reg(r_k),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+    let r_k_words = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_k_words,
+        lhs: Operand::Reg(r_k),
+        rhs: Operand::ImmU32(NIBBLES_PER_U32),
+        ty: PtxType::U32,
+    }));
+    let r_n_f16_stride = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_n_f16_stride,
+        lhs: Operand::Reg(r_n),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+
+    // --- Thread / warp / block indices ---
+    let (r_tid_x, tid_x_instr) = kaio_core::instr::special::tid_x(&mut alloc);
+    kernel.push(tid_x_instr);
+    let (r_tid_y, tid_y_instr) = kaio_core::instr::special::tid_y(&mut alloc);
+    kernel.push(tid_y_instr);
+    let (r_ntid_x, ntid_x_instr) = kaio_core::instr::special::ntid_x(&mut alloc);
+    kernel.push(ntid_x_instr);
+    let r_flat_tid = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: r_flat_tid,
+        a: Operand::Reg(r_tid_y),
+        b: Operand::Reg(r_ntid_x),
+        c: Operand::Reg(r_tid_x),
+        ty: PtxType::U32,
+        mode: MadMode::Lo,
+    }));
+    let r_warp_id = r_tid_y;
+    let r_warp_row_quad = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_warp_row_quad,
+        lhs: Operand::Reg(r_warp_id),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    let r_warp_col_quad = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_warp_col_quad,
+        lhs: Operand::Reg(r_warp_id),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    let r_wq_row_idx = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_wq_row_idx,
+        lhs: Operand::Reg(r_warp_row_quad),
+        rhs: Operand::ImmU32(WARP_QUAD_M),
+        ty: PtxType::U32,
+    }));
+    let r_wq_col_idx = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_wq_col_idx,
+        lhs: Operand::Reg(r_warp_col_quad),
+        rhs: Operand::ImmU32(WARP_QUAD_N),
+        ty: PtxType::U32,
+    }));
+
+    let (r_ctaid_x, ctaid_x_instr) = kaio_core::instr::special::ctaid_x(&mut alloc);
+    kernel.push(ctaid_x_instr);
+    let (r_ctaid_y, ctaid_y_instr) = kaio_core::instr::special::ctaid_y(&mut alloc);
+    kernel.push(ctaid_y_instr);
+    let r_block_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_block_row,
+        lhs: Operand::Reg(r_ctaid_y),
+        rhs: Operand::ImmU32(BM_BLOCK),
+        ty: PtxType::U32,
+    }));
+    let r_block_col = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_block_col,
+        lhs: Operand::Reg(r_ctaid_x),
+        rhs: Operand::ImmU32(BN_BLOCK),
+        ty: PtxType::U32,
+    }));
+
+    // --- Shared base regs ---
+    let r_tile_x = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_x,
+        src: Operand::SharedAddr("tile_x".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_tile_w = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_w,
+        src: Operand::SharedAddr("tile_w".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_tile_s = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_s,
+        src: Operand::SharedAddr("tile_scales".to_string()),
+        ty: PtxType::U32,
+    });
+
+    // --- Block-level global origins ---
+    // x_block_base = rd_x + block_row * k_bytes
+    let rd_x_row_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_x_row_off,
+        lhs: Operand::Reg(r_block_row),
+        rhs: Operand::Reg(r_k_bytes),
+        src_ty: PtxType::U32,
+    }));
+    let rd_x_block_base = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_x_block_base,
+        lhs: Operand::Reg(rd_x),
+        rhs: Operand::Reg(rd_x_row_off),
+        ty: PtxType::U64,
+    }));
+
+    // w_packed col-major: w_block_base = rd_w + block_col * k_words * 4
+    let r_b_col_off_words = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_b_col_off_words,
+        lhs: Operand::Reg(r_block_col),
+        rhs: Operand::Reg(r_k_words),
+        ty: PtxType::U32,
+    }));
+    let rd_b_col_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_b_col_off,
+        lhs: Operand::Reg(r_b_col_off_words),
+        rhs: Operand::ImmU32(BYTES_PER_B32),
+        src_ty: PtxType::U32,
+    }));
+    let add_u64 =
+        |alloc: &mut RegisterAllocator, kernel: &mut PtxKernel, base: Register, off: Register| {
+            let r = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: r,
+                lhs: Operand::Reg(base),
+                rhs: Operand::Reg(off),
+                ty: PtxType::U64,
+            }));
+            r
+        };
+    let rd_w_q_block_base = add_u64(&mut alloc, &mut kernel, rd_w_q, rd_b_col_off);
+    let rd_w_k_block_base = add_u64(&mut alloc, &mut kernel, rd_w_k, rd_b_col_off);
+    let rd_w_v_block_base = add_u64(&mut alloc, &mut kernel, rd_w_v, rd_b_col_off);
+
+    // --- Allocate 3 frag_c grids (zero-init f32) ---
+    let alloc_grid =
+        |a: &mut RegisterAllocator| -> [[FragmentC; MMAS_PER_WARP_N as usize];
+            MMAS_PER_WARP_M as usize] {
+            core::array::from_fn(|_| core::array::from_fn(|_| alloc_c(a)))
+        };
+    let mut frag_c_q = alloc_grid(&mut alloc);
+    let mut frag_c_k = alloc_grid(&mut alloc);
+    let mut frag_c_v = alloc_grid(&mut alloc);
+    for grid in [&frag_c_q, &frag_c_k, &frag_c_v] {
+        for row in grid {
+            for f in row {
+                for r in &f.regs {
+                    kernel.push(PtxInstruction::Mov {
+                        dst: *r,
+                        src: Operand::ImmF32(0.0),
+                        ty: PtxType::F32,
+                    });
+                }
+            }
+        }
+    }
+
+    // --- Pre-zero shared tiles + bar.sync ---
+    emit_pre_zero_shared_tiles_qkv_int4(
+        &mut alloc,
+        &mut kernel,
+        r_tile_x,
+        r_tile_w,
+        r_tile_s,
+        r_flat_tid,
+    );
+
+    // --- K-loop ---
+    let r_num_k_tiles = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_num_k_tiles,
+        lhs: Operand::Reg(r_k),
+        rhs: Operand::ImmU32(K_TILE_SHARED),
+        ty: PtxType::U32,
+    }));
+    let r_k_tile = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_k_tile,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+
+    kernel.push(PtxInstruction::Label("K_LOOP_QKV_INT4".to_string()));
+
+    // X tile global source = x_block_base + k_tile * 32 (K_TILE_SHARED * BYTES_PER_F16)
+    let r_k_tile_x_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_tile_x_off,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(K_TILE_SHARED * BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+    let rd_k_tile_x_off64 = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_k_tile_x_off64,
+        src: r_k_tile_x_off,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+    let rd_x_tile_src = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_x_tile_src,
+        lhs: Operand::Reg(rd_x_block_base),
+        rhs: Operand::Reg(rd_k_tile_x_off64),
+        ty: PtxType::U64,
+    }));
+
+    // W_P packed tile global offset = k_tile * (K_TILE_SHARED/8) * 4 = k_tile * 8
+    let r_k_tile_b_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_tile_b_off,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32((K_TILE_SHARED / NIBBLES_PER_U32) * BYTES_PER_B32),
+        ty: PtxType::U32,
+    }));
+    let rd_k_tile_b_off64 = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_k_tile_b_off64,
+        src: r_k_tile_b_off,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+    let rd_w_q_tile_src = add_u64(
+        &mut alloc,
+        &mut kernel,
+        rd_w_q_block_base,
+        rd_k_tile_b_off64,
+    );
+    let rd_w_k_tile_src = add_u64(
+        &mut alloc,
+        &mut kernel,
+        rd_w_k_block_base,
+        rd_k_tile_b_off64,
+    );
+    let rd_w_v_tile_src = add_u64(
+        &mut alloc,
+        &mut kernel,
+        rd_w_v_block_base,
+        rd_k_tile_b_off64,
+    );
+
+    // Group-boundary check for scale reload.
+    let r_group_phase = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_group_phase,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(K_TILE_GROUP_RATIO),
+        ty: PtxType::U32,
+    }));
+    let p_new_group = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_new_group,
+        cmp_op: CmpOp::Eq,
+        lhs: Operand::Reg(r_group_phase),
+        rhs: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    }));
+    // Current group id (only meaningful on group-boundary K-tiles).
+    let r_current_group = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_current_group,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(K_TILE_GROUP_RATIO),
+        ty: PtxType::U32,
+    }));
+    let r_scales_row_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_scales_row_off,
+        lhs: Operand::Reg(r_current_group),
+        rhs: Operand::Reg(r_n),
+        ty: PtxType::U32,
+    }));
+    let rd_scales_row_off64 = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_scales_row_off64,
+        lhs: Operand::Reg(r_scales_row_off),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        src_ty: PtxType::U32,
+    }));
+    let rd_scales_q_base = add_u64(&mut alloc, &mut kernel, rd_s_q, rd_scales_row_off64);
+    let rd_scales_k_base = add_u64(&mut alloc, &mut kernel, rd_s_k, rd_scales_row_off64);
+    let rd_scales_v_base = add_u64(&mut alloc, &mut kernel, rd_s_v, rd_scales_row_off64);
+
+    // X-load (once per K-tile, shared across all 3 projections).
+    emit_mw_load_tile_x_f16_64x16(
+        &mut alloc,
+        &mut kernel,
+        rd_x_tile_src,
+        r_tile_x,
+        r_flat_tid,
+        r_block_row,
+        r_m,
+        r_k_bytes,
+        "QKV",
+    );
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+        barrier_id: 0,
+    }));
+
+    // Per-projection epoch: optional scales reload + W_P load → bar.sync → mma → bar.sync.
+    for (w_tile_src, scales_base, label, frag_c) in [
+        (rd_w_q_tile_src, rd_scales_q_base, "Q", &mut frag_c_q),
+        (rd_w_k_tile_src, rd_scales_k_base, "K", &mut frag_c_k),
+        (rd_w_v_tile_src, rd_scales_v_base, "V", &mut frag_c_v),
+    ] {
+        // Group-boundary scale reload (predicated branch over the cooperative load).
+        let scales_skip_outer = format!("SCALES_OUTER_SKIP_QKV_I4_{label}");
+        kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+            pred: p_new_group,
+            target: scales_skip_outer.clone(),
+            negate: true,
+        }));
+        emit_cooperative_load_group_scales_int4(
+            &mut alloc,
+            &mut kernel,
+            scales_base,
+            r_tile_s,
+            r_flat_tid,
+            r_block_col,
+            r_n,
+            label,
+        );
+        kernel.push(PtxInstruction::Label(scales_skip_outer));
+
+        emit_mw_load_tile_w_packed_int4_2x16(
+            &mut alloc,
+            &mut kernel,
+            w_tile_src,
+            r_tile_w,
+            r_flat_tid,
+            r_block_col,
+            r_n,
+            r_k_words,
+            label,
+        );
+        kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+            barrier_id: 0,
+        }));
+        emit_warp_quadrant_mma_int4_per_projection(
+            &mut alloc,
+            &mut kernel,
+            r_tile_x,
+            r_tile_w,
+            r_tile_s,
+            r_wq_row_idx,
+            r_wq_col_idx,
+            r_tid_x,
+            frag_c,
+        );
+        kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+            barrier_id: 0,
+        }));
+    }
+
+    // k_tile += 1; if k_tile < num_k_tiles, jump back.
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_k_tile,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_loop = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_loop,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::Reg(r_num_k_tiles),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_loop,
+        target: "K_LOOP_QKV_INT4".to_string(),
+        negate: false,
+    }));
+
+    // --- Store-out epilogue (reuses the shared D2 store helper) ---
+    let r_warp_block_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_warp_block_row,
+        lhs: Operand::Reg(r_block_row),
+        rhs: Operand::Reg(r_wq_row_idx),
+        ty: PtxType::U32,
+    }));
+    let r_warp_block_col = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_warp_block_col,
+        lhs: Operand::Reg(r_block_col),
+        rhs: Operand::Reg(r_wq_col_idx),
+        ty: PtxType::U32,
+    }));
+    let rd_warp_row_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_warp_row_off,
+        lhs: Operand::Reg(r_warp_block_row),
+        rhs: Operand::Reg(r_n_f16_stride),
+        src_ty: PtxType::U32,
+    }));
+    let r_warp_col_off_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_warp_col_off_bytes,
+        lhs: Operand::Reg(r_warp_block_col),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+    let rd_warp_col_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_warp_col_off,
+        src: r_warp_col_off_bytes,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+
+    let make_warp_base =
+        |alloc: &mut RegisterAllocator, kernel: &mut PtxKernel, p_g: Register| -> Register {
+            let pre = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: pre,
+                lhs: Operand::Reg(p_g),
+                rhs: Operand::Reg(rd_warp_row_off),
+                ty: PtxType::U64,
+            }));
+            let r = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: r,
+                lhs: Operand::Reg(pre),
+                rhs: Operand::Reg(rd_warp_col_off),
+                ty: PtxType::U64,
+            }));
+            r
+        };
+    let rd_q_warp_base = make_warp_base(&mut alloc, &mut kernel, rd_q_out);
+    let rd_k_warp_base = make_warp_base(&mut alloc, &mut kernel, rd_k_out);
+    let rd_v_warp_base = make_warp_base(&mut alloc, &mut kernel, rd_v_out);
+
+    let r_16_rows_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_16_rows_bytes,
+        lhs: Operand::Reg(r_n_f16_stride),
+        rhs: Operand::ImmU32(BM),
+        ty: PtxType::U32,
+    }));
+
+    let projections = [
+        (rd_q_warp_base, &frag_c_q),
+        (rd_k_warp_base, &frag_c_k),
+        (rd_v_warp_base, &frag_c_v),
+    ];
+    for m_stripe in 0..MMAS_PER_WARP_M {
+        for n_stripe in 0..MMAS_PER_WARP_N {
+            let sub_off_u32 = if m_stripe == 0 {
+                let r = alloc.alloc(PtxType::U32);
+                kernel.push(PtxInstruction::Mov {
+                    dst: r,
+                    src: Operand::ImmU32(n_stripe * BN * BYTES_PER_F16),
+                    ty: PtxType::U32,
+                });
+                r
+            } else {
+                let r = alloc.alloc(PtxType::U32);
+                kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                    dst: r,
+                    lhs: Operand::Reg(r_16_rows_bytes),
+                    rhs: Operand::ImmU32(n_stripe * BN * BYTES_PER_F16),
+                    ty: PtxType::U32,
+                }));
+                r
+            };
+            let rd_sub_off = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Cvt {
+                dst: rd_sub_off,
+                src: sub_off_u32,
+                dst_ty: PtxType::U64,
+                src_ty: PtxType::U32,
+            });
+            for (warp_base, grid) in &projections {
+                let rd_subtile_base = alloc.alloc(PtxType::U64);
+                kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                    dst: rd_subtile_base,
+                    lhs: Operand::Reg(*warp_base),
+                    rhs: Operand::Reg(rd_sub_off),
+                    ty: PtxType::U64,
+                }));
+                // INT4 folds the group scale into fragment B during dequant —
+                // pass `scale = None` to the store helper.
+                crate::store_out::emit_store_fragment_c_f32_to_f16_packed(
+                    &mut alloc,
+                    &mut kernel,
+                    &grid[m_stripe as usize][n_stripe as usize].regs,
+                    rd_subtile_base,
+                    r_n_f16_stride,
+                    r_tid_x,
+                    None,
+                );
+            }
+        }
+    }
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new(sm);
+    module.add_kernel(kernel);
+    module
+}
 
 /// Validate shape + alignment preconditions for `qkv_project_int4`.
 ///
@@ -303,5 +1544,406 @@ mod tests {
         assert_eq!(THREADS_PER_BLOCK, 128);
         // Group-scale reload cadence: 128 / 16 = 8 K-tiles per group.
         assert_eq!(K_TILE_GROUP_RATIO, 8);
+        // Rollback #1: 64×16 per-block tile, MMAS_PER_WARP_N=1.
+        assert_eq!(MMAS_PER_WARP_N, 1);
+        assert_eq!(BN_BLOCK, 16);
+        assert_eq!(WARP_QUAD_N, 8);
+    }
+
+    #[test]
+    fn tile_byte_constants_match_shape() {
+        assert_eq!(TILE_X_BYTES, 2048);
+        assert_eq!(TILE_X_ROW_STRIDE_BYTES, 32);
+        assert_eq!(TILE_W_COL_STRIDE_BYTES, 12);
+        assert_eq!(TILE_W_BYTES, 512); // 192 data + 320 pad
+        assert_eq!(TILE_SCALES_BYTES, 32); // 16 cols × 2 B
+        assert_eq!(TILE_X_BYTES % PRE_ZERO_BYTES_PER_ISSUE, 0);
+        assert_eq!(TILE_W_BYTES % PRE_ZERO_BYTES_PER_ISSUE, 0);
+    }
+
+    // --- D5 emit-level helper tests ----------------------------------
+
+    use kaio_core::emit::{Emit, PtxWriter};
+
+    fn fresh_kernel() -> (RegisterAllocator, PtxKernel) {
+        (
+            RegisterAllocator::new(),
+            PtxKernel::new("qkv_int4_d5_smoke"),
+        )
+    }
+
+    fn emit_text(kernel: &PtxKernel) -> String {
+        let mut w = PtxWriter::new();
+        kernel.emit(&mut w).unwrap();
+        w.finish()
+    }
+
+    fn emit_module_to_string(module: &kaio_core::ir::PtxModule) -> String {
+        let mut w = PtxWriter::new();
+        module.emit(&mut w).unwrap();
+        w.finish()
+    }
+
+    #[test]
+    fn pre_zero_emits_correct_issue_count_for_three_tiles() {
+        // X: 4 issues/thread, W: 1 issue/thread (full-occupancy) + 1 predicated
+        // scales issue per active thread = 5 + 1 = 6 st.shared.u32 per emit.
+        // Plus: 1 bar.sync at the end.
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let tile_x = alloc.alloc(PtxType::U32);
+        let tile_w = alloc.alloc(PtxType::U32);
+        let tile_s = alloc.alloc(PtxType::U32);
+        let flat_tid = alloc.alloc(PtxType::U32);
+        emit_pre_zero_shared_tiles_qkv_int4(
+            &mut alloc,
+            &mut kernel,
+            tile_x,
+            tile_w,
+            tile_s,
+            flat_tid,
+        );
+        let ptx = emit_text(&kernel);
+        // 4 X + 1 W + 1 (predicated) scales = 6 st.shared.u32 instructions emitted.
+        assert_eq!(
+            ptx.matches("st.shared.u32").count(),
+            6,
+            "expected 6 st.shared.u32 (4 X + 1 W + 1 scales); got:\n{ptx}"
+        );
+        assert_eq!(
+            ptx.matches("bar.sync").count(),
+            1,
+            "expected 1 bar.sync at end of pre-zero; got:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn w_packed_loader_emits_in_tile_predicate_and_label_suffixes() {
+        // Three calls with Q/K/V should produce three uniquely-labelled skip
+        // targets and contain in-tile setp.lt + n-edge setp.lt for each.
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let w_base = alloc.alloc(PtxType::U64);
+        let tile_w = alloc.alloc(PtxType::U32);
+        let flat_tid = alloc.alloc(PtxType::U32);
+        let block_col = alloc.alloc(PtxType::U32);
+        let n = alloc.alloc(PtxType::U32);
+        let k_words = alloc.alloc(PtxType::U32);
+        for label in ["Q", "K", "V"] {
+            emit_mw_load_tile_w_packed_int4_2x16(
+                &mut alloc,
+                &mut kernel,
+                w_base,
+                tile_w,
+                flat_tid,
+                block_col,
+                n,
+                k_words,
+                label,
+            );
+        }
+        let ptx = emit_text(&kernel);
+        for label in [
+            "WP_SKIP_I4_TILE_LOAD_Q:",
+            "WP_SKIP_I4_TILE_LOAD_K:",
+            "WP_SKIP_I4_TILE_LOAD_V:",
+        ] {
+            assert!(ptx.contains(label), "missing label `{label}` in:\n{ptx}");
+        }
+        // Two predicates per call (tile + n-edge) × 3 calls = 6 setp.lt.u32.
+        assert_eq!(
+            ptx.matches("setp.lt.u32").count(),
+            6,
+            "expected 6 setp.lt.u32 (tile + n-edge per Q/K/V); got:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn group_scales_loader_active_thread_count_is_eight() {
+        // Predicate gate: flat_tid < BN_BLOCK/2 = 8.
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let scales_base = alloc.alloc(PtxType::U64);
+        let tile_s = alloc.alloc(PtxType::U32);
+        let flat_tid = alloc.alloc(PtxType::U32);
+        let block_col = alloc.alloc(PtxType::U32);
+        let n = alloc.alloc(PtxType::U32);
+        emit_cooperative_load_group_scales_int4(
+            &mut alloc,
+            &mut kernel,
+            scales_base,
+            tile_s,
+            flat_tid,
+            block_col,
+            n,
+            "Q",
+        );
+        let ptx = emit_text(&kernel);
+        assert!(
+            ptx.contains(", 8;"),
+            "expected active-thread immediate 8 in setp; got:\n{ptx}"
+        );
+        assert!(
+            ptx.contains("SCALES_SKIP_QKV_I4_Q:"),
+            "expected labeled skip target; got:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn warp_quad_mma_int4_emits_two_mmas_one_dequant_and_eight_copy_backs() {
+        // Rollback #1: 2 m-stripes × 1 n-stripe = 2 mma.sync per call.
+        // 1 fragment-B dequant per call (1 n-stripe), reused across m-stripes.
+        // 2 mmas × 4 frag_d copy-back = 8 mov.f32.
+        fn fresh_grid(
+            alloc: &mut RegisterAllocator,
+        ) -> [[kaio_core::fragment::FragmentC; MMAS_PER_WARP_N as usize]; MMAS_PER_WARP_M as usize]
+        {
+            core::array::from_fn(|_| core::array::from_fn(|_| kaio_core::fragment::alloc_c(alloc)))
+        }
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let tile_x = alloc.alloc(PtxType::U32);
+        let tile_w = alloc.alloc(PtxType::U32);
+        let tile_s = alloc.alloc(PtxType::U32);
+        let warp_row = alloc.alloc(PtxType::U32);
+        let warp_col = alloc.alloc(PtxType::U32);
+        let tid = alloc.alloc(PtxType::U32);
+        let mut frag_c = fresh_grid(&mut alloc);
+        emit_warp_quadrant_mma_int4_per_projection(
+            &mut alloc,
+            &mut kernel,
+            tile_x,
+            tile_w,
+            tile_s,
+            warp_row,
+            warp_col,
+            tid,
+            &mut frag_c,
+        );
+        let ptx = emit_text(&kernel);
+        assert_eq!(
+            ptx.matches("mma.sync").count(),
+            2,
+            "expected 2 mma.sync (2×1 sub-tiles); got:\n{ptx}"
+        );
+        // INT4 dequant per nibble: shr.s32 (sign-extend canary) + cvt.rn.f32.s32 +
+        // cvt.rn.f16.f32 + mul.f16 (scale fold). 1 dequant call → 4 nibbles.
+        // shr.s32 should appear 4 times (sign-extend correctness).
+        assert_eq!(
+            ptx.matches("shr.s32").count(),
+            4,
+            "expected 4 shr.s32 sign-extend instructions per dequant; got:\n{ptx}"
+        );
+        // 8 mov.f32 copy-backs (2 mmas × 4 dst regs).
+        assert_eq!(
+            ptx.matches("mov.f32").count(),
+            8,
+            "expected 8 mov.f32 copy-backs; got:\n{ptx}"
+        );
+    }
+
+    // --- D5 module-level tests ---------------------------------------
+
+    #[test]
+    fn build_qkv_project_int4_module_structure() {
+        let module = build_qkv_project_int4_module("sm_89");
+        let ptx = emit_module_to_string(&module);
+
+        assert!(ptx.contains(".visible .entry qkv_project_int4("));
+        assert!(ptx.contains(".shared .align 4 .b8 tile_x[2048]"));
+        assert!(ptx.contains(".shared .align 4 .b8 tile_w[512]"));
+        assert!(ptx.contains(".shared .align 4 .b8 tile_scales[32]"));
+        assert!(ptx.contains("K_LOOP_QKV_INT4:"));
+
+        let sub_tiles_per_warp = (MMAS_PER_WARP_M * MMAS_PER_WARP_N) as usize;
+        let projections = 3usize;
+        let total_sub_tiles = sub_tiles_per_warp * projections;
+
+        assert!(ptx.contains("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"));
+        let mma_count = ptx.matches("mma.sync.aligned.m16n8k16").count();
+        assert_eq!(
+            mma_count, total_sub_tiles,
+            "expected {total_sub_tiles} mma.sync"
+        );
+
+        // Store helper: each call → 2 packed b32 stores. INT4 passes scale=None,
+        // so no per-store mul.f32 (mul.f16 scale fold happens INSIDE the
+        // dequant chain via emit_unpack_s4_x2_scale_to_f16_pair).
+        let st_count = ptx.matches("st.global.u32").count();
+        assert_eq!(
+            st_count,
+            total_sub_tiles * 2,
+            "expected {} packed stores",
+            total_sub_tiles * 2
+        );
+        // cvt.rn.f16.f32 fires in TWO places:
+        //   (1) per-nibble dequant inside emit_unpack_s4_x2_scale_to_f16_pair
+        //       — 4 nibbles per per-projection call × 3 projections = 12 cvts.
+        //   (2) per-frag_c store-out narrow — 4 regs × 6 sub-tiles = 24 cvts.
+        // Total = 12 + 24 = 36.
+        let dequant_cvts = projections * 4;
+        let store_cvts = total_sub_tiles * 4;
+        let expected_cvts = dequant_cvts + store_cvts;
+        let cvt_narrow = ptx.matches("cvt.rn.f16.f32").count();
+        assert_eq!(
+            cvt_narrow, expected_cvts,
+            "expected {expected_cvts} cvt.rn.f16.f32 ({dequant_cvts} dequant + {store_cvts} store)"
+        );
+    }
+
+    #[test]
+    fn build_qkv_project_int4_module_emits_seven_barriers_per_k_tile() {
+        // Pre-zero (1) + per-K-tile (1 X + 2 per projection × 3 = 7) = 8 static.
+        let module = build_qkv_project_int4_module("sm_89");
+        let ptx = emit_module_to_string(&module);
+        assert_eq!(
+            ptx.matches("bar.sync").count(),
+            8,
+            "expected 8 bar.sync (1 pre-zero + 7 per K-tile)"
+        );
+    }
+
+    #[test]
+    fn build_qkv_project_int4_module_declares_requested_sm() {
+        let ptx_70 = emit_module_to_string(&build_qkv_project_int4_module("sm_70"));
+        assert!(ptx_70.contains(".target sm_70"));
+        let ptx_89 = emit_module_to_string(&build_qkv_project_int4_module("sm_89"));
+        assert!(ptx_89.contains(".target sm_89"));
+    }
+
+    #[test]
+    fn build_qkv_project_int4_module_validates_at_sm_80_and_above() {
+        for sm in ["sm_80", "sm_89", "sm_90"] {
+            let module = build_qkv_project_int4_module(sm);
+            module
+                .validate()
+                .unwrap_or_else(|e| panic!("{sm} should validate; got {e}"));
+        }
+    }
+
+    #[test]
+    fn build_qkv_project_int4_module_emits_distinct_mma_destination_regs() {
+        // Disjoint-register canary across 3 frag_c grids (Sprint 7.2 sign-extend
+        // canary's tri-output sibling). Catches accidental grid aliasing.
+        use std::collections::HashSet;
+        let expected = (MMAS_PER_WARP_M * MMAS_PER_WARP_N * 3 * 4) as usize;
+        let module = build_qkv_project_int4_module("sm_89");
+        let ptx = emit_module_to_string(&module);
+
+        let mut all_dst_regs: Vec<u32> = Vec::new();
+        for line in ptx.lines() {
+            let line = line.trim();
+            if !line.contains("mma.sync.aligned.m16n8k16") {
+                continue;
+            }
+            let Some(open) = line.find('{') else { continue };
+            let Some(close) = line[open..].find('}') else {
+                continue;
+            };
+            for tok in line[open + 1..open + close].split(',') {
+                let tok = tok.trim();
+                if let Some(rest) = tok.strip_prefix("%f")
+                    && let Ok(idx) = rest.parse::<u32>()
+                {
+                    all_dst_regs.push(idx);
+                }
+            }
+        }
+        assert_eq!(all_dst_regs.len(), expected);
+        let unique: HashSet<u32> = all_dst_regs.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            expected,
+            "frag_c grids alias — {} duplicates",
+            all_dst_regs.len() - unique.len()
+        );
+    }
+
+    /// ptxas_verify offline gate for the full `qkv_project_int4` module.
+    /// `#[ignore]` so host-only CI stays green; runs both sm_80 + sm_89 by
+    /// default (override via `KAIO_SM_TARGET`). Pass criterion: ≤ 64 regs/
+    /// thread, 0 spills.
+    #[test]
+    #[ignore]
+    fn ptxas_verify_qkv_project_int4() {
+        if std::process::Command::new("ptxas")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("NOTE: ptxas not found in PATH — skipping qkv_project_int4 verification");
+            return;
+        }
+
+        let sms: Vec<String> = if let Ok(sm) = std::env::var("KAIO_SM_TARGET") {
+            vec![sm]
+        } else {
+            vec!["sm_80".to_string(), "sm_89".to_string()]
+        };
+
+        for sm in &sms {
+            let module = build_qkv_project_int4_module(sm);
+            let ptx = emit_module_to_string(&module);
+            let tmp = std::env::temp_dir().join(format!("kaio_qkv_project_int4_{sm}.ptx"));
+            std::fs::write(&tmp, &ptx).expect("failed to write temp PTX");
+
+            let output = std::process::Command::new("ptxas")
+                .args(["--gpu-name", sm, "--verbose"])
+                .arg(tmp.to_str().unwrap())
+                .output()
+                .expect("failed to run ptxas");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = std::fs::remove_file(&tmp);
+
+            assert!(
+                output.status.success(),
+                "ptxas FAILED for qkv_project_int4 ({sm}):\nstdout: {stdout}\nstderr: {stderr}\n\n=== PTX (first 8000) ===\n{}",
+                &ptx[..ptx.len().min(8000)]
+            );
+
+            let combined = format!("{stdout}\n{stderr}");
+            let regs = parse_after(&combined, "Used ", " registers");
+            let spill_stores = parse_after(&combined, "bytes stack frame, ", " bytes spill stores");
+            let spill_loads = parse_after(&combined, "spill stores, ", " bytes spill loads");
+
+            eprintln!(
+                "=== qkv_project_int4 ptxas baseline ({sm}) ===\n\
+                 regs/thread  : {regs:?}\n\
+                 spill stores : {spill_stores:?}\n\
+                 spill loads  : {spill_loads:?}"
+            );
+
+            match regs {
+                Some(n) => assert!(
+                    n <= 64,
+                    "qkv_project_int4 ({sm}) reports {n} registers > 64 — Rollback #1 not enough; \
+                     may need further sub-tile reduction or skeleton refactoring"
+                ),
+                None => {
+                    panic!("could not parse register count\nstdout:\n{stdout}\nstderr:\n{stderr}")
+                }
+            }
+            assert_eq!(
+                spill_stores,
+                Some(0),
+                "qkv_project_int4 ({sm}) has spill stores"
+            );
+            assert_eq!(
+                spill_loads,
+                Some(0),
+                "qkv_project_int4 ({sm}) has spill loads"
+            );
+
+            eprintln!("ptxas verification PASSED for qkv_project_int4 ({sm})");
+        }
+    }
+
+    fn parse_after(haystack: &str, prefix: &str, suffix: &str) -> Option<u32> {
+        for line in haystack.lines() {
+            if let Some(after) = line.split(prefix).nth(1)
+                && let Some(num) = after.split(suffix).next()
+                && let Ok(n) = num.trim().parse::<u32>()
+            {
+                return Some(n);
+            }
+        }
+        None
     }
 }
