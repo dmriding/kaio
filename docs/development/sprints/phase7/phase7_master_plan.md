@@ -148,7 +148,7 @@ perf win immediately; training users wait for backward.
 | 7.0 | DSL completeness + Phase 6 closeout + Phase 7 scaffold | Bitops, short-circuit `&&`/`\|\|`, compound bitwise assign, phases.md Phase 6 promotion, phase7 master plan (this file) — v0.2.1 (combined with Sprint 6.10 in the same release) |
 | 7.0.5 | Pre-7.1 ergonomics fast-track | Debug-build performance note (A2), proc-macro error-span audit + 3 fixes (A4), consolidated `docs/debugging.md` (B3) — v0.2.2 |
 | 7.1 | INT8 dequantize-matmul | `kaio_ops::matmul_int8` symmetric INT8 × f16 → f32, perf target TBD at sprint kickoff. **Folds in integer-arithmetic DSL support** — mixed-width `u8×u8→u16` / `i8×i8→i32` is a 7.1 prerequisite, not a separate deliverable |
-| 7.1.5 (planned) | Warp + block reductions in DSL | Convergence-doc D1/D2 — `warp_reduce_sum/max/min`, `block_reduce_sum/max` as `#[gpu_kernel]` builtins. Standalone between-quant-milestones sprint |
+| 7.1.5 (in progress) | Warp + block reductions in DSL | `warp_reduce_sum/max/min` + `block_reduce_min` as `#[gpu_kernel]` builtins. Standalone between-quant-milestones sprint. See [`sprint_7_1_5.md`](sprint_7_1_5.md) |
 | 7.2 | INT4 dequantize-matmul | `kaio_ops::matmul_int4` GPTQ-style packed 4-bit + group scales |
 | 7.3 | Quant + attention integration | Dequant-on-the-fly QKV projection wired into FlashAttention |
 | 7.4 | `kaio-candle` bridge crate | Forward-kernel `CustomOp` bindings for core `kaio-ops` operations |
