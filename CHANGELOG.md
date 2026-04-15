@@ -10,6 +10,77 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+### Sprint 7.3 — Fused tri-output QKV projection (`qkv_project_int8` + `qkv_project_int4`)
+
+Fused projection kernels producing three `f16` outputs from one kernel
+launch — Q, K, V projections share a single load of the input
+activation X per K-tile and accumulate into three independent
+fragment-C banks. Output format matches `attention_tc`'s f16 input
+contract, so the pipeline `X → qkv_project → attention_tc` is one
+kernel launch + one attention launch total (vs four in the naive path:
+three separate projection launches + attention). No independent
+crates.io release — Phase 7 closes with an aggregate release after 7.4.
+
+#### Added — Sprint 7.3
+
+- **`kaio_ops::qkv_project_int8`** — **W8A16** (f16 activations × i8
+  weights) fused tri-output projection with scalar per-projection
+  `f32` scales. Single kernel launch produces three `GpuBuffer<f16>`
+  outputs ready to feed [`attention_tc`]. Does **not** require i8
+  activations — users who genuinely need W8A8 call `matmul_int8` three
+  times. `K % 16 == 0` and `N % 2 == 0`. Requires SM 8.0+.
+- **`kaio_ops::qkv_project_int4`** — **W4A16** (f16 activations ×
+  packed signed-INT4 weights × f16 group scales) fused tri-output
+  projection. Same packing convention as `matmul_int4` (8 signed
+  nibbles per u32, K-contiguous, col-major `[K/8, N]`). Group size
+  fixed at 128 for v1; `K % 128 == 0` required. Not a drop-in for
+  AutoGPTQ / exllama / GGUF formats.
+- **`emit_store_fragment_c_f32_to_f16_packed`** (shared helper in
+  `kaio-ops/src/store_out.rs`) — fragment-C f32 → packed-f16 global
+  store chain (`cvt.rn.f16.f32` + `MovPack` + `st.global.u32`) with
+  optional scalar scale. Reused by both INT8 (scale-at-store-out) and
+  INT4 (scale folded into fragment B during dequant, pass `None`).
+- **`kaio-core` `cvt` emitter extended to S8 source** — fixes
+  `cvt.f16.s8` rejection by ptxas ("Rounding modifier required"). Any
+  kernel doing `int8 → f16` now emits `cvt.rn.f16.s8` explicitly.
+- **`examples/quantized_attention/`** — end-to-end showcase:
+  GPTQ-lite quantize → `qkv_project_int4` → `attention_tc` with an f16
+  reference path for correctness + quality metrics (cosine similarity,
+  max abs, mean rel). Wired into `cargo xtask showcase qkvattn`.
+
+#### Tests — Sprint 7.3
+
+- **7 `qkv_project_int8` GPU e2e tests** (`kaio-ops/tests/qkv_project_int8_e2e.rs`)
+  — canonical shapes, multi-N-block, multi-M-block, larger K, and a
+  Q/K/V differentiation canary (W_Q=+1, W_K=+2, W_V=+3 → outputs
+  differ by exact ratios; catches fragment-C grid aliasing).
+- **8 `qkv_project_int4` GPU e2e tests** (`kaio-ops/tests/qkv_project_int4_e2e.rs`)
+  — 1-group / 2-group / 8-group K shapes exercising the scale reload
+  cadence, multi-block shapes, sign-extend canary (all weights `-8`),
+  and a Q/K/V differentiation canary.
+- **Fused-vs-3× bench** (`kaio-ops/tests/qkv_project_bench.rs`) — 9
+  shapes across decode (M ≤ 128) and prefill (M ≥ 512) tiers.
+- **Host emit + ptxas_verify** for both kernel modules (`sm_80` +
+  `sm_89`): INT8 lands at **48 regs / 0 spills**, INT4 at **56 regs /
+  0 spills**, both under the 64-reg full-occupancy cliff.
+
+#### Performance framing — Sprint 7.3 (RTX 4090 sm_89)
+
+- **Decode tier (M ≤ 128)**: fused `qkv_project_int4` wins **~3.0×**
+  over three sequential `matmul_int4` calls across every tested shape.
+- **Prefill mid (M = 512)**: 1.19× (above ship threshold).
+- **Prefill large (M = 2048)**: 0.85× (fused loses 15% — barrier
+  overhead in Design S exceeds the X-reuse win when the standalone
+  kernel is already compute-bound on dequant arithmetic).
+
+Public API rustdoc directs prefill-heavy users to call
+`matmul_int{4,8}` three times. Design S+½P optimization (barriers
+7→4 per K-tile, 2 shared W slots with ping-pong) is scoped as Sprint
+7.3.5; ships only if bench confirms prefill recovery to ≥ 1.15×.
+
+See `docs/development/sprints/phase7/sprint_7_3.md` for the full
+decision log, bench table, and architectural decisions.
+
 ### Sprint 7.2 — INT4 dequantize-matmul (`matmul_int4`)
 
 GPTQ-style W4A16 dequantize-matmul: packed signed-INT4 weights × f16
