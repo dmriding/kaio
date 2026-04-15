@@ -156,11 +156,7 @@ impl Emit for PtxInstruction {
                     // optional modifiers does not match real ptxas validation.
                     (
                         PtxType::F16 | PtxType::BF16 | PtxType::F32 | PtxType::F64,
-                        PtxType::S8
-                        | PtxType::S32
-                        | PtxType::U32
-                        | PtxType::S64
-                        | PtxType::U64,
+                        PtxType::S8 | PtxType::S32 | PtxType::U32 | PtxType::S64 | PtxType::U64,
                     ) => ".rn",
                     // float (including half) → int: round toward zero (matches Rust `as`)
                     (
