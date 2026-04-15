@@ -311,7 +311,14 @@ pub(crate) fn emit_mw_load_tile_w_int8_16x32(
 
     // --- In-bounds path: read 4 bytes from global, write 4 bytes to shared. ---
 
-    // Global offset = row_in_tile * n_bytes + col_global (bytes).
+    // Global offset = row_in_tile * n_bytes + col_start (bytes).
+    //
+    // Note: `w_block_base_global` already carries the `block_col` byte shift
+    // (computed once per block in `build_qkv_project_int8_module`), so the
+    // within-tile offset uses `col_start` not `col_global`. Adding
+    // `col_global = block_col + col_start` here would double-count
+    // `block_col` and corrupt every non-zero N-block (discovered during D7
+    // multi-block e2e).
     let row_bytes_global = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mul {
         dst: row_bytes_global,
@@ -323,7 +330,7 @@ pub(crate) fn emit_mw_load_tile_w_int8_16x32(
     kernel.push(PtxInstruction::Arith(ArithOp::Add {
         dst: global_off_u32,
         lhs: Operand::Reg(row_bytes_global),
-        rhs: Operand::Reg(col_global),
+        rhs: Operand::Reg(col_start),
         ty: PtxType::U32,
     }));
     let global_off_u64 = alloc.alloc(PtxType::U64);

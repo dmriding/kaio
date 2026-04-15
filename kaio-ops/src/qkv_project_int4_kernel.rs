@@ -1058,23 +1058,18 @@ pub(crate) fn build_qkv_project_int4_module(sm: &str) -> kaio_core::ir::PtxModul
         rd_k_tile_b_off64,
     );
 
-    // Group-boundary check for scale reload.
-    let r_group_phase = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
-        dst: r_group_phase,
-        lhs: Operand::Reg(r_k_tile),
-        rhs: Operand::ImmU32(K_TILE_GROUP_RATIO),
-        ty: PtxType::U32,
-    }));
-    let p_new_group = alloc.alloc(PtxType::Pred);
-    kernel.push(PtxInstruction::Control(ControlOp::SetP {
-        dst: p_new_group,
-        cmp_op: CmpOp::Eq,
-        lhs: Operand::Reg(r_group_phase),
-        rhs: Operand::ImmU32(0),
-        ty: PtxType::U32,
-    }));
-    // Current group id (only meaningful on group-boundary K-tiles).
+    // Current group id: g = k_tile / K_TILE_GROUP_RATIO.
+    //
+    // Design S has a single `tile_scales` shared slot reused across all three
+    // projections per K-tile. Because each projection's mma reads its OWN
+    // scales, the slot must be rewritten before each of Q/K/V — not just at
+    // group boundaries. Reloading every K-tile adds 32 B/projection ×
+    // 3 projections = 96 B global read per K-tile (vs 384 B/K-tile for the W
+    // loads) and keeps the serial pipeline correct across the 8-K-tile group
+    // span. Group-boundary optimization (load once per 8 K-tiles) would
+    // require three separate `tile_scales_P` shared decls; deferred pending a
+    // bench-driven decision (the bandwidth saving is small and shared-mem
+    // footprint matters more than a handful of global ld.b32 issues).
     let r_current_group = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Div {
         dst: r_current_group,
@@ -1116,19 +1111,16 @@ pub(crate) fn build_qkv_project_int4_module(sm: &str) -> kaio_core::ir::PtxModul
         barrier_id: 0,
     }));
 
-    // Per-projection epoch: optional scales reload + W_P load → bar.sync → mma → bar.sync.
+    // Per-projection epoch: scales_P + W_P load → bar.sync → mma → bar.sync.
+    //
+    // Scales reload is unconditional (see note above on the single-slot design).
+    // The three projections run serially within the K-tile; each loads its own
+    // scales into `tile_scales` immediately before its mma reads them.
     for (w_tile_src, scales_base, label, frag_c) in [
         (rd_w_q_tile_src, rd_scales_q_base, "Q", &mut frag_c_q),
         (rd_w_k_tile_src, rd_scales_k_base, "K", &mut frag_c_k),
         (rd_w_v_tile_src, rd_scales_v_base, "V", &mut frag_c_v),
     ] {
-        // Group-boundary scale reload (predicated branch over the cooperative load).
-        let scales_skip_outer = format!("SCALES_OUTER_SKIP_QKV_I4_{label}");
-        kernel.push(PtxInstruction::Control(ControlOp::BraPred {
-            pred: p_new_group,
-            target: scales_skip_outer.clone(),
-            negate: true,
-        }));
         emit_cooperative_load_group_scales_int4(
             &mut alloc,
             &mut kernel,
@@ -1139,7 +1131,6 @@ pub(crate) fn build_qkv_project_int4_module(sm: &str) -> kaio_core::ir::PtxModul
             r_n,
             label,
         );
-        kernel.push(PtxInstruction::Label(scales_skip_outer));
 
         emit_mw_load_tile_w_packed_int4_2x16(
             &mut alloc,
