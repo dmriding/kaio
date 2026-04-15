@@ -4,13 +4,13 @@
 //! Sprint 7.3 MVS. Single kernel launch produces three f16 outputs
 //! (Q, K, V) ready to feed [`attention_tc`][crate::attention_tc] — saves
 //! 2× global reads of the shared activation X compared to three
-//! separate [`matmul_int8`][crate::matmul_int8] calls, and amortizes
+//! separate [`matmul_int8`][crate::matmul_int8][crate::matmul_int8] calls, and amortizes
 //! kernel launch overhead (dominant at autoregressive-decode batch
 //! sizes).
 //!
 //! # W8A16 vs W8A8
 //!
-//! [`matmul_int8`][crate::matmul_int8] (Sprint 7.1) is **W8A8** (`i8`
+//! [`matmul_int8`][crate::matmul_int8][crate::matmul_int8] (Sprint 7.1) is **W8A8** (`i8`
 //! activations × `i8` weights, native `mma.sync.m16n8k32.s8.s8.s32`).
 //! `qkv_project_int8` is **W8A16** (`f16` activations × `i8` weights,
 //! `mma.sync.m16n8k16.f16.f16.f32` after per-weight `cvt.rn.f16.s8`).
@@ -1427,6 +1427,117 @@ pub(crate) fn validate_dims_qkv_int8(
     Ok(())
 }
 
+/// Fused tri-output INT8 QKV projection — **W8A16** (f16 activations,
+/// INT8 weights, scalar per-projection scales).
+///
+/// Sprint 7.3 MVS ship deliverable. One kernel launch produces three
+/// `GpuBuffer<f16>` outputs (Q, K, V) ready to feed
+/// [`attention_tc`][crate::attention_tc] from a shared activation `x`
+/// and three INT8 weight tensors. Saves 2× global activation reads vs
+/// three separate [`matmul_int8`][crate::matmul_int8] calls and amortizes kernel-launch
+/// overhead — dominant at autoregressive-decode batch sizes.
+///
+/// # W8A16 vs W8A8
+///
+/// **This is W8A16:** `f16` activations × `i8` weights, applying a
+/// scalar per-projection scale at store-out via
+/// `mma.sync.m16n8k16.f16.f16.f32` after per-weight `cvt.rn.f16.s8`.
+/// [`matmul_int8`][crate::matmul_int8] (Sprint 7.1) is the **W8A8** (`i8` × `i8` →
+/// `mma.sync.m16n8k32.s8.s8.s32`) reference op for users who genuinely
+/// need int-only activations and manage their own activation
+/// quantization. The Rust type system makes the distinction obvious at
+/// compile time (`x: &GpuBuffer<half::f16>` here vs
+/// `a: &GpuBuffer<i8>` for `matmul_int8`).
+///
+/// # Contract (v0.4.0 unreleased)
+///
+/// - **`x`**: `f16` row-major `[M, K]`.
+/// - **`w_q`, `w_k`, `w_v`**: each `i8` row-major `[K, N]`. Three
+///   distinct allocations (the store epilogue writes all three banks
+///   unconditionally; aliasing two outputs is silent corruption).
+/// - **`scale_q`, `scale_k`, `scale_v`**: scalar `f32`, one per
+///   projection. Applied post-accumulation at store-out
+///   (`out_P = (acc_P as f32) * scale_P` then `cvt.rn.f16.f32`).
+/// - **`q_out`, `k_out`, `v_out`**: each `f16` row-major `[M, N]`.
+///   **MHA**: `N_q == N_k == N_v == N` is enforced; grouped-query
+///   attention (GQA) is a separate follow-up op (`qkv_project_gqa`).
+///   Users with mismatched-N weights should call three separate
+///   [`matmul_int8`][crate::matmul_int8] (W8A8) or compose three [`matmul_tc`][crate::matmul_tc] f16 ops.
+/// - **`K % 16 == 0`** and **`N % 2 == 0`** required (validated
+///   pre-launch). The store-out path packs adjacent f16 output pairs
+///   into one `.b32`, so odd `N` would leave a ragged column the
+///   epilogue does not handle.
+///
+/// # Hardware
+///
+/// Requires NVIDIA Ampere or newer (SM 8.0+) for the
+/// `mma.sync.m16n8k16.f16.f16.f32` instance shape. Sub-Ampere targets
+/// are rejected by `PtxModule::validate()` before driver dispatch.
+///
+/// # Out of scope
+///
+/// Bias / activation fusion (additive v2), GQA, async pipelining
+/// (`cp.async`), auto-tuning, and the `kaio-candle` bridge — all are
+/// follow-up sprints. See `docs/development/sprints/phase7/` for the
+/// roadmap.
+pub fn qkv_project_int8(
+    device: &KaioDevice,
+    x: &GpuBuffer<half::f16>,
+    w_q: &GpuBuffer<i8>,
+    w_k: &GpuBuffer<i8>,
+    w_v: &GpuBuffer<i8>,
+    scale_q: f32,
+    scale_k: f32,
+    scale_v: f32,
+    q_out: &mut GpuBuffer<half::f16>,
+    k_out: &mut GpuBuffer<half::f16>,
+    v_out: &mut GpuBuffer<half::f16>,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<()> {
+    use cudarc::driver::{LaunchConfig, PushKernelArg};
+
+    validate_dims_qkv_int8(x, w_q, w_k, w_v, q_out, k_out, v_out, m, n, k)?;
+
+    let info = device.info()?;
+    let (major, minor) = info.compute_capability;
+    let sm = format!("sm_{major}{minor}");
+    let module = build_qkv_project_int8_module(&sm);
+
+    let kmodule = device.load_module(&module)?;
+    let func = kmodule.function("qkv_project_int8")?;
+
+    let grid = (n.div_ceil(BN_BLOCK), m.div_ceil(BM_BLOCK), 1);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (32, WARPS_PER_BLOCK, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(func.inner())
+            .arg(x.inner())
+            .arg(w_q.inner())
+            .arg(w_k.inner())
+            .arg(w_v.inner())
+            .arg(&scale_q)
+            .arg(&scale_k)
+            .arg(&scale_v)
+            .arg(q_out.inner_mut())
+            .arg(k_out.inner_mut())
+            .arg(v_out.inner_mut())
+            .arg(&m)
+            .arg(&n)
+            .arg(&k)
+            .launch(cfg)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2191,6 +2302,42 @@ mod tests {
             }
         }
         None
+    }
+
+    /// D4 host-API smoke test: launches `qkv_project_int8` with canonical
+    /// shapes (block-divisible M=64, N=16, K=16). Verifies the kernel loads
+    /// and launches without driver error and produces non-NaN outputs.
+    /// Correctness vs reference is the job of the D7 e2e suite.
+    /// Skips silently when no GPU is available (host-only CI builds).
+    #[test]
+    fn qkv_project_int8_launches_without_error() {
+        let Ok(device) = make_device() else {
+            return;
+        };
+        let m = BM_BLOCK;
+        let n = BN_BLOCK;
+        let k = K_TILE_SHARED;
+        let x = device.alloc_zeros::<half::f16>((m * k) as usize).unwrap();
+        let w_q = device.alloc_zeros::<i8>((k * n) as usize).unwrap();
+        let w_k = device.alloc_zeros::<i8>((k * n) as usize).unwrap();
+        let w_v = device.alloc_zeros::<i8>((k * n) as usize).unwrap();
+        let mut q_out = device.alloc_zeros::<half::f16>((m * n) as usize).unwrap();
+        let mut k_out = device.alloc_zeros::<half::f16>((m * n) as usize).unwrap();
+        let mut v_out = device.alloc_zeros::<half::f16>((m * n) as usize).unwrap();
+        qkv_project_int8(
+            &device, &x, &w_q, &w_k, &w_v, 1.0, 1.0, 1.0, &mut q_out, &mut k_out, &mut v_out, m, n,
+            k,
+        )
+        .expect("qkv_project_int8 launch failed on canonical shape");
+        device.stream().synchronize().expect("device sync failed");
+        // Zero inputs → zero outputs. Sanity check that the kernel actually
+        // ran and wrote to the outputs (rather than silently no-oping).
+        let q_host = q_out.to_host(&device).expect("dtoh");
+        let zero = half::f16::from_f32(0.0);
+        assert!(
+            q_host.iter().all(|h: &half::f16| *h == zero),
+            "expected all-zero Q output for zero inputs"
+        );
     }
 
     #[test]

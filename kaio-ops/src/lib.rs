@@ -98,6 +98,14 @@ pub use matmul_int8_kernel::matmul_int8;
 // for external GPTQ/GGUF model formats. Requires SM 8.0+ and K%128==0.
 pub use matmul_int4_kernel::matmul_int4;
 
+// Sprint 7.3 MVS — fused tri-output INT8 QKV projection (W8A16: f16
+// activations × i8 weights, scalar per-projection scales). Single launch
+// produces three GpuBuffer<f16> outputs ready for attention_tc. Saves
+// 2× global activation reads vs three matmul_int8 calls. Per-block tile:
+// 64×16 (Rollback #1 from D3.4 register-pressure trigger). 7-barrier
+// Design-S K-tile cadence. Requires SM 8.0+ and K%16==0, N%2==0.
+pub use qkv_project_int8_kernel::qkv_project_int8;
+
 // TEMP: Sprint 6.6 final `attention_tc` + `attention_tc_causal` —
 // fused TC scaled dot-product attention. #[doc(hidden)] pub use
 // until Phase 7 lifts the divisibility + seq_k constraints and adds
