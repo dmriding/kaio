@@ -77,7 +77,7 @@ fn cpu_reference_matmul_int4(
                 let nibble_idx = kk % 8;
                 let nibble_bits = (w_packed[word_idx] >> (4 * nibble_idx)) & 0xF;
                 // Sign-extend from 4 bits via (x << 28) >> 28 arith shift.
-                let signed_i32 = (((nibble_bits << 28) as i32) >> 28) as i32;
+                let signed_i32 = ((nibble_bits << 28) as i32) >> 28;
                 // Reproduce PTX cvt chain: s32 → f32 → f16 → mul by f16 scale.
                 let f32_val = signed_i32 as f32;
                 let f16_raw = f16::from_f32(f32_val);
@@ -133,13 +133,7 @@ fn round_trip(
     let got: Vec<f32> = c_gpu.to_host(&device)?;
 
     let want = cpu_reference_matmul_int4(
-        a,
-        &packed,
-        scales,
-        m as usize,
-        n as usize,
-        k as usize,
-        GROUP_SIZE,
+        a, &packed, scales, m as usize, n as usize, k as usize, GROUP_SIZE,
     );
     Ok((got, want))
 }
@@ -190,7 +184,7 @@ fn deterministic_s4_weights(k: u32, n: u32, seed: u64) -> Vec<i8> {
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         // Map to [-8, 7]
-        ((state >> 60) as i8).wrapping_sub(8).max(-8).min(7)
+        ((state >> 60) as i8).wrapping_sub(8).clamp(-8, 7)
     };
     (0..(k * n) as usize).map(|_| next()).collect()
 }
@@ -218,10 +212,7 @@ fn matmul_int4_smallest_16_8_128_all_ones_weights() {
     let (got, want) = round_trip(m, n, k, &w, &a, &scales).expect("round_trip");
     // Each output cell should be approximately k (128) × 1 × 1 = 128.
     for v in &got {
-        assert!(
-            (v - 128.0).abs() < 1.0,
-            "expected ≈128, got {v}"
-        );
+        assert!((v - 128.0).abs() < 1.0, "expected ≈128, got {v}");
     }
     assert_close(&got, &want, 1e-3, "smallest_16_8_128");
 }

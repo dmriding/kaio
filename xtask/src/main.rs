@@ -65,6 +65,11 @@ const SHOWCASES: &[(&str, &str, &str)] = &[
         "int8_matmul",
         "Symmetric INT8 dequantize-matmul (tensor-core W8A8)",
     ),
+    (
+        "int4matmul",
+        "int4_matmul",
+        "Symmetric INT4 GPTQ-style dequantize-matmul (tensor-core W4A16)",
+    ),
 ];
 
 fn main() -> ExitCode {
@@ -95,7 +100,7 @@ fn print_help() {
 
 Usage:
   cargo xtask showcase [<name>|--list]   Run one or all showcase examples.
-  cargo xtask bench [<name>|--list]      Run one or all benchmarks (matmul_tc_bench, matmul_int8_bench).
+  cargo xtask bench [<name>|--list]      Run one or all benchmarks (matmul_tc_bench, matmul_int8_bench, matmul_int4_bench).
   cargo xtask all                        Run showcase + bench in sequence.
   cargo xtask --help                     Show this message.
 
@@ -231,6 +236,11 @@ const BENCHES: &[(&str, &str, &str)] = &[
         "=== matmul_int8 benchmark (KAIO i8 × i8 → f32 vs cuBLAS sgemm, rough reference) ===",
         "matmul_int8_bench",
         "W8A8 symmetric INT8 matmul; cuBLAS sgemm column is apples-to-oranges",
+    ),
+    (
+        "=== matmul_int4 benchmark (KAIO s4 × f16 → f32 vs cuBLAS sgemm, rough reference) ===",
+        "matmul_int4_bench",
+        "W4A16 GPTQ-style INT4 matmul; cuBLAS sgemm column is apples-to-oranges",
     ),
 ];
 
