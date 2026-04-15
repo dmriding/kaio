@@ -4,12 +4,122 @@
 //! Thread/block index functions map to `special::` helpers. Math functions
 //! map to single PTX instructions or multi-instruction synthesis.
 
-use proc_macro2::{Ident, Span, TokenStream};
+use proc_macro2::{Ident, Literal, Span, TokenStream};
 use quote::quote;
 
 use crate::kernel_ir::KernelType;
 
 use super::LoweringContext;
+
+// --- Warp-tree reduction constants -------------------------------------
+//
+// These sit at module scope as **documentation anchors** for the magic
+// numbers embedded in the `emit_warp_tree_reduce` `quote!` template. The
+// template hardcodes `c: 31, mask: 0xFFFFFFFF_u32` inline to preserve
+// byte-identical TokenStream output vs the pre-refactor hand-written
+// code (snapshot canary). The constants below document the *why* of
+// those numbers — any future sprint that loosens the byte-identity
+// requirement can `quote!`-interpolate them in place of the literals.
+
+/// Warp size on every NVIDIA GPU this codebase targets (SM 7.0+).
+/// Hardcoded because PTX shfl.sync operates on a 32-thread warp —
+/// changing this would be a fundamental ISA change, not a parameter.
+#[allow(dead_code)] // documentation constant; value embedded in quote! template
+const WARP_SIZE: u32 = 32;
+
+/// Halving butterfly deltas for a 5-round full-warp tree reduction.
+/// Each round halves the span: 16 (split warp into halves) → 8 → 4 → 2 → 1.
+/// Used for both `shfl.sync.down` (reduce-to-lane-0) and `shfl.sync.bfly`
+/// (reduce-to-all-lanes) patterns.
+const WARP_TREE_DELTAS: [u32; 5] = [16, 8, 4, 2, 1];
+
+/// PTX ISA 9.7.8 lane-clamp encoding for warp-wide shuffles: `c[4:0]` =
+/// `WARP_SIZE - 1` = 31. Used in the `c` operand of every `shfl.sync.*`
+/// emitted by the warp-tree helper.
+#[allow(dead_code)] // documentation constant; value embedded in quote! template
+const WARP_LANE_CLAMP: u32 = WARP_SIZE - 1;
+
+/// Full-warp participation mask for `shfl.sync.*` — all 32 lanes active.
+#[allow(dead_code)] // documentation constant; value embedded in quote! template
+const WARP_FULL_MASK: u32 = 0xFFFFFFFF;
+
+/// Choice of `shfl.sync` variant for a 5-round warp-tree reduction.
+///
+/// The two variants produce the same final value but differ in where
+/// it ends up:
+/// - [`Down`](WarpTreeShuffle::Down): result is valid in **lane 0 only**.
+///   Used by `block_reduce_*` where subsequent phases write warp-leader
+///   results to shared memory and broadcast back to all threads.
+/// - [`Bfly`](WarpTreeShuffle::Bfly): result is valid in **every lane**.
+///   Used by `warp_reduce_*` where the user expects every thread in the
+///   warp to see the reduction result directly (no broadcast phase).
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // `Bfly` enters live use in D3; Down is used by block_reduce today
+enum WarpTreeShuffle {
+    Down,
+    Bfly,
+}
+
+/// Emit the token sequence for a 5-round in-place warp-tree reduction.
+///
+/// The helper does NOT allocate registers — the caller owns `acc` (the
+/// accumulator, read and written each round) and `shfl_tmp` (the
+/// shuffle destination, written each round). This hygiene rule prevents
+/// shadowed `let` bindings and keeps register-allocation order at the
+/// call site, which matters for the snapshot canary in
+/// [`crate::codegen::tests::block_reduce_sum_f32_tokens_snapshot`].
+///
+/// Parameterized by:
+/// - `shuffle`: [`WarpTreeShuffle::Down`] for `block_reduce_*` (the
+///   existing path) or [`WarpTreeShuffle::Bfly`] for `warp_reduce_*`.
+/// - `combine_op`: the `ArithOp::*` variant used to fold pairs
+///   (`ArithOp::Add` for sum, `ArithOp::Max` for max, `ArithOp::Min` for min).
+/// - `ptx_type`: the `PtxType::*` suffix for the combine op (currently
+///   always `PtxType::F32`; parameterized so a future sprint can add
+///   `PtxType::I32` or `PtxType::F16` without touching this helper).
+/// - `acc`: the accumulator register Ident (allocated by caller).
+/// - `shfl_tmp`: the shuffle-destination scratch register Ident
+///   (allocated by caller as `PtxType::U32`).
+#[allow(dead_code)] // The Bfly path is exercised starting D3 of Sprint 7.1.5
+fn emit_warp_tree_reduce(
+    shuffle: WarpTreeShuffle,
+    combine_op: TokenStream,
+    ptx_type: TokenStream,
+    acc: &Ident,
+    shfl_tmp: &Ident,
+) -> TokenStream {
+    // Emit the `delta` / `lane_mask` as unsuffixed integer literals (e.g.
+    // `16` not `16u32`) to match the pre-refactor hand-written token form
+    // exactly. `c: 31` and `mask: 0xFFFFFFFF_u32` are also hardcoded in the
+    // template to preserve byte-identical output — `WARP_LANE_CLAMP` and
+    // `WARP_FULL_MASK` above are documentation constants, not quote!
+    // interpolation sources, for that reason.
+    let rounds = WARP_TREE_DELTAS.iter().map(|&delta| {
+        let delta_lit = Literal::u32_unsuffixed(delta);
+        let shfl_tokens = match shuffle {
+            WarpTreeShuffle::Down => quote! {
+                kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
+                    dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(#delta_lit),
+                    c: 31, mask: 0xFFFFFFFF_u32,
+                }));
+            },
+            WarpTreeShuffle::Bfly => quote! {
+                kernel.push(PtxInstruction::Control(ControlOp::ShflSyncBfly {
+                    dst: #shfl_tmp, src: #acc, lane_mask: Operand::ImmU32(#delta_lit),
+                    c: 31, mask: 0xFFFFFFFF_u32,
+                }));
+            },
+        };
+        quote! {
+            #shfl_tokens
+            kernel.push(PtxInstruction::Arith(#combine_op {
+                dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
+                ty: #ptx_type,
+            }));
+        }
+    });
+    quote! { #(#rounds)* }
+}
 
 /// Lower a built-in function call.
 ///
@@ -538,6 +648,16 @@ fn lower_block_reduce(
 
     let num_warps_imm = num_warps;
 
+    // Warp-tree reduction tokens — uses shfl.sync.down so the result lands
+    // in lane 0 only (block_reduce's post-tree phases broadcast it back).
+    let warp_tree_tokens = emit_warp_tree_reduce(
+        WarpTreeShuffle::Down,
+        combine_op.clone(),
+        quote! { PtxType::F32 },
+        &acc,
+        &shfl_tmp,
+    );
+
     // Build tid computation: linear tid for 2D, raw TidX for 1D.
     // Row-major linearization: linear_tid = tidx + tidy * block_dim_x.
     let tid_tokens = if let Some(bdx) = ctx.block_size_x {
@@ -608,52 +728,11 @@ fn lower_block_reduce(
 
         let #shfl_tmp = alloc.alloc(PtxType::U32);
 
-        // 5 rounds: delta = 16, 8, 4, 2, 1
-        // Round 1: delta=16
-        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
-            dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(16),
-            c: 31, mask: 0xFFFFFFFF_u32,
-        }));
-        kernel.push(PtxInstruction::Arith(#combine_op {
-            dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
-            ty: PtxType::F32,
-        }));
-        // Round 2: delta=8
-        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
-            dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(8),
-            c: 31, mask: 0xFFFFFFFF_u32,
-        }));
-        kernel.push(PtxInstruction::Arith(#combine_op {
-            dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
-            ty: PtxType::F32,
-        }));
-        // Round 3: delta=4
-        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
-            dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(4),
-            c: 31, mask: 0xFFFFFFFF_u32,
-        }));
-        kernel.push(PtxInstruction::Arith(#combine_op {
-            dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
-            ty: PtxType::F32,
-        }));
-        // Round 4: delta=2
-        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
-            dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(2),
-            c: 31, mask: 0xFFFFFFFF_u32,
-        }));
-        kernel.push(PtxInstruction::Arith(#combine_op {
-            dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
-            ty: PtxType::F32,
-        }));
-        // Round 5: delta=1
-        kernel.push(PtxInstruction::Control(ControlOp::ShflSyncDown {
-            dst: #shfl_tmp, src: #acc, delta: Operand::ImmU32(1),
-            c: 31, mask: 0xFFFFFFFF_u32,
-        }));
-        kernel.push(PtxInstruction::Arith(#combine_op {
-            dst: #acc, lhs: Operand::Reg(#acc), rhs: Operand::Reg(#shfl_tmp),
-            ty: PtxType::F32,
-        }));
+        // 5-round warp-tree reduction with halving deltas 16, 8, 4, 2, 1.
+        // Uses shfl.sync.down — result is valid in lane 0 only; subsequent
+        // phases write per-warp leader to shared memory + cross-warp reduce
+        // + broadcast. See `emit_warp_tree_reduce` for the full body.
+        #warp_tree_tokens
 
         // --- Phase 2: Warp leaders write to shared memory ---
         let #warp_id = alloc.alloc(PtxType::U32);
