@@ -169,13 +169,28 @@ pub fn lower_builtin(
 
         // --- Reduction builtins (1D and 2D) ---
         // 2D kernels use linearized tid = tidx + tidy * block_dim_x
-        "block_reduce_sum" | "block_reduce_max" => {
-            let mode = if name == "block_reduce_sum" {
-                "sum"
-            } else {
-                "max"
+        "block_reduce_sum" | "block_reduce_max" | "block_reduce_min" => {
+            let mode = match name {
+                "block_reduce_sum" => "sum",
+                "block_reduce_max" => "max",
+                "block_reduce_min" => "min",
+                _ => unreachable!(),
             };
             lower_block_reduce(ctx, mode, arg_regs, arg_types, span)
+        }
+
+        // Warp-level reductions — reduce-to-all-lanes via butterfly shuffle.
+        // No shared memory, no bar.sync — each warp in the block gets its
+        // own independent reduction result. See `lower_warp_reduce` for
+        // the convergent-flow + whole-warp-multiple requirements.
+        "warp_reduce_sum" | "warp_reduce_max" | "warp_reduce_min" => {
+            let mode = match name {
+                "warp_reduce_sum" => "sum",
+                "warp_reduce_max" => "max",
+                "warp_reduce_min" => "min",
+                _ => unreachable!(),
+            };
+            lower_warp_reduce(ctx, mode, arg_regs, arg_types, span)
         }
 
         _ => Err(syn::Error::new(
@@ -188,7 +203,8 @@ pub fn lower_builtin(
                  grid_dim_x, grid_dim_y, grid_dim_z, \
                  sqrt, abs, min, max, exp, log, tanh, fma, \
                  bar_sync, shfl_sync_down, shfl_sync_up, shfl_sync_bfly, \
-                 block_reduce_sum, block_reduce_max"
+                 block_reduce_sum, block_reduce_max, block_reduce_min, \
+                 warp_reduce_sum, warp_reduce_max, warp_reduce_min"
             ),
         )),
     }
@@ -548,18 +564,18 @@ fn lower_tanh(
     Ok((dst, KernelType::F32, tokens))
 }
 
-/// Lower `block_reduce_sum(val)` or `block_reduce_max(val)`.
+/// Lower `block_reduce_sum(val)`, `block_reduce_max(val)`, or `block_reduce_min(val)`.
 ///
 /// Multi-instruction expansion (~35 PTX instructions) implementing a standard
 /// CUDA block-level reduction with broadcast:
-/// 1. Warp-level tree reduction (5 rounds of shfl.sync.down + add/max)
+/// 1. Warp-level tree reduction (5 rounds of shfl.sync.down + add/max/min)
 /// 2. Warp leaders write to auto-allocated shared memory
 /// 3. bar.sync
 /// 4. First warp reduces across warps
 /// 5. bar.sync + broadcast to ALL threads via shared[0]
 fn lower_block_reduce(
     ctx: &mut LoweringContext,
-    mode: &str, // "sum" or "max"
+    mode: &str, // "sum", "max", or "min"
     arg_regs: &[Ident],
     arg_types: &[KernelType],
     span: Span,
@@ -585,17 +601,22 @@ fn lower_block_reduce(
 
     let val = &arg_regs[0];
 
-    // The arithmetic op for combining values: Add for sum, Max for max
+    // The arithmetic op for combining values: Add for sum, Max for max, Min for min
     let combine_op = match mode {
         "sum" => quote! { ArithOp::Add },
         "max" => quote! { ArithOp::Max },
+        "min" => quote! { ArithOp::Min },
         _ => unreachable!(),
     };
 
-    // Identity element: 0.0 for sum, -FLT_MAX for max
+    // Identity element used to initialize inactive-warp scratch slots
+    // in the cross-warp phase. Sum uses 0.0, max uses -FLT_MAX, min uses
+    // +FLT_MAX. Raw literal to match the f32 MAX representation used
+    // elsewhere in this file; keeps the snapshot canary byte-identical.
     let identity = match mode {
         "sum" => quote! { Operand::ImmF32(0.0f32) },
         "max" => quote! { Operand::ImmF32(-3.402823e+38f32) },
+        "min" => quote! { Operand::ImmF32(3.402823e+38f32) },
         _ => unreachable!(),
     };
 
@@ -955,6 +976,114 @@ fn check_f32(ty: &KernelType, span: Span) -> syn::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Lower `warp_reduce_sum(val)`, `warp_reduce_max(val)`, or `warp_reduce_min(val)`.
+///
+/// Single-warp in-place reduction via 5-round butterfly shuffle tree
+/// (`shfl.sync.bfly` with halving `lane_mask` 16→8→4→2→1). After 5 rounds
+/// **every lane in the warp holds the full warp's reduction**, no shared
+/// memory or bar.sync required. In blocks containing multiple warps, each
+/// warp computes its own independent result — this is NOT block-wide.
+/// Use `block_reduce_*` for block-wide reductions.
+///
+/// # Compile-time guard
+///
+/// Total threads per block (X × Y for 2D) must be a multiple of 32.
+/// `shfl.sync.bfly` with `mask = 0xFFFFFFFF` has undefined behavior when
+/// any named lane is inactive at the call site. A partial warp (e.g. the
+/// 16 straggler lanes in a 48-thread block) triggers that UB even though
+/// a full warp also exists. Caught at macro-expansion time since block
+/// size is known from the `#[gpu_kernel(block_size = ...)]` attribute.
+///
+/// # Convergent control flow (documentation-only requirement)
+///
+/// This lowering CANNOT detect data-dependent branches that cause lanes
+/// to diverge at the call site. Calling `warp_reduce_*` inside an
+/// `if tid < N { ... }` where some lanes don't enter the branch is UB.
+/// The rustdoc on the public stub spells this out for users.
+fn lower_warp_reduce(
+    ctx: &mut LoweringContext,
+    mode: &str, // "sum", "max", or "min"
+    arg_regs: &[Ident],
+    arg_types: &[KernelType],
+    span: Span,
+) -> syn::Result<(Ident, KernelType, TokenStream)> {
+    if arg_regs.len() != 1 {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "warp_reduce_{mode}() expects 1 argument, got {}",
+                arg_regs.len()
+            ),
+        ));
+    }
+    check_f32(&arg_types[0], span)?;
+
+    let block_size = ctx.block_size.ok_or_else(|| {
+        syn::Error::new(
+            span,
+            "internal error: block_size not set in lowering context",
+        )
+    })?;
+
+    // Whole-warp-multiple guard. A block with partial-warp threads (total
+    // threads not a multiple of 32) causes shfl.sync.bfly UB even if at
+    // least one full warp exists — every lane named in the mask must be
+    // live at the call site. Reject at macro expansion.
+    if block_size % WARP_SIZE != 0 {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "warp_reduce_{mode}() requires block_size to contain a whole number of warps \
+                 (total threads must be a multiple of 32; found: {block_size}). \
+                 Warp reductions use warp-collective shfl.sync instructions; any partial \
+                 (incomplete) warp at the call site causes undefined behavior even if at \
+                 least one full warp exists. For 2D blocks, the PRODUCT of dimensions must \
+                 be a multiple of 32. Use block_reduce_{mode}() for smaller or non-aligned \
+                 block sizes, or adjust block_size so the product is a whole-warp multiple."
+            ),
+        ));
+    }
+
+    let val = &arg_regs[0];
+
+    let combine_op = match mode {
+        "sum" => quote! { ArithOp::Add },
+        "max" => quote! { ArithOp::Max },
+        "min" => quote! { ArithOp::Min },
+        _ => unreachable!(),
+    };
+
+    // Caller-allocated registers (AD3 hygiene: helper does not allocate).
+    let acc = ctx.fresh_reg();
+    let shfl_tmp = ctx.fresh_reg();
+
+    let warp_tree_tokens = emit_warp_tree_reduce(
+        WarpTreeShuffle::Bfly,
+        combine_op,
+        quote! { PtxType::F32 },
+        &acc,
+        &shfl_tmp,
+    );
+
+    let tokens = quote! {
+        // Copy input to accumulator (butterfly tree mutates it in place,
+        // and we need to preserve the caller's `val` register).
+        let #acc = alloc.alloc(PtxType::F32);
+        kernel.push(PtxInstruction::Mov {
+            dst: #acc,
+            src: Operand::Reg(#val),
+            ty: PtxType::F32,
+        });
+        let #shfl_tmp = alloc.alloc(PtxType::U32);
+
+        // 5-round butterfly tree. After this, every lane in the warp
+        // holds the full reduction across all 32 lanes.
+        #warp_tree_tokens
+    };
+
+    Ok((acc, KernelType::F32, tokens))
 }
 
 /// Lower `bar_sync()` — block-level barrier synchronization.

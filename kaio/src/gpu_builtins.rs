@@ -155,6 +155,76 @@ pub fn block_reduce_max(_val: f32) -> f32 {
     panic!("block_reduce_max() can only be called inside a #[gpu_kernel] function")
 }
 
+/// Compute the min of `val` across all threads in the block.
+///
+/// Result is broadcast to ALL threads — every thread gets the minimum.
+/// Uses warp shuffle + shared memory internally. Semantically matches
+/// the `block_reduce_sum` / `block_reduce_max` pattern.
+///
+/// # NaN handling
+///
+/// If any input value is NaN, the result is implementation-defined per
+/// PTX ISA (KAIO does not guarantee NaN-skipping semantics). Filter
+/// NaN inputs before calling if NaN-aware aggregation is required.
+pub fn block_reduce_min(_val: f32) -> f32 {
+    panic!("block_reduce_min() can only be called inside a #[gpu_kernel] function")
+}
+
+/// Compute the sum of `val` across the **calling thread's warp only**.
+///
+/// After the call, every lane in the warp holds the full warp sum. In
+/// blocks larger than 32 threads, each warp computes its own
+/// independent result — this is NOT a block-wide reduction. Use
+/// [`block_reduce_sum`] for block-wide semantics.
+///
+/// # Requirements
+///
+/// - **Whole-warp block sizes only.** Total threads per block (product
+///   of all dimensions) must be a multiple of 32. Enforced at
+///   macro-expansion time — a kernel declared with a partial-warp
+///   block size (e.g. 16 threads, 48 threads, `(4, 4)`) that calls
+///   `warp_reduce_*` fails to compile with a diagnostic pointing at
+///   the call.
+/// - **Convergent control flow.** Every lane in the warp must execute
+///   this call. Do NOT invoke it inside a data-dependent `if` branch
+///   that may cause lanes to diverge — that is undefined behavior
+///   (hang or wrong result), and the macro cannot detect it. To
+///   reduce a ragged boundary (e.g. only the first 17 lanes have
+///   valid data), pad inactive lanes with the identity value
+///   (`0.0` for sum, [`f32::NEG_INFINITY`] for max,
+///   [`f32::INFINITY`] for min) BEFORE the branch, then call
+///   `warp_reduce_*` in convergent code.
+///
+/// # NaN handling
+///
+/// If any input value is NaN, the result is implementation-defined per
+/// PTX ISA (KAIO does not guarantee NaN-skipping semantics for sum via
+/// `add.f32`; the f32 addition chain propagates NaN). Filter NaN
+/// inputs before calling if NaN-aware aggregation is required.
+pub fn warp_reduce_sum(_val: f32) -> f32 {
+    panic!("warp_reduce_sum() can only be called inside a #[gpu_kernel] function")
+}
+
+/// Compute the max of `val` across the **calling thread's warp only**.
+///
+/// See [`warp_reduce_sum`] for the full contract (per-warp semantics,
+/// whole-warp-multiple block-size requirement, convergent-control-flow
+/// requirement, NaN handling). Identity value for ragged-boundary
+/// padding is [`f32::NEG_INFINITY`].
+pub fn warp_reduce_max(_val: f32) -> f32 {
+    panic!("warp_reduce_max() can only be called inside a #[gpu_kernel] function")
+}
+
+/// Compute the min of `val` across the **calling thread's warp only**.
+///
+/// See [`warp_reduce_sum`] for the full contract (per-warp semantics,
+/// whole-warp-multiple block-size requirement, convergent-control-flow
+/// requirement, NaN handling). Identity value for ragged-boundary
+/// padding is [`f32::INFINITY`].
+pub fn warp_reduce_min(_val: f32) -> f32 {
+    panic!("warp_reduce_min() can only be called inside a #[gpu_kernel] function")
+}
+
 /// Declare a shared memory buffer inside a `#[gpu_kernel]` function.
 ///
 /// ```ignore
