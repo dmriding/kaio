@@ -1,6 +1,6 @@
 # Sprint 7.2 — INT4 dequantize-matmul (`matmul_int4`)
 
-**Status:** 🚧 In progress (D1 + D2 landed; D3 design committed, awaiting D4)
+**Status:** 🚧 In progress (D1 + D2 + D3 + D4.1 landed; D4.2 next)
 **Branch:** `phase7-rest` off `main` (shared across Phase 7 remaining
 sprints; no independent crates.io release — Phase 7 closes with an
 aggregate release after 7.4).
@@ -320,6 +320,73 @@ both options preserve correctness.
 Commit 3: `wip(phase7): D3 - shared-memory layout + group-scale broadcast design`.
 No code lands in this commit — only the design section above. D4
 executes against it.
+
+## D4 — Kernel assembly (split into D4.1 / D4.2 / D4.3)
+
+The full kernel is large enough to split into three sub-commits.
+Each sub-deliverable lands with its own emit structure tests and
+(where structural) a ptxas_verify offline gate.
+
+### D4.1 — Cooperative load helpers + `validate_dims_int4`
+
+Landed `kaio-ops/src/matmul_int4_kernel.rs`:
+
+- **Constants** for the block + warp + tile shape (BM=16, BN=8, BK=16;
+  BM_BLOCK/BN_BLOCK=64; WARP_QUAD_M/N=32; MMAS_PER_WARP_M=2,
+  MMAS_PER_WARP_N=4; WARPS_PER_BLOCK=4; THREADS_PER_BLOCK=128;
+  K_TILE_SHARED=16; GROUP_SIZE=128).
+- **Tile-size constants**: `TILE_A_BYTES=2048`, `TILE_B_BYTES=768`
+  (64 cols × 12 B padded col-stride), `TILE_SCALES_BYTES=128`.
+- **`validate_dims_int4`** — M/N/K non-zero; `group_size == GROUP_SIZE=128`;
+  `K % GROUP_SIZE == 0`; buffer-size bounds for A, b_packed, scales, C.
+  Error-path unit coverage deferred to D6 integration tests (mirrors
+  INT8's `validate_dims_int8` pattern — no unit-test harness for
+  `GpuBuffer`).
+- **`emit_mw_load_tile_a_f16_64x16`** — 128 threads × 4 `ld.global.u32`
+  per thread = 512 b32 loads = 1024 f16 = full 64×16 tile. 2 threads
+  per row × 4 b32 each covers half-row. M-edge predicated
+  `@!p bra A_SKIP_I4_TILE_LOAD_<suffix>` with caller-managed pre-zero
+  for OOB rows.
+- **`emit_mw_load_tile_b_packed_2x64`** — 128 threads × 1 `ld.global.u32`
+  per thread = 128 packed u32 = 2 words × 64 cols. `col_in_tile =
+  flat_tid / 2`, `word_idx = flat_tid % 2`. Shared address uses 12 B
+  col-stride (4 B pad per col for bank-conflict relief). N-edge
+  predicated.
+- **`emit_cooperative_load_group_scales_64`** — lanes 0..31 active
+  (each loads a f16-pair b32), lanes 32..127 idle via active-skip
+  label. 32 b32 = 64 f16 = full `[1, 64]` scales tile. N-edge
+  predicated.
+
+**Scales layout switch (D4.1 fold on the D3 design):** the plan
+and D3 design said `scales[N, K/group_size]` row-major. For the
+cooperative 64-f16 contiguous load at fixed group g, `[num_groups, N]`
+row-major (so `scales[g, block_col..block_col+64]` is contiguous)
+gives a simpler, faster loader — 32 lanes × one b32 broadcast-free
+load. **Locking at `scales: [num_groups, N]` row-major**; D5 public
+API + rustdoc + D7 showcase's CPU packer align on this.
+
+### D4.1 emit structure canaries
+
+- `coop_loads_emit_ld_st_pairs_match_per_helper_design` — asserts
+  exactly 6 `ld.global.u32` and 6 `st.shared.u32` in the smoke kernel
+  (A: 4 per thread, B: 1 per thread, scales: 1 per active lane —
+  unrolled linearly).
+- `coop_loads_emit_three_bounds_gated_skip_regions` — asserts the
+  three labeled skip-region targets (`A_SKIP_I4_TILE_LOAD_smoke:`,
+  `B_SKIP_I4_TILE_LOAD_smoke:`, `SCALES_SKIP_I4_smoke:`) are present.
+- `ptxas_verify_matmul_int4_coop_loads` (`#[ignore]`): **PASSED sm_80**.
+  Smoke kernel (all 3 loaders + bar.sync + ret) assembles cleanly.
+
+### Quality gates (D4.1 checkpoint)
+
+- `cargo fmt --all --check` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo test --workspace --lib` ✓ (158 kaio-core, 138 kaio-macros, 34 kaio, 2 kaio-ops lib — no regressions; 5 new D4.1 emit tests green)
+- `cargo test -- --ignored matmul_int4_kernel::tests::ptxas_verify_matmul_int4_coop_loads` ✓ PASSED sm_80
+
+### D4.1 commit
+
+Commit 4: `wip(phase7): D4.1 - validate_dims_int4 + cooperative load helpers for A, B-packed, scales`.
 
 ## Architectural decisions
 
