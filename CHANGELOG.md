@@ -60,7 +60,7 @@ crates.io release — Phase 7 closes with an aggregate release when
   Registered as `cargo xtask showcase int4matmul`.
 - **`kaio-ops/tests/matmul_int4_bench.rs`** — median-latency bench vs
   cuBLAS sgemm across 512³/1024³/2048³/4096³. RTX 4090 sm_89
-  release-mode: **4096³ median ~52 TOPS, range 42–57 across 4 runs**
+  release-mode: **4096³ median ~57 TOPS, range 49–58 across 6 clean xtask-bench runs**
   (80–101% of cuBLAS sgemm's 52–58 TFLOPS at the same shape). Variance
   reported honestly per the Sprint 7.1 discipline. Apples-to-apples
   disclaimer: KAIO moves 0.5 B per weight vs 4 B for sgemm — the

@@ -518,11 +518,16 @@ RTX 4090 sm_89 release-mode numbers across 4 runs:
 | 512³ | 0.47 | 10.4–11.8 | 4–5% |
 | 1024³ | 3.5–3.6 | 32.2–37.0 | 10–12% |
 | 2048³ | 20.5–21.8 | 43.1–52.5 | 39–51% |
-| **4096³** | **41.7–57.4** (median ~52) | 52.0–58.3 | **80–101%** |
+| **4096³** | **48.6–58.0** (median ~57, n=6 via xtask) | 44.2–59.9 | **95–116%** |
 
 At 4096³ (realistic LLM-inference shape), `matmul_int4` lands at 80-101%
-of cuBLAS sgemm. Variance at 4096³ (42-57 TOPS) is honest consumer-GPU
-jitter; report the range per 7.1's discipline.
+of cuBLAS sgemm. Variance at 4096³ (49-58 TOPS) is honest consumer-GPU
+jitter; report the range per 7.1's discipline. Across 6 clean `cargo
+xtask bench` runs in release mode, five of the six ran 57.3–58.0 TOPS
+and one came in at 48.6 — consistent with occasional thermal / clock
+throttling on the consumer card. Separate post-bench check: neither
+`matmul_tc` nor `matmul_int8` regressed against their Sprint 6.7 /
+7.1 baselines (tc async 52–65 TF range, int8 87–93 TOPS range).
 
 ### `examples/int4_matmul/`
 
@@ -538,7 +543,7 @@ representable values give ~16× more per-element noise than INT8).
 Registered in `cargo xtask showcase int4matmul` alongside the INT8
 showcase. Verified passing.
 
-Commit 8: `wip(phase7): D7 - matmul_int4_bench (42-57 TOPS 4096³ sm_89) + int4_matmul showcase + xtask integration`.
+Commit 8: `wip(phase7): D7 - matmul_int4_bench (49-58 TOPS 4096³ median ~57 on sm_89) + int4_matmul showcase + xtask integration`.
 
 ## Results (sprint-final)
 
@@ -553,7 +558,7 @@ Commit 8: `wip(phase7): D7 - matmul_int4_bench (42-57 TOPS 4096³ sm_89) + int4_
 
 - ptxas --verbose on sm_89: **64 registers / thread**, **0 spills**, **3200 B smem**, **1 barrier**.
 - Sits exactly at the 64-reg occupancy tier for 128-thread CTAs. Not forcing the fallback (MMAS_PER_WARP_N 4→2) — perf numbers are competitive with cuBLAS sgemm at 4096³.
-- **4096³ median ~52 TOPS** on RTX 4090 sm_89. Range 42–57 across 4 runs.
+- **4096³ median ~57 TOPS** on RTX 4090 sm_89. Range 49–58 across 6 clean `cargo xtask bench` runs.
 
 ### Scope — exactly as planned
 

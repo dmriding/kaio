@@ -150,7 +150,7 @@ perf win immediately; training users wait for backward.
 | 7.0.5 | Pre-7.1 ergonomics fast-track | Debug-build performance note (A2), proc-macro error-span audit + 3 fixes (A4), consolidated `docs/debugging.md` (B3) — v0.2.2 |
 | 7.1 | INT8 dequantize-matmul | `kaio_ops::matmul_int8` symmetric INT8 × f16 → f32, perf target TBD at sprint kickoff. **Folds in integer-arithmetic DSL support** — mixed-width `u8×u8→u16` / `i8×i8→i32` is a 7.1 prerequisite, not a separate deliverable |
 | 7.1.5 ✅ | Warp + block reductions in DSL | `warp_reduce_sum/max/min` + `block_reduce_min` as `#[gpu_kernel]` builtins; whole-warp-multiple compile-time guard; 12 new GPU tests incl. two-warp independence canary; 4 trybuild compile-fail fixtures. See [`sprint_7_1_5.md`](sprint_7_1_5.md). No release — Phase 7 aggregate. |
-| 7.2 ✅ | INT4 dequantize-matmul | `kaio_ops::matmul_int4` GPTQ-style packed 4-bit + f16 group scales (group_size=128). DEQUANT-F16 via `mma.sync.m16n8k16.f16.f16.f32`. 4096³ median ~52 TOPS, range 42–57 (80–101% of cuBLAS sgemm) on RTX 4090 sm_89; 12/12 GPU round-trip tests bit-exact incl. sign-extend canaries. See [`sprint_7_2.md`](sprint_7_2.md). |
+| 7.2 ✅ | INT4 dequantize-matmul | `kaio_ops::matmul_int4` GPTQ-style packed 4-bit + f16 group scales (group_size=128). DEQUANT-F16 via `mma.sync.m16n8k16.f16.f16.f32`. 4096³ median ~57 TOPS, range 49–58 across 6 xtask-bench runs (95–116% of cuBLAS sgemm) on RTX 4090 sm_89; 12/12 GPU round-trip tests bit-exact incl. sign-extend canaries. See [`sprint_7_2.md`](sprint_7_2.md). |
 | 7.3 | Quant + attention integration | Dequant-on-the-fly QKV projection wired into FlashAttention |
 | 7.4 | `kaio-candle` bridge crate | Forward-kernel `CustomOp` bindings for core `kaio-ops` operations |
 

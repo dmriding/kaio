@@ -278,9 +278,10 @@ and `block_reduce_min` added with a whole-warp-multiple compile-time
 guard; no independent release, ships in the Phase 7 aggregate release
 after 7.3 / 7.4; **7.2 INT4 matmul complete** on the same branch —
 `kaio_ops::matmul_int4` W4A16 GPTQ-style, `mma.sync.m16n8k16.f16.f16.f32`
-via DEQUANT-F16 chain; 4096³ median ~52 TOPS (range 42–57, 80–101%
-of cuBLAS sgemm) on RTX 4090 sm_89; 12/12 GPU round-trip tests pass
-bit-exact incl. sign-extend canaries)
+via DEQUANT-F16 chain; 4096³ median ~57 TOPS (range 49–58 across 6
+xtask-bench runs, 95–116% of cuBLAS sgemm) on RTX 4090 sm_89; 12/12
+GPU round-trip tests pass bit-exact incl. sign-extend canaries; no
+regressions in `matmul_tc` or `matmul_int8` across the same runs)
 
 **Depends on:** Phase 6 complete (v0.2.1, 2026-04-14).
 
