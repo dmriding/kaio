@@ -149,14 +149,22 @@ impl Emit for PtxInstruction {
                 // consistency and PTX validity, even where the conversion is
                 // exact (e.g., f16→f32).
                 let rounding = match (dst_ty, src_ty) {
-                    // int → float (including half): round to nearest even
+                    // int → float (including half): round to nearest even.
+                    // PTX requires `.rn` even for exact conversions like s8→f16
+                    // (ptxas rejects bare `cvt.f16.s8` with "Rounding modifier
+                    // required for instruction 'cvt'"); spec wording about
+                    // optional modifiers does not match real ptxas validation.
                     (
                         PtxType::F16 | PtxType::BF16 | PtxType::F32 | PtxType::F64,
-                        PtxType::S32 | PtxType::U32 | PtxType::S64 | PtxType::U64,
+                        PtxType::S8
+                        | PtxType::S32
+                        | PtxType::U32
+                        | PtxType::S64
+                        | PtxType::U64,
                     ) => ".rn",
                     // float (including half) → int: round toward zero (matches Rust `as`)
                     (
-                        PtxType::S32 | PtxType::U32 | PtxType::S64 | PtxType::U64,
+                        PtxType::S8 | PtxType::S32 | PtxType::U32 | PtxType::S64 | PtxType::U64,
                         PtxType::F16 | PtxType::BF16 | PtxType::F32 | PtxType::F64,
                     ) => ".rzi",
                     // float → float (any width, including half): round to nearest
