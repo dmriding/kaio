@@ -13,7 +13,7 @@
 //! [`matmul_int8`][crate::matmul_int8] (Sprint 7.1) is **W8A8** (`i8`
 //! activations × `i8` weights, native `mma.sync.m16n8k32.s8.s8.s32`).
 //! `qkv_project_int8` is **W8A16** (`f16` activations × `i8` weights,
-//! `mma.sync.m16n8k16.f16.f16.f32` after per-weight `cvt.f16.s8`).
+//! `mma.sync.m16n8k16.f16.f16.f32` after per-weight `cvt.rn.f16.s8`).
 //! The W8A16 contract lets the op drop in between f16-boundary layers
 //! of a real LLM without forcing the caller to quantize X at every
 //! attention block. Users who genuinely need W8A8 call `matmul_int8`
@@ -26,7 +26,7 @@
 //! `K_TILE_SHARED = 16`. Fragment-C layout and the store-out helper
 //! ([`emit_store_fragment_c_f32_to_f16_packed`][super::store_out::emit_store_fragment_c_f32_to_f16_packed]
 //! once wired) are shared — only fragment-B dequant differs
-//! (INT8: `cvt.f16.s8` + scalar scale; INT4: nibble-extract +
+//! (INT8: `cvt.rn.f16.s8` + scalar scale; INT4: nibble-extract +
 //! sign-extend + group-scale fold).
 //!
 //! # Tri-output design (Serial fusion, Design S)
@@ -101,7 +101,7 @@ pub(crate) const TILE_X_ROW_STRIDE_BYTES: u32 = K_TILE_SHARED * BYTES_PER_F16; /
 /// W_P_i8 tile in shared: `K_TILE_SHARED` rows × `BN_BLOCK` cols, i8 row-major.
 /// 16 × 32 × 1 = 512 B. Row-major in shared — the fragment-B dequant helper
 /// (D3.2) reads per-lane i8 values at `(k_row, n_col)` offsets and produces
-/// `cvt.f16.s8` + `MovPack` packed pairs. We pay no padding for bank-
+/// `cvt.rn.f16.s8` + `MovPack` packed pairs. We pay no padding for bank-
 /// conflict relief because the per-lane loads are 1-byte reads with fanout
 /// across lanes, not the dense-stripe pattern that causes 32-bank contention.
 #[allow(dead_code)] // wired up in D3
@@ -414,7 +414,7 @@ pub(crate) fn emit_pre_zero_shared_tiles_qkv_int8(
 /// Per-lane dequant of one `FragmentB_M16N8K16` for the INT8 W8A16 path.
 ///
 /// Sprint 7.3 D3.2. Reads 4 `s8` bytes from the shared W tile, converts
-/// each to `f16` via `cvt.f16.s8`, and `MovPack`s them into 2 `.b32`
+/// each to `f16` via `cvt.rn.f16.s8`, and `MovPack`s them into 2 `.b32`
 /// registers holding two packed f16 values each — the standard feed
 /// format for the `mma.sync.m16n8k16.f16.f16.f32` B operand. No scale
 /// is applied here; the INT8 variant folds its **scalar** per-projection
@@ -455,7 +455,7 @@ pub(crate) fn emit_pre_zero_shared_tiles_qkv_int8(
 /// 4-byte store. Design choice: keep the cooperative load simple and
 /// coalesced (one b32 per thread) and pay the per-lane fragment-B read
 /// cost in 4 byte loads. The INT8 dequant chain is already dominated by
-/// the 4 `cvt.f16.s8` and 2 `MovPack` instructions; 4 × 1-byte shared
+/// the 4 `cvt.rn.f16.s8` and 2 `MovPack` instructions; 4 × 1-byte shared
 /// loads add negligible marginal cost relative to the arithmetic.
 #[allow(dead_code)] // wired up in D3.3
 pub(crate) fn emit_fragment_b_int8_per_lane(
@@ -507,7 +507,7 @@ pub(crate) fn emit_fragment_b_int8_per_lane(
         ty: PtxType::U32,
     }));
 
-    // Load one s8 byte from shared at (k_row, col_abs) and cvt.f16.s8
+    // Load one s8 byte from shared at (k_row, col_abs) and cvt.rn.f16.s8
     // to an f16 register. Returns the f16 register holding the dequanted value.
     let load_one_s8_to_f16 =
         |alloc: &mut RegisterAllocator, kernel: &mut PtxKernel, k_row: Register| -> Register {
@@ -541,7 +541,7 @@ pub(crate) fn emit_fragment_b_int8_per_lane(
                 addr,
                 ty: PtxType::S8,
             }));
-            // cvt.f16.s8 %h, %r — sign-extend-then-convert, per ISA.
+            // cvt.rn.f16.s8 %h, %r — sign-extend-then-convert, per ISA.
             let h = alloc.alloc(PtxType::F16);
             kernel.push(PtxInstruction::Cvt {
                 dst: h,
@@ -740,6 +740,559 @@ pub(crate) fn emit_warp_quadrant_mma_int8_per_projection(
             }
         }
     }
+}
+
+/// Build the full IR module for `qkv_project_int8` targeting `sm`.
+///
+/// Sprint 7.3 D3.4 — MVS module builder. Wires the D3.1 cooperative
+/// loaders ([`emit_mw_load_tile_x_f16_64x16`] +
+/// [`emit_mw_load_tile_w_int8_16x32`]), D3.2 fragment-B dequant
+/// ([`emit_fragment_b_int8_per_lane`]), D3.3 per-projection mma sweep
+/// ([`emit_warp_quadrant_mma_int8_per_projection`]), and the D2 shared
+/// store-out helper
+/// ([`emit_store_fragment_c_f32_to_f16_packed`][crate::store_out::emit_store_fragment_c_f32_to_f16_packed])
+/// into a single PTX module producing three f16 output projections from
+/// one shared activation X.
+///
+/// # Kernel signature (in launch order)
+///
+/// `x_ptr: *const f16, w_q_ptr: *const i8, w_k_ptr: *const i8,
+///  w_v_ptr: *const i8, scale_q: f32, scale_k: f32, scale_v: f32,
+///  q_out_ptr: *mut f16, k_out_ptr: *mut f16, v_out_ptr: *mut f16,
+///  m: u32, n: u32, k: u32`.
+///
+/// # Block + grid
+///
+/// `block_dim = (32, 4, 1)` = 128 threads = 4 warps per block.
+/// `grid_dim = (n / BN_BLOCK, m / BM_BLOCK, 1)` (caller responsibility
+/// at launch).
+///
+/// # Per-K-tile barrier cadence (Design S — serial fusion)
+///
+/// 1 X-load sync + (1 W_P load sync + 1 W_P release sync) × 3 = **7
+/// barriers per K-tile**. The release sync after V cannot fold into the
+/// next K-tile's X-load sync because the X slot is being overwritten
+/// and requires all prior mma_V reads to drain.
+#[allow(dead_code)] // wired up in D4
+pub(crate) fn build_qkv_project_int8_module(sm: &str) -> kaio_core::ir::PtxModule {
+    use kaio_core::fragment::{FragmentC, alloc_c};
+    use kaio_core::instr::MadMode;
+    use kaio_core::ir::{PtxModule, PtxParam, SharedDecl};
+
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("qkv_project_int8");
+
+    // --- Kernel signature ---
+    kernel.add_param(PtxParam::pointer("x_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("w_q_ptr", PtxType::S8));
+    kernel.add_param(PtxParam::pointer("w_k_ptr", PtxType::S8));
+    kernel.add_param(PtxParam::pointer("w_v_ptr", PtxType::S8));
+    kernel.add_param(PtxParam::scalar("scale_q", PtxType::F32));
+    kernel.add_param(PtxParam::scalar("scale_k", PtxType::F32));
+    kernel.add_param(PtxParam::scalar("scale_v", PtxType::F32));
+    kernel.add_param(PtxParam::pointer("q_out_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("k_out_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("v_out_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::scalar("m", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("n", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("k", PtxType::U32));
+
+    // --- Shared decls (Design S: single W slot reused across Q/K/V) ---
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_x".to_string(),
+        align: 4,
+        size_bytes: TILE_X_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_w".to_string(),
+        align: 4,
+        size_bytes: TILE_W_BYTES,
+    });
+
+    // --- Load + cvta the 7 pointer params ---
+    let load_and_cvta = |name: &str,
+                             alloc: &mut RegisterAllocator,
+                             kernel: &mut PtxKernel|
+     -> Register {
+        let rd = alloc.alloc(PtxType::U64);
+        kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+            dst: rd,
+            param_name: name.to_string(),
+            ty: PtxType::U64,
+        }));
+        let rd_g = alloc.alloc(PtxType::U64);
+        kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+            dst: rd_g,
+            src: rd,
+        }));
+        rd_g
+    };
+    let rd_x = load_and_cvta("x_ptr", &mut alloc, &mut kernel);
+    let rd_w_q = load_and_cvta("w_q_ptr", &mut alloc, &mut kernel);
+    let rd_w_k = load_and_cvta("w_k_ptr", &mut alloc, &mut kernel);
+    let rd_w_v = load_and_cvta("w_v_ptr", &mut alloc, &mut kernel);
+    let rd_q_out = load_and_cvta("q_out_ptr", &mut alloc, &mut kernel);
+    let rd_k_out = load_and_cvta("k_out_ptr", &mut alloc, &mut kernel);
+    let rd_v_out = load_and_cvta("v_out_ptr", &mut alloc, &mut kernel);
+
+    // --- Load 3 scalar scales + 3 dim scalars ---
+    let load_scalar = |name: &str,
+                           ty: PtxType,
+                           alloc: &mut RegisterAllocator,
+                           kernel: &mut PtxKernel|
+     -> Register {
+        let r = alloc.alloc(ty);
+        kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+            dst: r,
+            param_name: name.to_string(),
+            ty,
+        }));
+        r
+    };
+    let r_scale_q = load_scalar("scale_q", PtxType::F32, &mut alloc, &mut kernel);
+    let r_scale_k = load_scalar("scale_k", PtxType::F32, &mut alloc, &mut kernel);
+    let r_scale_v = load_scalar("scale_v", PtxType::F32, &mut alloc, &mut kernel);
+    let r_m = load_scalar("m", PtxType::U32, &mut alloc, &mut kernel);
+    let r_n = load_scalar("n", PtxType::U32, &mut alloc, &mut kernel);
+    let r_k = load_scalar("k", PtxType::U32, &mut alloc, &mut kernel);
+
+    // --- Derived dim scalars ---
+    // k_bytes = K * 2  (X is f16)
+    let r_k_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_bytes,
+        lhs: Operand::Reg(r_k),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+    // n_bytes = N * 1  (W is i8)
+    let r_n_bytes = r_n;
+    // n_f16_stride = N * 2  (output row stride for f16 row-major)
+    let r_n_f16_stride = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_n_f16_stride,
+        lhs: Operand::Reg(r_n),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+
+    // --- Thread / warp / block indices ---
+    let (r_tid_x, tid_x_instr) = kaio_core::instr::special::tid_x(&mut alloc);
+    kernel.push(tid_x_instr);
+    let (r_tid_y, tid_y_instr) = kaio_core::instr::special::tid_y(&mut alloc);
+    kernel.push(tid_y_instr);
+    let (r_ntid_x, ntid_x_instr) = kaio_core::instr::special::ntid_x(&mut alloc);
+    kernel.push(ntid_x_instr);
+    // flat_tid = tid_y * blockDim.x + tid_x  (block = (32, 4, 1))
+    let r_flat_tid = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: r_flat_tid,
+        a: Operand::Reg(r_tid_y),
+        b: Operand::Reg(r_ntid_x),
+        c: Operand::Reg(r_tid_x),
+        ty: PtxType::U32,
+        mode: MadMode::Lo,
+    }));
+    // warp_id = tid_y (one warp per row of the (32,4,1) block).
+    let r_warp_id = r_tid_y;
+    let r_warp_row_quad = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_warp_row_quad,
+        lhs: Operand::Reg(r_warp_id),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    let r_warp_col_quad = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_warp_col_quad,
+        lhs: Operand::Reg(r_warp_id),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    // wq_row_idx = warp_row_quad * WARP_QUAD_M (0 or 32) — passed to mma helper as a row index.
+    let r_wq_row_idx = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_wq_row_idx,
+        lhs: Operand::Reg(r_warp_row_quad),
+        rhs: Operand::ImmU32(WARP_QUAD_M),
+        ty: PtxType::U32,
+    }));
+    // wq_col_idx = warp_col_quad * WARP_QUAD_N (0 or 16)
+    let r_wq_col_idx = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_wq_col_idx,
+        lhs: Operand::Reg(r_warp_col_quad),
+        rhs: Operand::ImmU32(WARP_QUAD_N),
+        ty: PtxType::U32,
+    }));
+
+    let (r_ctaid_x, ctaid_x_instr) = kaio_core::instr::special::ctaid_x(&mut alloc);
+    kernel.push(ctaid_x_instr);
+    let (r_ctaid_y, ctaid_y_instr) = kaio_core::instr::special::ctaid_y(&mut alloc);
+    kernel.push(ctaid_y_instr);
+    let r_block_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_block_row,
+        lhs: Operand::Reg(r_ctaid_y),
+        rhs: Operand::ImmU32(BM_BLOCK),
+        ty: PtxType::U32,
+    }));
+    let r_block_col = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_block_col,
+        lhs: Operand::Reg(r_ctaid_x),
+        rhs: Operand::ImmU32(BN_BLOCK),
+        ty: PtxType::U32,
+    }));
+
+    // --- Shared base regs ---
+    let r_tile_x = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_x,
+        src: Operand::SharedAddr("tile_x".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_tile_w = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_w,
+        src: Operand::SharedAddr("tile_w".to_string()),
+        ty: PtxType::U32,
+    });
+
+    // --- Block-level global origins ---
+    // x_block_base = rd_x + block_row * k_bytes
+    let rd_x_row_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_x_row_off,
+        lhs: Operand::Reg(r_block_row),
+        rhs: Operand::Reg(r_k_bytes),
+        src_ty: PtxType::U32,
+    }));
+    let rd_x_block_base = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_x_block_base,
+        lhs: Operand::Reg(rd_x),
+        rhs: Operand::Reg(rd_x_row_off),
+        ty: PtxType::U64,
+    }));
+
+    // w_P_block_base = rd_w_P + block_col  (1 byte per i8, direct widening)
+    let rd_block_col_64 = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_block_col_64,
+        src: r_block_col,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+    let add_u64 =
+        |alloc: &mut RegisterAllocator, kernel: &mut PtxKernel, base: Register, off: Register| {
+            let r = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: r,
+                lhs: Operand::Reg(base),
+                rhs: Operand::Reg(off),
+                ty: PtxType::U64,
+            }));
+            r
+        };
+    let rd_w_q_block_base = add_u64(&mut alloc, &mut kernel, rd_w_q, rd_block_col_64);
+    let rd_w_k_block_base = add_u64(&mut alloc, &mut kernel, rd_w_k, rd_block_col_64);
+    let rd_w_v_block_base = add_u64(&mut alloc, &mut kernel, rd_w_v, rd_block_col_64);
+
+    // --- Allocate 3 frag_c grids (one per projection), zero-init f32 ---
+    // 3 projections × 4 sub-tiles × 4 f32 regs = 48 f32 regs per lane (the
+    // dominant register pressure measured at D2.5 — 32-40 regs/thread,
+    // 24-32 headroom under the 64-reg cliff).
+    let alloc_grid =
+        |a: &mut RegisterAllocator| -> [[FragmentC; MMAS_PER_WARP_N as usize];
+            MMAS_PER_WARP_M as usize] {
+            core::array::from_fn(|_| core::array::from_fn(|_| alloc_c(a)))
+        };
+    let mut frag_c_q = alloc_grid(&mut alloc);
+    let mut frag_c_k = alloc_grid(&mut alloc);
+    let mut frag_c_v = alloc_grid(&mut alloc);
+    for grid in [&frag_c_q, &frag_c_k, &frag_c_v] {
+        for row in grid {
+            for f in row {
+                for r in &f.regs {
+                    kernel.push(PtxInstruction::Mov {
+                        dst: *r,
+                        src: Operand::ImmF32(0.0),
+                        ty: PtxType::F32,
+                    });
+                }
+            }
+        }
+    }
+
+    // --- Pre-zero shared tiles + bar.sync ---
+    emit_pre_zero_shared_tiles_qkv_int8(&mut alloc, &mut kernel, r_tile_x, r_tile_w, r_flat_tid);
+
+    // --- K-loop ---
+    let r_num_k_tiles = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_num_k_tiles,
+        lhs: Operand::Reg(r_k),
+        rhs: Operand::ImmU32(K_TILE_SHARED),
+        ty: PtxType::U32,
+    }));
+    let r_k_tile = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_k_tile,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+
+    kernel.push(PtxInstruction::Label("K_LOOP_QKV_INT8".to_string()));
+
+    // X tile global source = x_block_base + k_tile * K_TILE_SHARED * BYTES_PER_F16
+    let r_k_tile_x_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_tile_x_off,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(K_TILE_SHARED * BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+    let rd_k_tile_x_off64 = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_k_tile_x_off64,
+        src: r_k_tile_x_off,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+    let rd_x_tile_src = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_x_tile_src,
+        lhs: Operand::Reg(rd_x_block_base),
+        rhs: Operand::Reg(rd_k_tile_x_off64),
+        ty: PtxType::U64,
+    }));
+
+    // W_P tile global source = w_P_block_base + k_tile * K_TILE_SHARED * N
+    let r_k_tile_rows = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_tile_rows,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(K_TILE_SHARED),
+        ty: PtxType::U32,
+    }));
+    let rd_w_k_row_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_w_k_row_off,
+        lhs: Operand::Reg(r_k_tile_rows),
+        rhs: Operand::Reg(r_n_bytes),
+        src_ty: PtxType::U32,
+    }));
+    let rd_w_q_tile_src = add_u64(&mut alloc, &mut kernel, rd_w_q_block_base, rd_w_k_row_off);
+    let rd_w_k_tile_src = add_u64(&mut alloc, &mut kernel, rd_w_k_block_base, rd_w_k_row_off);
+    let rd_w_v_tile_src = add_u64(&mut alloc, &mut kernel, rd_w_v_block_base, rd_w_k_row_off);
+
+    // X-load (once per K-tile, shared across all 3 projections).
+    emit_mw_load_tile_x_f16_64x16(
+        &mut alloc,
+        &mut kernel,
+        rd_x_tile_src,
+        r_tile_x,
+        r_flat_tid,
+        r_block_row,
+        r_m,
+        r_k_bytes,
+        "QKV",
+    );
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+
+    // Per-projection: load W_P → bar.sync → mma → bar.sync. 3 × 2 = 6 W barriers
+    // + 1 X barrier = 7 barriers per K-tile (Design S).
+    for (w_tile_src, label, frag_c) in [
+        (rd_w_q_tile_src, "Q", &mut frag_c_q),
+        (rd_w_k_tile_src, "K", &mut frag_c_k),
+        (rd_w_v_tile_src, "V", &mut frag_c_v),
+    ] {
+        emit_mw_load_tile_w_int8_16x32(
+            &mut alloc,
+            &mut kernel,
+            w_tile_src,
+            r_tile_w,
+            r_flat_tid,
+            r_block_col,
+            r_n,
+            r_n_bytes,
+            label,
+        );
+        kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+        emit_warp_quadrant_mma_int8_per_projection(
+            &mut alloc,
+            &mut kernel,
+            r_tile_x,
+            r_tile_w,
+            r_wq_row_idx,
+            r_wq_col_idx,
+            r_tid_x,
+            frag_c,
+        );
+        kernel.push(PtxInstruction::Control(ControlOp::BarSync { barrier_id: 0 }));
+    }
+
+    // k_tile += 1; if k_tile < num_k_tiles, jump back.
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_k_tile,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_loop = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_loop,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::Reg(r_num_k_tiles),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_loop,
+        target: "K_LOOP_QKV_INT8".to_string(),
+        negate: false,
+    }));
+
+    // --- Store-out epilogue ---
+    // warp_block_row = block_row + r_wq_row_idx
+    let r_warp_block_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_warp_block_row,
+        lhs: Operand::Reg(r_block_row),
+        rhs: Operand::Reg(r_wq_row_idx),
+        ty: PtxType::U32,
+    }));
+    // warp_block_col = block_col + r_wq_col_idx
+    let r_warp_block_col = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_warp_block_col,
+        lhs: Operand::Reg(r_block_col),
+        rhs: Operand::Reg(r_wq_col_idx),
+        ty: PtxType::U32,
+    }));
+    // warp_row_off (u64) = warp_block_row * n_f16_stride
+    let rd_warp_row_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_warp_row_off,
+        lhs: Operand::Reg(r_warp_block_row),
+        rhs: Operand::Reg(r_n_f16_stride),
+        src_ty: PtxType::U32,
+    }));
+    // warp_col_off (u64) = warp_block_col * 2
+    let r_warp_col_off_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_warp_col_off_bytes,
+        lhs: Operand::Reg(r_warp_block_col),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+    let rd_warp_col_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_warp_col_off,
+        src: r_warp_col_off_bytes,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+
+    // Per-projection warp base = rd_P_out + warp_row_off + warp_col_off (3 chains).
+    let make_warp_base = |alloc: &mut RegisterAllocator,
+                              kernel: &mut PtxKernel,
+                              p_g: Register|
+     -> Register {
+        let pre = alloc.alloc(PtxType::U64);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: pre,
+            lhs: Operand::Reg(p_g),
+            rhs: Operand::Reg(rd_warp_row_off),
+            ty: PtxType::U64,
+        }));
+        let r = alloc.alloc(PtxType::U64);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: r,
+            lhs: Operand::Reg(pre),
+            rhs: Operand::Reg(rd_warp_col_off),
+            ty: PtxType::U64,
+        }));
+        r
+    };
+    let rd_q_warp_base = make_warp_base(&mut alloc, &mut kernel, rd_q_out);
+    let rd_k_warp_base = make_warp_base(&mut alloc, &mut kernel, rd_k_out);
+    let rd_v_warp_base = make_warp_base(&mut alloc, &mut kernel, rd_v_out);
+
+    // r_16_rows_bytes = BM * n_f16_stride (precomputed for m_stripe=1 sub-tiles).
+    let r_16_rows_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_16_rows_bytes,
+        lhs: Operand::Reg(r_n_f16_stride),
+        rhs: Operand::ImmU32(BM),
+        ty: PtxType::U32,
+    }));
+
+    // 4 sub-tiles × 3 projections = 12 store-out helper calls. Each call emits
+    // 2 packed b32 stores (top + r+8 row), 4 cvt.rn.f16.f32, 2 mov.b32 packs,
+    // and (with scale=Some) 4 mul.f32. Totals: 24 st.global.u32, 48 cvt, 24 packs,
+    // 48 mul.f32 across the full epilogue.
+    let projections = [
+        (rd_q_warp_base, r_scale_q, &frag_c_q),
+        (rd_k_warp_base, r_scale_k, &frag_c_k),
+        (rd_v_warp_base, r_scale_v, &frag_c_v),
+    ];
+    for m_stripe in 0..MMAS_PER_WARP_M {
+        for n_stripe in 0..MMAS_PER_WARP_N {
+            // sub_off_bytes = m_stripe * (BM * n_f16_stride) + n_stripe * BN * 2
+            let sub_off_u32 = if m_stripe == 0 {
+                let r = alloc.alloc(PtxType::U32);
+                kernel.push(PtxInstruction::Mov {
+                    dst: r,
+                    src: Operand::ImmU32(n_stripe * BN * BYTES_PER_F16),
+                    ty: PtxType::U32,
+                });
+                r
+            } else {
+                let r = alloc.alloc(PtxType::U32);
+                kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                    dst: r,
+                    lhs: Operand::Reg(r_16_rows_bytes),
+                    rhs: Operand::ImmU32(n_stripe * BN * BYTES_PER_F16),
+                    ty: PtxType::U32,
+                }));
+                r
+            };
+            let rd_sub_off = alloc.alloc(PtxType::U64);
+            kernel.push(PtxInstruction::Cvt {
+                dst: rd_sub_off,
+                src: sub_off_u32,
+                dst_ty: PtxType::U64,
+                src_ty: PtxType::U32,
+            });
+            for (warp_base, scale, grid) in &projections {
+                let rd_subtile_base = alloc.alloc(PtxType::U64);
+                kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                    dst: rd_subtile_base,
+                    lhs: Operand::Reg(*warp_base),
+                    rhs: Operand::Reg(rd_sub_off),
+                    ty: PtxType::U64,
+                }));
+                crate::store_out::emit_store_fragment_c_f32_to_f16_packed(
+                    &mut alloc,
+                    &mut kernel,
+                    &grid[m_stripe as usize][n_stripe as usize].regs,
+                    rd_subtile_base,
+                    r_n_f16_stride,
+                    r_tid_x,
+                    Some(*scale),
+                );
+            }
+        }
+    }
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new(sm);
+    module.add_kernel(kernel);
+    module
 }
 
 /// Validate shape + alignment preconditions for `qkv_project_int8`.
@@ -1091,7 +1644,7 @@ mod tests {
 
     #[test]
     fn frag_b_int8_emits_four_cvt_f16_s8_and_two_mov_b32_packs() {
-        // Per-lane chain: 4 × ld.shared.s8 → 4 × cvt.f16.s8 → 2 × mov.b32 pack.
+        // Per-lane chain: 4 × ld.shared.s8 → 4 × cvt.rn.f16.s8 → 2 × mov.b32 pack.
         // Plus address math: 4 × (mul row_stride) + 4 × (add col_abs) + 4 × (add base).
         let (mut alloc, mut kernel) = fresh_kernel();
         let tile_w = alloc.alloc(PtxType::U32);
@@ -1105,9 +1658,9 @@ mod tests {
             "expected 4 ld.shared.s8 per lane (2*tig, +1, +8, +9); got:\n{ptx}"
         );
         assert_eq!(
-            ptx.matches("cvt.f16.s8").count(),
+            ptx.matches("cvt.rn.f16.s8").count(),
             4,
-            "expected 4 cvt.f16.s8 per lane (one per loaded byte); got:\n{ptx}"
+            "expected 4 cvt.rn.f16.s8 per lane (one per loaded byte); got:\n{ptx}"
         );
         assert_eq!(
             ptx.matches("mov.b32").count(),
@@ -1164,7 +1717,7 @@ mod tests {
         // MMAS_PER_WARP_M × MMAS_PER_WARP_N = 2×2 = 4 mma.sync instructions
         // per per-projection call. Fragment B is computed once per n-stripe
         // (2 n-stripes) and reused across the 2 m-stripes, so 2 dequant
-        // chains per call → 2 × 4 = 8 cvt.f16.s8 total (vs 4 × 4 = 16 if
+        // chains per call → 2 × 4 = 8 cvt.rn.f16.s8 total (vs 4 × 4 = 16 if
         // we recomputed B per m-stripe).
         let (mut alloc, mut kernel) = fresh_kernel();
         let tile_x = alloc.alloc(PtxType::U32);
@@ -1190,9 +1743,9 @@ mod tests {
             "expected 4 mma.sync per warp-quadrant projection (2×2); got:\n{ptx}"
         );
         assert_eq!(
-            ptx.matches("cvt.f16.s8").count(),
+            ptx.matches("cvt.rn.f16.s8").count(),
             8,
-            "expected 8 cvt.f16.s8 (2 n-stripes × 4 per dequant); got:\n{ptx}"
+            "expected 8 cvt.rn.f16.s8 (2 n-stripes × 4 per dequant); got:\n{ptx}"
         );
         assert_eq!(
             ptx.matches("ld.shared.s8").count(),
@@ -1324,6 +1877,254 @@ mod tests {
             ptx.contains(", 32;"),
             "expected row stride 32 in shared address math; got:\n{ptx}"
         );
+    }
+
+    // --- D3.4 full module tests --------------------------------------
+
+    fn emit_module_to_string(module: &kaio_core::ir::PtxModule) -> String {
+        let mut w = PtxWriter::new();
+        module.emit(&mut w).unwrap();
+        w.finish()
+    }
+
+    #[test]
+    fn build_qkv_project_int8_module_structure() {
+        let module = build_qkv_project_int8_module("sm_89");
+        let ptx = emit_module_to_string(&module);
+
+        // Entry name + 13 params + 2 shared decls.
+        assert!(ptx.contains(".visible .entry qkv_project_int8("));
+        assert!(ptx.contains(".shared .align 4 .b8 tile_x[2048]"));
+        assert!(ptx.contains(".shared .align 4 .b8 tile_w[512]"));
+
+        // K-loop label + branch.
+        assert!(ptx.contains("K_LOOP_QKV_INT8:"));
+        assert!(ptx.contains("bra K_LOOP_QKV_INT8"));
+
+        // 12 mma.sync per K-tile (4 sub-tiles × 3 projections), all with the
+        // unified m16n8k16.f16.f16.f32 mnemonic (no INT8 mma here — INT8 lives
+        // inside the dequant chain, the mma feed is f16).
+        assert!(ptx.contains("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"));
+        let mma_count = ptx.matches("mma.sync.aligned.m16n8k16").count();
+        assert_eq!(
+            mma_count, 12,
+            "expected 12 mma.sync (4 sub-tiles × 3 projections); got {mma_count}"
+        );
+
+        // 12 store-out helper calls × 2 packed stores per call = 24 st.global.u32.
+        let st_count = ptx.matches("st.global.u32").count();
+        assert_eq!(
+            st_count, 24,
+            "expected 24 packed-f16 stores (12 sub-tiles × 2 row-pair stores); got {st_count}"
+        );
+        // 12 helper calls × 4 cvt.rn.f16.f32 per call = 48 narrows.
+        let cvt_count = ptx.matches("cvt.rn.f16.f32").count();
+        assert_eq!(
+            cvt_count, 48,
+            "expected 48 cvt.rn.f16.f32 (12 sub-tiles × 4 frag_c regs); got {cvt_count}"
+        );
+        // 12 helper calls × 4 mul.f32 (scale fold per frag_c reg, scale=Some) = 48.
+        let mul_count = ptx.matches("mul.f32").count();
+        assert_eq!(
+            mul_count, 48,
+            "expected 48 mul.f32 from scale=Some across 3 projections; got {mul_count}"
+        );
+    }
+
+    #[test]
+    fn build_qkv_project_int8_module_emits_seven_barriers_per_k_tile() {
+        // Design S barrier cadence: 1 X-load sync + 2 syncs per projection × 3 = 7.
+        // Plus one bar.sync from the pre-zero epoch (outside the K-loop).
+        // Total static bar.sync count in the emitted module = 1 (pre-zero) + 7
+        // (one K-loop iteration) = 8. We check both the 7-per-K-tile cadence
+        // (via the count) and that the pre-zero barrier is present.
+        let module = build_qkv_project_int8_module("sm_89");
+        let ptx = emit_module_to_string(&module);
+        let bar_count = ptx.matches("bar.sync").count();
+        assert_eq!(
+            bar_count, 8,
+            "expected 8 bar.sync (1 pre-zero + 7 per K-tile, Design S cadence); got {bar_count}"
+        );
+    }
+
+    #[test]
+    fn build_qkv_project_int8_module_declares_requested_sm() {
+        let ptx_70 = emit_module_to_string(&build_qkv_project_int8_module("sm_70"));
+        assert!(ptx_70.contains(".target sm_70"));
+        let ptx_89 = emit_module_to_string(&build_qkv_project_int8_module("sm_89"));
+        assert!(ptx_89.contains(".target sm_89"));
+    }
+
+    #[test]
+    fn build_qkv_project_int8_module_validates_at_sm_80_and_above() {
+        for sm in ["sm_80", "sm_89", "sm_90"] {
+            let module = build_qkv_project_int8_module(sm);
+            module
+                .validate()
+                .unwrap_or_else(|e| panic!("{sm} should validate; got {e}"));
+        }
+    }
+
+    #[test]
+    fn build_qkv_project_int8_module_rejects_sm_70_via_validate() {
+        use kaio_core::ir::ValidationError;
+        let module = build_qkv_project_int8_module("sm_70");
+        let err = module.validate().unwrap_err();
+        match err {
+            ValidationError::SmTooLow {
+                required,
+                actual,
+                feature,
+            } => {
+                assert_eq!(required, 80);
+                assert_eq!(actual, 70);
+                assert!(feature.contains("mma.sync.m16n8k16"));
+            }
+        }
+    }
+
+    #[test]
+    fn build_qkv_project_int8_module_emits_48_distinct_mma_destination_regs() {
+        // Disjoint-register canary across the 3 frag_c grids: each of the 12
+        // mma.sync instructions has a 4-register destination set; all 48
+        // destination register IDs must be distinct (= the grids do not alias).
+        // This catches the class of tri-output bugs where a buggy alloc_grid
+        // pattern would reuse fragment-C register IDs across projections,
+        // silently merging accumulators.
+        use std::collections::HashSet;
+        let module = build_qkv_project_int8_module("sm_89");
+        let ptx = emit_module_to_string(&module);
+
+        let mut all_dst_regs: Vec<u32> = Vec::new();
+        for line in ptx.lines() {
+            let line = line.trim();
+            // Match `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%fA, %fB, %fC, %fD}, ...`
+            if !line.contains("mma.sync.aligned.m16n8k16") {
+                continue;
+            }
+            // Destination set is between the first '{' and first '}'.
+            let Some(open) = line.find('{') else { continue };
+            let Some(close) = line[open..].find('}') else {
+                continue;
+            };
+            let dst_str = &line[open + 1..open + close];
+            for tok in dst_str.split(',') {
+                let tok = tok.trim();
+                // Strip leading `%f` to get the register index.
+                if let Some(rest) = tok.strip_prefix("%f")
+                    && let Ok(idx) = rest.parse::<u32>()
+                {
+                    all_dst_regs.push(idx);
+                }
+            }
+        }
+        assert_eq!(
+            all_dst_regs.len(),
+            48,
+            "expected 48 mma destination regs (12 mmas × 4 frag_d); got {}\n--- regs ---\n{:?}",
+            all_dst_regs.len(),
+            all_dst_regs
+        );
+        let unique: HashSet<u32> = all_dst_regs.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            48,
+            "expected 48 DISTINCT mma destination regs; got {} (collision = grids alias)",
+            unique.len()
+        );
+    }
+
+    /// ptxas_verify offline gate for the full `qkv_project_int8` module.
+    ///
+    /// `#[ignore]` so host-only CI runs (no CUDA toolchain) stay green —
+    /// invoke via `cargo test -- --ignored` on a machine with `ptxas` in
+    /// PATH. Target SM overridable via `KAIO_SM_TARGET` env var; default
+    /// runs both `sm_80` (compat floor) and `sm_89` (production target).
+    #[test]
+    #[ignore]
+    fn ptxas_verify_qkv_project_int8() {
+        if std::process::Command::new("ptxas")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("NOTE: ptxas not found in PATH — skipping qkv_project_int8 verification");
+            return;
+        }
+
+        let sms: Vec<String> = if let Ok(sm) = std::env::var("KAIO_SM_TARGET") {
+            vec![sm]
+        } else {
+            vec!["sm_80".to_string(), "sm_89".to_string()]
+        };
+
+        for sm in &sms {
+            let module = build_qkv_project_int8_module(sm);
+            let ptx = emit_module_to_string(&module);
+            let tmp = std::env::temp_dir().join(format!("kaio_qkv_project_int8_{sm}.ptx"));
+            std::fs::write(&tmp, &ptx).expect("failed to write temp PTX");
+
+            let output = std::process::Command::new("ptxas")
+                .args(["--gpu-name", sm, "--verbose"])
+                .arg(tmp.to_str().unwrap())
+                .output()
+                .expect("failed to run ptxas");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = std::fs::remove_file(&tmp);
+
+            assert!(
+                output.status.success(),
+                "ptxas FAILED for qkv_project_int8 ({sm}):\n\
+                 stdout: {stdout}\nstderr: {stderr}\n\n\
+                 === PTX (first 8000 chars) ===\n{}",
+                &ptx[..ptx.len().min(8000)]
+            );
+
+            // Combine stdout + stderr — Windows + CUDA 12.8 routes info lines to
+            // stdout. Parse register count + spill bytes; gate at ≤ 64 regs and
+            // 0 spills (matches the D2.5 baseline contract).
+            let combined = format!("{stdout}\n{stderr}");
+            let regs = parse_after(&combined, "Used ", " registers");
+            let spill_stores = parse_after(&combined, "bytes stack frame, ", " bytes spill stores");
+            let spill_loads = parse_after(&combined, "spill stores, ", " bytes spill loads");
+            let smem = parse_after(&combined, ", used 0 barriers, ", " bytes smem");
+
+            eprintln!(
+                "=== qkv_project_int8 ptxas baseline ({sm}) ===\n\
+                 regs/thread  : {regs:?}\n\
+                 spill stores : {spill_stores:?}\n\
+                 spill loads  : {spill_loads:?}\n\
+                 shared bytes : {smem:?} (target ≈ 2560 = 2048 X + 512 W)"
+            );
+
+            match regs {
+                Some(n) => assert!(
+                    n <= 64,
+                    "qkv_project_int8 ({sm}) reports {n} registers > 64; activate plan \
+                     Rollback #1 (drop MMAS_PER_WARP_N 2→1)"
+                ),
+                None => panic!(
+                    "could not parse register count from ptxas output\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                ),
+            }
+            assert_eq!(spill_stores, Some(0), "qkv_project_int8 ({sm}) has spill stores");
+            assert_eq!(spill_loads, Some(0), "qkv_project_int8 ({sm}) has spill loads");
+
+            eprintln!("ptxas verification PASSED for qkv_project_int8 ({sm})");
+        }
+    }
+
+    fn parse_after(haystack: &str, prefix: &str, suffix: &str) -> Option<u32> {
+        for line in haystack.lines() {
+            if let Some(after) = line.split(prefix).nth(1)
+                && let Some(num) = after.split(suffix).next()
+                && let Ok(n) = num.trim().parse::<u32>()
+            {
+                return Some(n);
+            }
+        }
+        None
     }
 
     #[test]
