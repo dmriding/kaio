@@ -591,6 +591,157 @@ pub(crate) fn emit_fragment_b_int8_per_lane(
     kaio_core::fragment::FragmentB { regs: [reg0, reg1] }
 }
 
+/// Per-warp-quadrant tri-output mma sweep for one projection.
+///
+/// Sprint 7.3 D3.3. For a single projection P ∈ {Q, K, V}, emits the
+/// 2×2 inner grid of `mma.sync.m16n8k16.f16.f16.f32` accumulations over
+/// the warp quadrant, reading f16 A-fragments from `tile_x_shared` and
+/// dequanted f16 B-fragments from `tile_w_shared` (via
+/// [`emit_fragment_b_int8_per_lane`]). Accumulates in-place into
+/// `frag_c_grid` so the caller's per-projection fragment-C bank
+/// persists across K-tile iterations.
+///
+/// # Structure
+///
+/// ```text
+/// for n_stripe in 0..MMAS_PER_WARP_N (= 2):
+///     frag_b = emit_fragment_b_int8_per_lane(...)     // reused across m_stripes
+///     for m_stripe in 0..MMAS_PER_WARP_M (= 2):
+///         frag_a = load_fragment_a_m16n8k16_shared_row(...)
+///         frag_d = alloc_c(...)
+///         mma.sync.m16n8k16.f16.f16.f32 frag_d = frag_a * frag_b + frag_c_grid[m][n]
+///         frag_c_grid[m][n] = frag_d                  // mov.f32 × 4 (in-place update)
+/// ```
+///
+/// The `mov.f32` copy-back after each mma reflects the kaio-core IR's
+/// separate `d` and `c` operands — ptxas does its own liveness
+/// analysis and typically folds the copy into register renaming.
+/// Pattern matches `matmul_int4_kernel::emit_warp_quadrant_mma_int4`
+/// (Sprint 7.2) exactly, just with INT8 fragment-B dequant instead of
+/// INT4.
+///
+/// # Reuse across projections
+///
+/// This function is invoked **three times per warp per K-tile** by
+/// the D3.4 module builder — once each for Q, K, V. Each call operates
+/// on a distinct `frag_c_grid` (the per-projection accumulator bank)
+/// but all three share the same `tile_x_shared` (X is loaded once per
+/// K-tile and reused) and the same `tile_w_shared` slot (cooperatively
+/// reloaded between projections by D3.4 with `bar.sync` gates).
+///
+/// # Arguments
+///
+/// - `tile_x_shared` — u32 register holding the shared base of the X tile.
+/// - `tile_w_shared` — u32 register holding the shared base of the current
+///   projection's W_P_i8 tile.
+/// - `warp_quad_row_base_in_tile_x` — u32 register holding the warp's
+///   M-row offset within the block tile (0 or 32 for the 2×2 warp grid).
+/// - `warp_quad_col_base_in_tile_w` — u32 register holding the warp's
+///   N-col offset within the block tile (0 or 16 for the 2×2 warp grid).
+/// - `tid_x_in_warp` — u32 register holding `tid.x % 32`.
+/// - `frag_c_grid` — `&mut [[FragmentC; MMAS_PER_WARP_N]; MMAS_PER_WARP_M]`,
+///   the per-projection accumulator bank (2×2 = 4 fragments, each with 4
+///   f32 regs per lane = 16 f32 regs per lane per projection).
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // wired up in D3.4
+pub(crate) fn emit_warp_quadrant_mma_int8_per_projection(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_x_shared: Register,
+    tile_w_shared: Register,
+    warp_quad_row_base_in_tile_x: Register,
+    warp_quad_col_base_in_tile_w: Register,
+    tid_x_in_warp: Register,
+    frag_c_grid: &mut [[kaio_core::fragment::FragmentC; MMAS_PER_WARP_N as usize];
+             MMAS_PER_WARP_M as usize],
+) {
+    use kaio_core::fragment::load_fragment_a_m16n8k16_shared_row;
+    use kaio_core::instr::{MmaShape, TensorCoreOp};
+
+    // Pre-compute the warp-quadrant row-offset in bytes. Same value is
+    // reused across all n-stripes and m-stripes for the base shift into
+    // the shared X tile — computed once outside the loop.
+    let row_offset_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: row_offset_bytes,
+        lhs: Operand::Reg(warp_quad_row_base_in_tile_x),
+        rhs: Operand::ImmU32(TILE_X_ROW_STRIDE_BYTES),
+        ty: PtxType::U32,
+    }));
+
+    for n_stripe in 0..MMAS_PER_WARP_N {
+        // n_stripe_col_base = warp_quad_col_base + n_stripe * BN
+        //   (BN = 8 cols per mma-N sub-tile; 2 stripes cover the 16-col warp quadrant)
+        let n_stripe_col_base = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: n_stripe_col_base,
+            lhs: Operand::Reg(warp_quad_col_base_in_tile_w),
+            rhs: Operand::ImmU32(n_stripe * BN),
+            ty: PtxType::U32,
+        }));
+
+        // Per-lane dequant fragment B once per n-stripe; reused across m-stripes.
+        let frag_b = emit_fragment_b_int8_per_lane(
+            alloc,
+            kernel,
+            tile_w_shared,
+            n_stripe_col_base,
+            tid_x_in_warp,
+        );
+
+        for m_stripe in 0..MMAS_PER_WARP_M {
+            // Shift the tile_x base so the fragment-A loader reads the right
+            // BM=16 rows within the warp quadrant's 32-row span.
+            let m_stripe_shift = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: m_stripe_shift,
+                lhs: Operand::Reg(row_offset_bytes),
+                rhs: Operand::ImmU32(m_stripe * BM * TILE_X_ROW_STRIDE_BYTES),
+                ty: PtxType::U32,
+            }));
+            let shifted_tile_x = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: shifted_tile_x,
+                lhs: Operand::Reg(tile_x_shared),
+                rhs: Operand::Reg(m_stripe_shift),
+                ty: PtxType::U32,
+            }));
+
+            let frag_a = load_fragment_a_m16n8k16_shared_row(
+                alloc,
+                kernel,
+                shifted_tile_x,
+                tid_x_in_warp,
+                TILE_X_ROW_STRIDE_BYTES,
+                None,
+            );
+
+            // mma.sync d = a * b + c; then copy d → c so the next K-tile
+            // accumulates on top. Same idiom as matmul_int4.
+            let frag_d = kaio_core::fragment::alloc_c(alloc);
+            let frag_c_in = frag_c_grid[m_stripe as usize][n_stripe as usize];
+            kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+                d: frag_d,
+                a: frag_a,
+                b: frag_b,
+                c: frag_c_in,
+                shape: MmaShape::M16N8K16,
+                d_ty: PtxType::F32,
+                a_ty: PtxType::F16,
+                b_ty: PtxType::F16,
+                c_ty: PtxType::F32,
+            }));
+            for (c_reg, d_reg) in frag_c_in.regs.iter().zip(frag_d.regs.iter()) {
+                kernel.push(PtxInstruction::Mov {
+                    dst: *c_reg,
+                    src: Operand::Reg(*d_reg),
+                    ty: PtxType::F32,
+                });
+            }
+        }
+    }
+}
+
 /// Validate shape + alignment preconditions for `qkv_project_int8`.
 ///
 /// Sprint 7.3 D1. Enforces the **W8A16 MHA** contract:
@@ -994,6 +1145,160 @@ mod tests {
             0,
             "expected no ld.shared.b16 (no group scale read in INT8); got:\n{ptx}"
         );
+    }
+
+    // --- D3.3 warp-quadrant mma sweep emit tests ----------------------
+
+    /// Build a FragmentC grid by allocating fresh accumulator fragments.
+    /// Returns the 2×2 grid so tests can pass it into the warp-quadrant
+    /// helper and inspect the emitted mma destinations.
+    fn fresh_frag_c_grid(
+        alloc: &mut RegisterAllocator,
+    ) -> [[kaio_core::fragment::FragmentC; MMAS_PER_WARP_N as usize]; MMAS_PER_WARP_M as usize]
+    {
+        core::array::from_fn(|_| core::array::from_fn(|_| kaio_core::fragment::alloc_c(alloc)))
+    }
+
+    #[test]
+    fn warp_quad_mma_emits_four_mmas_two_frag_b_dequants() {
+        // MMAS_PER_WARP_M × MMAS_PER_WARP_N = 2×2 = 4 mma.sync instructions
+        // per per-projection call. Fragment B is computed once per n-stripe
+        // (2 n-stripes) and reused across the 2 m-stripes, so 2 dequant
+        // chains per call → 2 × 4 = 8 cvt.f16.s8 total (vs 4 × 4 = 16 if
+        // we recomputed B per m-stripe).
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let tile_x = alloc.alloc(PtxType::U32);
+        let tile_w = alloc.alloc(PtxType::U32);
+        let warp_row = alloc.alloc(PtxType::U32);
+        let warp_col = alloc.alloc(PtxType::U32);
+        let tid = alloc.alloc(PtxType::U32);
+        let mut frag_c = fresh_frag_c_grid(&mut alloc);
+        emit_warp_quadrant_mma_int8_per_projection(
+            &mut alloc,
+            &mut kernel,
+            tile_x,
+            tile_w,
+            warp_row,
+            warp_col,
+            tid,
+            &mut frag_c,
+        );
+        let ptx = emit_text(&kernel);
+        assert_eq!(
+            ptx.matches("mma.sync").count(),
+            4,
+            "expected 4 mma.sync per warp-quadrant projection (2×2); got:\n{ptx}"
+        );
+        assert_eq!(
+            ptx.matches("cvt.f16.s8").count(),
+            8,
+            "expected 8 cvt.f16.s8 (2 n-stripes × 4 per dequant); got:\n{ptx}"
+        );
+        assert_eq!(
+            ptx.matches("ld.shared.s8").count(),
+            8,
+            "expected 8 ld.shared.s8 (2 n-stripes × 4 per dequant); got:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn warp_quad_mma_emits_f32_copy_back_per_mma() {
+        // After each mma, the per-lane frag_d registers (4 f32) are copied
+        // back into frag_c via mov.f32 × 4. 4 mmas × 4 regs = 16 mov.f32
+        // copy-backs per per-projection call.
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let tile_x = alloc.alloc(PtxType::U32);
+        let tile_w = alloc.alloc(PtxType::U32);
+        let warp_row = alloc.alloc(PtxType::U32);
+        let warp_col = alloc.alloc(PtxType::U32);
+        let tid = alloc.alloc(PtxType::U32);
+        let mut frag_c = fresh_frag_c_grid(&mut alloc);
+        emit_warp_quadrant_mma_int8_per_projection(
+            &mut alloc,
+            &mut kernel,
+            tile_x,
+            tile_w,
+            warp_row,
+            warp_col,
+            tid,
+            &mut frag_c,
+        );
+        let ptx = emit_text(&kernel);
+        assert_eq!(
+            ptx.matches("mov.f32").count(),
+            16,
+            "expected 16 mov.f32 (4 mmas × 4 copy-backs); got:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn warp_quad_mma_uses_m16n8k16_f16_f32_shape() {
+        // The mma.sync mnemonic should carry the full m16n8k16 signature
+        // with f16.f16.f32 operand types.
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let tile_x = alloc.alloc(PtxType::U32);
+        let tile_w = alloc.alloc(PtxType::U32);
+        let warp_row = alloc.alloc(PtxType::U32);
+        let warp_col = alloc.alloc(PtxType::U32);
+        let tid = alloc.alloc(PtxType::U32);
+        let mut frag_c = fresh_frag_c_grid(&mut alloc);
+        emit_warp_quadrant_mma_int8_per_projection(
+            &mut alloc,
+            &mut kernel,
+            tile_x,
+            tile_w,
+            warp_row,
+            warp_col,
+            tid,
+            &mut frag_c,
+        );
+        let ptx = emit_text(&kernel);
+        assert!(
+            ptx.contains("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"),
+            "expected fully-qualified mma mnemonic for f32.f16.f16.f32; got:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn warp_quad_mma_preserves_frag_c_identity_in_place_accumulation() {
+        // Disjoint-register canary at the per-projection level: the 16 f32
+        // regs making up the frag_c_grid before the call must all appear as
+        // mov.f32 *destinations* after the call (4 per mma × 4 mmas = 16),
+        // proving the accumulation wrote back into the caller's grid.
+        let (mut alloc, mut kernel) = fresh_kernel();
+        let tile_x = alloc.alloc(PtxType::U32);
+        let tile_w = alloc.alloc(PtxType::U32);
+        let warp_row = alloc.alloc(PtxType::U32);
+        let warp_col = alloc.alloc(PtxType::U32);
+        let tid = alloc.alloc(PtxType::U32);
+        let mut frag_c = fresh_frag_c_grid(&mut alloc);
+        // Collect the frag_c_grid register IDs before emit.
+        let frag_c_reg_ids: Vec<u32> = frag_c
+            .iter()
+            .flatten()
+            .flat_map(|f| f.regs.iter().map(|r| r.index))
+            .collect();
+        assert_eq!(frag_c_reg_ids.len(), 16, "grid should hold 2×2×4 = 16 regs");
+
+        emit_warp_quadrant_mma_int8_per_projection(
+            &mut alloc,
+            &mut kernel,
+            tile_x,
+            tile_w,
+            warp_row,
+            warp_col,
+            tid,
+            &mut frag_c,
+        );
+        let ptx = emit_text(&kernel);
+        // Each frag_c register must appear as a `mov.f32 %fN,` destination.
+        for reg_idx in &frag_c_reg_ids {
+            let needle = format!("mov.f32 %f{reg_idx},");
+            assert!(
+                ptx.contains(&needle),
+                "expected copy-back into frag_c reg %f{reg_idx} but did not find `{needle}` in emitted PTX:\n{ptx}"
+            );
+        }
     }
 
     #[test]
