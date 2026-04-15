@@ -70,6 +70,11 @@ const SHOWCASES: &[(&str, &str, &str)] = &[
         "int4_matmul",
         "Symmetric INT4 GPTQ-style dequantize-matmul (tensor-core W4A16)",
     ),
+    (
+        "qkvattn",
+        "quantized_attention",
+        "End-to-end quantized attention (qkv_project_int4 → attention_tc)",
+    ),
 ];
 
 fn main() -> ExitCode {
@@ -112,6 +117,8 @@ Showcase names:
   softmax    Single-block softmax (attention normalization with max-sub)
   int8       Symmetric INT8 dequantization (quantized-weight unpack)
   int8matmul Symmetric INT8 dequantize-matmul (tensor-core W8A8)
+  int4matmul Symmetric INT4 GPTQ-style dequantize-matmul (tensor-core W4A16)
+  qkvattn    End-to-end quantized attention (qkv_project_int4 → attention_tc)
 
 Prerequisites:
   - Rust 1.94+ (pinned via rust-toolchain.toml)
