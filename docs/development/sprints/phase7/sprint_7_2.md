@@ -1,6 +1,6 @@
 # Sprint 7.2 — INT4 dequantize-matmul (`matmul_int4`)
 
-**Status:** 🚧 In progress (D1 landed)
+**Status:** 🚧 In progress (D1 + D2 landed)
 **Branch:** `phase7-rest` off `main` (shared across Phase 7 remaining
 sprints; no independent crates.io release — Phase 7 closes with an
 aggregate release after 7.4).
@@ -111,6 +111,72 @@ needed beyond `MovPack`.
 ### D1 commit
 
 Commit 1: `wip(phase7): D1 - Sprint 7.2 stub + MovPack IR primitive`.
+
+## D2 — Unpack helper + sign-extend canary
+
+### Helper: `emit_unpack_s4_x8_scale_to_f16x8`
+
+Landed in `kaio-ops/src/matmul_int4_kernel.rs`. For one packed `u32`
+of 8 signed INT4 nibbles plus a single f16 group scale, emits:
+
+- 8 × (`shl.b32` → `shr.s32`) — sign-extend per nibble via `(x << (28 - 4i)) >> 28`
+- 8 × `cvt.rn.f32.s32` → 8 × `cvt.rn.f16.f32`
+- 8 × `mul.f16` with the scalar group scale
+- 4 × `mov.b32 %b32, {%h_lo, %h_hi}` (the new `MovPack` IR primitive)
+
+Returns `[Register; 4]` of packed-f16-pair `.b32` registers ready
+for `FragmentB_M16N8K16` feed. Helper is `pub(crate)` + `#[allow(dead_code)]`
+pending D4 wire-up. Contract locked per Opus round 2: assumes all 8
+nibbles in the input u32 share one group scale; caller aligns u32
+loads to group boundaries.
+
+**Latent-bug fix** landed alongside: `ArithOp::Mul` emitter's fallback
+arm was emitting `mul.lo.f16` for `PtxType::F16`, which ptxas
+rejects. Extended the float arm to cover `F16` and `BF16` (both emit
+`mul{.rn}.f16` — PTX defaults to `.rn` on half-precision). Added an
+`emit_mul_f16` unit test. Flagged as a concurrent safety fix rather
+than Sprint 7.2 scope creep: any future kernel using ArithOp::Mul
+with F16 would have hit the same invalid-PTX bug.
+
+### Triple-layer sign-extend canary
+
+**Layer 1 — Host token-stream assertions** (three emit-level tests,
+`matmul_int4_kernel::tests`):
+
+- `unpack_s4_sign_extend_uses_arithmetic_shift` — asserts exactly 8
+  `shr.s32` instructions and **zero** `shr.u32` in the emitted PTX.
+  This is the primary R1 canary: a `shr.u32` at any single nibble
+  site would silently zero-extend that negative INT4 value.
+- `unpack_s4_shl_covers_all_nibble_positions` — asserts the 8
+  `shl.b32` immediates cover `{0, 4, 8, 12, 16, 20, 24, 28}` exactly
+  once each; catches position-alignment bugs that skip or double up
+  a nibble.
+- `unpack_s4_emits_four_packed_f16_pairs` — asserts exactly 4
+  `mov.b32 %b, {%h_lo, %h_hi};` vector-pack instructions for the
+  `FragmentB` feed.
+
+**Layer 2 — ptxas offline gate** (`ptxas_verify_unpack_s4`,
+`#[ignore]`): runs the CUDA toolkit's `ptxas -arch=sm_80` over a
+minimal kernel that exercises the full unpack chain once and stores
+to global memory. Confirms the whole emit (shl + shr.s32 + cvt chain
++ mul + MovPack) is structurally legal PTX on Ampere+. **PASSED on
+sm_80** during D2 (invoked via `cargo test -p kaio-ops --lib
+ptxas_verify_unpack_s4 -- --ignored`).
+
+**Layer 3 — GPU e2e boundary-value tests** — lands in D6 (explicit
+sign-extend round-trip on `0x88888888`, `0x77777777`, mixed-position
+patterns like `0x80000000` / `0x87654321` per Codex round 3).
+
+### Quality gates (D2 checkpoint)
+
+- `cargo fmt --all --check` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (full suite — no regressions; 3 new D2 emit tests green)
+- `cargo test -- --ignored matmul_int4_kernel::tests::ptxas_verify_unpack_s4` ✓ PASSED sm_80
+
+### D2 commits
+
+Commit 2: `wip(phase7): D2 - emit_unpack_s4_x8_scale_to_f16x8 helper + sign-extend canary`.
 
 ## Architectural decisions
 

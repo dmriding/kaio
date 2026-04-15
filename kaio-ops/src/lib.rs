@@ -43,6 +43,7 @@
 
 mod attention_kernel;
 mod attention_tc_kernel;
+mod matmul_int4_kernel;
 mod matmul_int8_kernel;
 mod matmul_kernel;
 mod matmul_tc_async_kernel;
