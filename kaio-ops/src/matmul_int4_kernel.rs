@@ -79,7 +79,13 @@ pub(crate) const TILE_A_BYTES: u32 = BM_BLOCK * TILE_A_ROW_STRIDE_BYTES; // 2048
 /// distinct patterns → conflict-free.
 pub(crate) const TILE_B_PACKED_WORDS_PER_COL: u32 = K_TILE_SHARED / NIBBLES_PER_U32; // 2
 pub(crate) const TILE_B_COL_STRIDE_BYTES: u32 = TILE_B_PACKED_WORDS_PER_COL * BYTES_PER_B32 + 4; // 12
-pub(crate) const TILE_B_BYTES: u32 = BN_BLOCK * TILE_B_COL_STRIDE_BYTES; // 768
+/// Data region = 64 cols × 12 B = 768 B. Pre-zero requires a multiple of
+/// `THREADS_PER_BLOCK * 4 = 512 B`, so round up to 1024 B. Tail bytes
+/// (768..1024) are never read by the kernel — the cooperative B loader
+/// addresses only the 12 B-stride col region.
+pub(crate) const TILE_B_BYTES: u32 = BN_BLOCK * TILE_B_COL_STRIDE_BYTES
+    + (THREADS_PER_BLOCK * 4 - (BN_BLOCK * TILE_B_COL_STRIDE_BYTES) % (THREADS_PER_BLOCK * 4))
+        % (THREADS_PER_BLOCK * 4); // 1024
 /// Group-scale tile: one f16 per output column, 64 f16 per tile.
 /// Reloaded once per group transition (every 8 K-tiles).
 pub(crate) const TILE_SCALES_BYTES: u32 = BN_BLOCK * BYTES_PER_F16; // 128
@@ -619,6 +625,329 @@ pub(crate) fn emit_cooperative_load_group_scales_64(
 #[allow(dead_code)]
 const _: RegKind = RegKind::R;
 
+// ============================================================================
+// D4.2 — narrow 2-nibble unpack helper + fragment-B per-lane dequant + mma
+// ============================================================================
+
+/// Emit the unpack + sign-extend + dequant + pack chain for exactly
+/// two nibbles of a packed `u32`, producing one `.b32` register
+/// holding `{f16_lo, f16_hi}`.
+///
+/// Siblings with [`emit_unpack_s4_x8_scale_to_f16x8`] but only emits
+/// two nibbles' worth of work. Used by the per-lane fragment-B dequant
+/// path where each warp lane produces exactly 4 f16 values per
+/// fragment B (2 nibbles × 2 u32 words).
+///
+/// `shl_count_lo` / `shl_count_hi` are the `shl.b32` shift counts
+/// that place the target nibble's MSB at bit 31 — i.e.
+/// `shl_count = 28 - 4 * nibble_index`. Passed as `Operand` so the
+/// caller can use either an immediate (for a compile-time nibble
+/// position) or a register (for a runtime per-lane `tig`).
+fn emit_unpack_s4_x2_scale_to_f16_pair(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    packed: Register,
+    scale_f16: Register,
+    shl_count_lo: Operand,
+    shl_count_hi: Operand,
+) -> Register {
+    let emit_nibble =
+        |alloc: &mut RegisterAllocator, kernel: &mut PtxKernel, shl_count: Operand| -> Register {
+            let tmp = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Shl {
+                dst: tmp,
+                lhs: Operand::Reg(packed),
+                rhs: shl_count,
+                ty: PtxType::U32,
+            }));
+            let ext = alloc.alloc(PtxType::S32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Shr {
+                dst: ext,
+                lhs: Operand::Reg(tmp),
+                rhs: Operand::ImmU32(28),
+                ty: PtxType::S32,
+            }));
+            let f32_reg = alloc.alloc(PtxType::F32);
+            kernel.push(PtxInstruction::Cvt {
+                dst: f32_reg,
+                src: ext,
+                dst_ty: PtxType::F32,
+                src_ty: PtxType::S32,
+            });
+            let h_raw = alloc.alloc(PtxType::F16);
+            kernel.push(PtxInstruction::Cvt {
+                dst: h_raw,
+                src: f32_reg,
+                dst_ty: PtxType::F16,
+                src_ty: PtxType::F32,
+            });
+            let h = alloc.alloc(PtxType::F16);
+            kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+                dst: h,
+                lhs: Operand::Reg(h_raw),
+                rhs: Operand::Reg(scale_f16),
+                ty: PtxType::F16,
+            }));
+            h
+        };
+
+    let h_lo = emit_nibble(alloc, kernel, shl_count_lo);
+    let h_hi = emit_nibble(alloc, kernel, shl_count_hi);
+
+    let packed_pair = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::MovPack {
+        dst: packed_pair,
+        srcs: vec![h_lo, h_hi],
+        ty: PtxType::U32,
+    });
+    packed_pair
+}
+
+/// Per-lane dequant for one `FragmentB_M16N8K16` at the current
+/// warp-quadrant N-stripe. Reads 2 `u32` words + 1 `f16` scale from
+/// shared and runs the narrow unpack helper twice.
+///
+/// Fragment B layout (PTX ISA §9.7.13.5.8.1 for m16n8k16.f16): lane
+/// `l ∈ 0..32` owns col `l/4` and rows `{2*tig, 2*tig+1}` for reg[0] +
+/// `{2*tig+8, 2*tig+9}` for reg[1], where `tig = l%4`. Per fragment-B
+/// per lane: 4 nibbles at positions `(2*tig, 2*tig+1)` → shift counts
+/// `(28 - 8*tig, 24 - 8*tig)` applied to both u32 words.
+fn emit_fragment_b_int4_per_lane(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_b_shared: Register,
+    tile_scales_shared: Register,
+    n_stripe_col_base: Register,
+    lane_within_warp: Register,
+) -> kaio_core::fragment::FragmentB {
+    // group_id = lane / 4   (0..8, col within the 8-col fragment)
+    let group_id = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: group_id,
+        lhs: Operand::Reg(lane_within_warp),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    // tig = lane % 4
+    let tig = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: tig,
+        lhs: Operand::Reg(lane_within_warp),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+
+    // col_abs = n_stripe_col_base + group_id  (col within the block tile, 0..64)
+    let col_abs = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: col_abs,
+        lhs: Operand::Reg(n_stripe_col_base),
+        rhs: Operand::Reg(group_id),
+        ty: PtxType::U32,
+    }));
+
+    // Load 2 u32 words from tile_b for col_abs.
+    let col_stride_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: col_stride_off,
+        lhs: Operand::Reg(col_abs),
+        rhs: Operand::ImmU32(TILE_B_COL_STRIDE_BYTES),
+        ty: PtxType::U32,
+    }));
+    let word0_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: word0_addr,
+        lhs: Operand::Reg(tile_b_shared),
+        rhs: Operand::Reg(col_stride_off),
+        ty: PtxType::U32,
+    }));
+    let word1_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: word1_addr,
+        lhs: Operand::Reg(word0_addr),
+        rhs: Operand::ImmU32(BYTES_PER_B32),
+        ty: PtxType::U32,
+    }));
+
+    let u32_lo = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+        dst: u32_lo,
+        addr: word0_addr,
+        ty: PtxType::U32,
+    }));
+    let u32_hi = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+        dst: u32_hi,
+        addr: word1_addr,
+        ty: PtxType::U32,
+    }));
+
+    // Load scale = tile_scales[col_abs] (f16, stride 2 B).
+    let scale_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: scale_off,
+        lhs: Operand::Reg(col_abs),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+    let scale_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: scale_addr,
+        lhs: Operand::Reg(tile_scales_shared),
+        rhs: Operand::Reg(scale_off),
+        ty: PtxType::U32,
+    }));
+    let scale_f16 = alloc.alloc(PtxType::F16);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
+        dst: scale_f16,
+        addr: scale_addr,
+        ty: PtxType::F16,
+    }));
+
+    // shl counts per tig: lo = 28 - 8*tig, hi = lo - 4 = 24 - 8*tig.
+    let tig8 = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: tig8,
+        lhs: Operand::Reg(tig),
+        rhs: Operand::ImmU32(8),
+        ty: PtxType::U32,
+    }));
+    let shl_count_lo = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Sub {
+        dst: shl_count_lo,
+        lhs: Operand::ImmU32(28),
+        rhs: Operand::Reg(tig8),
+        ty: PtxType::U32,
+    }));
+    let shl_count_hi = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Sub {
+        dst: shl_count_hi,
+        lhs: Operand::Reg(shl_count_lo),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+
+    let reg0 = emit_unpack_s4_x2_scale_to_f16_pair(
+        alloc,
+        kernel,
+        u32_lo,
+        scale_f16,
+        Operand::Reg(shl_count_lo),
+        Operand::Reg(shl_count_hi),
+    );
+    let reg1 = emit_unpack_s4_x2_scale_to_f16_pair(
+        alloc,
+        kernel,
+        u32_hi,
+        scale_f16,
+        Operand::Reg(shl_count_lo),
+        Operand::Reg(shl_count_hi),
+    );
+
+    kaio_core::fragment::FragmentB { regs: [reg0, reg1] }
+}
+
+/// Per-warp-quadrant mma pipeline: for each of `MMAS_PER_WARP_N=4`
+/// N-stripes, per-lane dequant a fresh fragment B, then per-M-stripe
+/// load fragment A from shared and run `mma.sync.m16n8k16.f16.f16.f32`,
+/// accumulating into `frag_c_grid` in-place.
+#[allow(clippy::too_many_arguments)] // all args are load-bearing kernel state
+fn emit_warp_quadrant_mma_int4(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_a_shared: Register,
+    tile_b_shared: Register,
+    tile_scales_shared: Register,
+    warp_quad_row_base_in_tile_a: Register, // warp_quadrant_m_index * WARP_QUAD_M (0 or 32)
+    warp_quad_col_base_in_tile_b: Register, // warp_quadrant_n_index * WARP_QUAD_N (0 or 32)
+    tid_x_in_warp: Register,                // tid.x % 32
+    frag_c_grid: &mut [[kaio_core::fragment::FragmentC; MMAS_PER_WARP_N as usize];
+             MMAS_PER_WARP_M as usize],
+) {
+    use kaio_core::fragment::load_fragment_a_m16n8k16_shared_row;
+    use kaio_core::instr::{MmaShape, TensorCoreOp};
+
+    // Pre-compute the warp-quadrant row-offset in bytes (same across all n-stripes).
+    let row_offset_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: row_offset_bytes,
+        lhs: Operand::Reg(warp_quad_row_base_in_tile_a),
+        rhs: Operand::ImmU32(TILE_A_ROW_STRIDE_BYTES),
+        ty: PtxType::U32,
+    }));
+
+    for n_stripe in 0..MMAS_PER_WARP_N {
+        // n_stripe_col_base = warp_quad_col_base + n_stripe * BN
+        let n_stripe_col_base = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: n_stripe_col_base,
+            lhs: Operand::Reg(warp_quad_col_base_in_tile_b),
+            rhs: Operand::ImmU32(n_stripe * BN),
+            ty: PtxType::U32,
+        }));
+
+        let frag_b = emit_fragment_b_int4_per_lane(
+            alloc,
+            kernel,
+            tile_b_shared,
+            tile_scales_shared,
+            n_stripe_col_base,
+            tid_x_in_warp,
+        );
+
+        for m_stripe in 0..MMAS_PER_WARP_M {
+            // Each m-stripe points to a BM=16 rows slice inside the
+            // warp quadrant (which is WARP_QUAD_M=32 rows). Shift the
+            // tile_a base so the fragment loader reads the right 16 rows.
+            let m_stripe_shift = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: m_stripe_shift,
+                lhs: Operand::Reg(row_offset_bytes),
+                rhs: Operand::ImmU32(m_stripe * BM * TILE_A_ROW_STRIDE_BYTES),
+                ty: PtxType::U32,
+            }));
+            let shifted_tile_a = alloc.alloc(PtxType::U32);
+            kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                dst: shifted_tile_a,
+                lhs: Operand::Reg(tile_a_shared),
+                rhs: Operand::Reg(m_stripe_shift),
+                ty: PtxType::U32,
+            }));
+
+            let frag_a = load_fragment_a_m16n8k16_shared_row(
+                alloc,
+                kernel,
+                shifted_tile_a,
+                tid_x_in_warp,
+                TILE_A_ROW_STRIDE_BYTES,
+                None,
+            );
+
+            // Accumulate: frag_d = frag_a * frag_b + frag_c; then copy d→c.
+            let frag_d = kaio_core::fragment::alloc_c(alloc);
+            let frag_c_in = frag_c_grid[m_stripe as usize][n_stripe as usize];
+            kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+                d: frag_d,
+                a: frag_a,
+                b: frag_b,
+                c: frag_c_in,
+                shape: MmaShape::M16N8K16,
+                d_ty: PtxType::F32,
+                a_ty: PtxType::F16,
+                b_ty: PtxType::F16,
+                c_ty: PtxType::F32,
+            }));
+            for (c_reg, d_reg) in frag_c_in.regs.iter().zip(frag_d.regs.iter()) {
+                kernel.push(PtxInstruction::Mov {
+                    dst: *c_reg,
+                    src: Operand::Reg(*d_reg),
+                    ty: PtxType::F32,
+                });
+            }
+        }
+    }
+}
+
 /// Emit the unpack + sign-extend + dequant + pack chain for one `u32`
 /// of packed signed INT4 weights, producing 4 `.b32` registers each
 /// holding two packed f16 values ready for `mma.sync.m16n8k16.f16`
@@ -1035,6 +1364,701 @@ pub(crate) fn build_coop_loads_smoke_ptx(sm: &str) -> String {
     w.finish()
 }
 
+// ============================================================================
+// D4.3 — pre-zero + full module builder
+// ============================================================================
+
+/// Cooperative pre-zero of tile_a, tile_b, and tile_scales, followed
+/// by one `bar.sync`. Needed because the cooperative loaders use
+/// bounds-skip branches that leave OOB slots untouched.
+fn emit_pre_zero_shared_tiles_int4(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_a: Register,
+    tile_b: Register,
+    tile_scales: Register,
+    flat_tid: Register,
+) {
+    debug_assert!(TILE_A_BYTES.is_multiple_of(THREADS_PER_BLOCK * 4));
+    debug_assert!(TILE_B_BYTES.is_multiple_of(THREADS_PER_BLOCK * 4));
+    debug_assert!(
+        TILE_SCALES_BYTES.is_multiple_of(THREADS_PER_BLOCK * 4)
+            || TILE_SCALES_BYTES <= THREADS_PER_BLOCK * 4
+    );
+
+    let r_zero = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_zero,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+
+    // Zero tile_a (2048 B, 128 threads × 16 B/thread = 4 b32/thread).
+    for (tile_base, total_bytes) in [(tile_a, TILE_A_BYTES), (tile_b, TILE_B_BYTES)] {
+        let bytes_per_thread = total_bytes / THREADS_PER_BLOCK;
+        let issues_per_thread = bytes_per_thread / 4;
+        let r_thread_off = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+            dst: r_thread_off,
+            lhs: Operand::Reg(flat_tid),
+            rhs: Operand::ImmU32(bytes_per_thread),
+            ty: PtxType::U32,
+        }));
+        let base_off = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Arith(ArithOp::Add {
+            dst: base_off,
+            lhs: Operand::Reg(tile_base),
+            rhs: Operand::Reg(r_thread_off),
+            ty: PtxType::U32,
+        }));
+        for i in 0..issues_per_thread {
+            let addr = if i == 0 {
+                base_off
+            } else {
+                let a = alloc.alloc(PtxType::U32);
+                kernel.push(PtxInstruction::Arith(ArithOp::Add {
+                    dst: a,
+                    lhs: Operand::Reg(base_off),
+                    rhs: Operand::ImmU32(i * 4),
+                    ty: PtxType::U32,
+                }));
+                a
+            };
+            kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+                addr,
+                src: r_zero,
+                ty: PtxType::U32,
+            }));
+        }
+    }
+
+    // Zero tile_scales (128 B = 32 b32 — only lanes 0..31 cooperate).
+    let p_scale_active = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_scale_active,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(flat_tid),
+        rhs: Operand::ImmU32(TILE_SCALES_BYTES / 4),
+        ty: PtxType::U32,
+    }));
+    let skip_scale_label = "SCALES_ZERO_SKIP".to_string();
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_scale_active,
+        target: skip_scale_label.clone(),
+        negate: true,
+    }));
+    let r_scale_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_scale_off,
+        lhs: Operand::Reg(flat_tid),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+    let r_scale_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_scale_addr,
+        lhs: Operand::Reg(tile_scales),
+        rhs: Operand::Reg(r_scale_off),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Memory(MemoryOp::StShared {
+        addr: r_scale_addr,
+        src: r_zero,
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Label(skip_scale_label));
+
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+        barrier_id: 0,
+    }));
+}
+
+/// Build the full IR module for `matmul_int4` targeting `sm`.
+///
+/// Kernel signature (in order): `a_ptr: *const f16`, `b_packed_ptr:
+/// *const u32`, `scales_ptr: *const f16`, `d_ptr: *mut f32`, `m, n, k`
+/// (all u32). Block dim = `(32, 4, 1)` = 128 threads. Grid dim =
+/// `(N/64, M/64, 1)` (caller responsibility at launch).
+pub(crate) fn build_matmul_int4_module(sm: &str) -> kaio_core::ir::PtxModule {
+    use kaio_core::fragment::{FragmentC, alloc_c};
+    use kaio_core::ir::{PtxModule, PtxParam, SharedDecl};
+
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("matmul_int4");
+
+    kernel.add_param(PtxParam::pointer("a_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("b_packed_ptr", PtxType::U32));
+    kernel.add_param(PtxParam::pointer("scales_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("d_ptr", PtxType::F32));
+    kernel.add_param(PtxParam::scalar("m", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("n", PtxType::U32));
+    kernel.add_param(PtxParam::scalar("k", PtxType::U32));
+
+    // Shared decls.
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_a".to_string(),
+        align: 4,
+        size_bytes: TILE_A_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_b".to_string(),
+        align: 4,
+        size_bytes: TILE_B_BYTES,
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_scales".to_string(),
+        align: 4,
+        size_bytes: TILE_SCALES_BYTES,
+    });
+
+    // --- Load params ---
+    let rd_a_p = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_a_p,
+        param_name: "a_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_b_p = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_b_p,
+        param_name: "b_packed_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_s_p = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_s_p,
+        param_name: "scales_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_d_p = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: rd_d_p,
+        param_name: "d_ptr".to_string(),
+        ty: PtxType::U64,
+    }));
+    let rd_a_g = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_a_g,
+        src: rd_a_p,
+    }));
+    let rd_b_g = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_b_g,
+        src: rd_b_p,
+    }));
+    let rd_s_g = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_s_g,
+        src: rd_s_p,
+    }));
+    let rd_d_g = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Memory(MemoryOp::CvtaToGlobal {
+        dst: rd_d_g,
+        src: rd_d_p,
+    }));
+    let r_m = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_m,
+        param_name: "m".to_string(),
+        ty: PtxType::U32,
+    }));
+    let r_n = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_n,
+        param_name: "n".to_string(),
+        ty: PtxType::U32,
+    }));
+    let r_k = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Memory(MemoryOp::LdParam {
+        dst: r_k,
+        param_name: "k".to_string(),
+        ty: PtxType::U32,
+    }));
+
+    // --- Derived scalars ---
+    let r_k_bytes = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_bytes,
+        lhs: Operand::Reg(r_k),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+    let r_k_words = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_k_words,
+        lhs: Operand::Reg(r_k),
+        rhs: Operand::ImmU32(NIBBLES_PER_U32),
+        ty: PtxType::U32,
+    }));
+    let r_n_f32_stride = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_n_f32_stride,
+        lhs: Operand::Reg(r_n),
+        rhs: Operand::ImmU32(4),
+        ty: PtxType::U32,
+    }));
+
+    // --- Thread / block indices ---
+    let (r_tid_x, tid_x_instr) = kaio_core::instr::special::tid_x(&mut alloc);
+    kernel.push(tid_x_instr);
+    let (r_tid_y, tid_y_instr) = kaio_core::instr::special::tid_y(&mut alloc);
+    kernel.push(tid_y_instr);
+    let (r_ntid_x, ntid_x_instr) = kaio_core::instr::special::ntid_x(&mut alloc);
+    kernel.push(ntid_x_instr);
+    // flat_tid = tid_y * blockDim.x + tid_x  (block is (32, 4, 1))
+    let r_flat_tid = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: r_flat_tid,
+        a: Operand::Reg(r_tid_y),
+        b: Operand::Reg(r_ntid_x),
+        c: Operand::Reg(r_tid_x),
+        ty: PtxType::U32,
+        mode: MadMode::Lo,
+    }));
+    // warp_id = flat_tid / 32, lane = flat_tid % 32
+    let r_warp_id = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_warp_id,
+        lhs: Operand::Reg(r_flat_tid),
+        rhs: Operand::ImmU32(32),
+        ty: PtxType::U32,
+    }));
+    // warp_row_quad = warp_id / 2, warp_col_quad = warp_id % 2
+    let r_warp_row_quad = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_warp_row_quad,
+        lhs: Operand::Reg(r_warp_id),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    let r_warp_col_quad = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_warp_col_quad,
+        lhs: Operand::Reg(r_warp_id),
+        rhs: Operand::ImmU32(2),
+        ty: PtxType::U32,
+    }));
+    let r_wq_row_base = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_wq_row_base,
+        lhs: Operand::Reg(r_warp_row_quad),
+        rhs: Operand::ImmU32(WARP_QUAD_M),
+        ty: PtxType::U32,
+    }));
+    let r_wq_col_base = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_wq_col_base,
+        lhs: Operand::Reg(r_warp_col_quad),
+        rhs: Operand::ImmU32(WARP_QUAD_N),
+        ty: PtxType::U32,
+    }));
+
+    // block_row = ctaid.y * BM_BLOCK, block_col = ctaid.x * BN_BLOCK
+    let (r_ctaid_x, ctaid_x_instr) = kaio_core::instr::special::ctaid_x(&mut alloc);
+    kernel.push(ctaid_x_instr);
+    let (r_ctaid_y, ctaid_y_instr) = kaio_core::instr::special::ctaid_y(&mut alloc);
+    kernel.push(ctaid_y_instr);
+    let r_block_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_block_row,
+        lhs: Operand::Reg(r_ctaid_y),
+        rhs: Operand::ImmU32(BM_BLOCK),
+        ty: PtxType::U32,
+    }));
+    let r_block_col = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_block_col,
+        lhs: Operand::Reg(r_ctaid_x),
+        rhs: Operand::ImmU32(BN_BLOCK),
+        ty: PtxType::U32,
+    }));
+
+    // --- Shared base regs ---
+    let r_tile_a = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_a,
+        src: Operand::SharedAddr("tile_a".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_tile_b = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_b,
+        src: Operand::SharedAddr("tile_b".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_tile_s = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_s,
+        src: Operand::SharedAddr("tile_scales".to_string()),
+        ty: PtxType::U32,
+    });
+
+    // --- a_block_base, b_block_base, scales_block_base (block-level global origins) ---
+    // a_block_base = a + block_row * k_bytes
+    let rd_a_row_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_a_row_off,
+        lhs: Operand::Reg(r_block_row),
+        rhs: Operand::Reg(r_k_bytes),
+        src_ty: PtxType::U32,
+    }));
+    let rd_a_block_base = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_a_block_base,
+        lhs: Operand::Reg(rd_a_g),
+        rhs: Operand::Reg(rd_a_row_off),
+        ty: PtxType::U64,
+    }));
+
+    // b_block_base = b + block_col * (k/8) * 4   (col-major, u32 stride)
+    let r_b_col_off_words = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_b_col_off_words,
+        lhs: Operand::Reg(r_block_col),
+        rhs: Operand::Reg(r_k_words),
+        ty: PtxType::U32,
+    }));
+    let rd_b_col_off = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_b_col_off,
+        lhs: Operand::Reg(r_b_col_off_words),
+        rhs: Operand::ImmU32(BYTES_PER_B32),
+        src_ty: PtxType::U32,
+    }));
+    let rd_b_block_base = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_b_block_base,
+        lhs: Operand::Reg(rd_b_g),
+        rhs: Operand::Reg(rd_b_col_off),
+        ty: PtxType::U64,
+    }));
+
+    // --- Allocate + zero the per-warp C fragment grid (2 m-stripes × 4 n-stripes = 8) ---
+    let mut frag_c_grid: [[FragmentC; MMAS_PER_WARP_N as usize]; MMAS_PER_WARP_M as usize] = [
+        [
+            alloc_c(&mut alloc),
+            alloc_c(&mut alloc),
+            alloc_c(&mut alloc),
+            alloc_c(&mut alloc),
+        ],
+        [
+            alloc_c(&mut alloc),
+            alloc_c(&mut alloc),
+            alloc_c(&mut alloc),
+            alloc_c(&mut alloc),
+        ],
+    ];
+    for row in &frag_c_grid {
+        for frag in row {
+            for reg in &frag.regs {
+                kernel.push(PtxInstruction::Mov {
+                    dst: *reg,
+                    src: Operand::ImmF32(0.0),
+                    ty: PtxType::F32,
+                });
+            }
+        }
+    }
+
+    // --- Pre-zero shared tiles + bar.sync ---
+    emit_pre_zero_shared_tiles_int4(
+        &mut alloc,
+        &mut kernel,
+        r_tile_a,
+        r_tile_b,
+        r_tile_s,
+        r_flat_tid,
+    );
+
+    // --- K-loop ---
+    let r_num_k_tiles = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_num_k_tiles,
+        lhs: Operand::Reg(r_k),
+        rhs: Operand::ImmU32(K_TILE_SHARED),
+        ty: PtxType::U32,
+    }));
+    let r_k_tile = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_k_tile,
+        src: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    });
+
+    kernel.push(PtxInstruction::Label("K_LOOP_I4".to_string()));
+
+    // Compute per-K-tile global offsets.
+    // A tile starts at a_block_base + k_tile * K_TILE_SHARED * BYTES_PER_F16.
+    let r_k_tile_a_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_tile_a_off,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(K_TILE_SHARED * BYTES_PER_F16),
+        ty: PtxType::U32,
+    }));
+    let rd_k_tile_a_off64 = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_k_tile_a_off64,
+        src: r_k_tile_a_off,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+    let rd_a_tile_src = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_a_tile_src,
+        lhs: Operand::Reg(rd_a_block_base),
+        rhs: Operand::Reg(rd_k_tile_a_off64),
+        ty: PtxType::U64,
+    }));
+    // B tile (packed col-major) starts at b_block_base + k_tile * (K_TILE_SHARED/8) * 4 = k_tile * 8.
+    let r_k_tile_b_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_k_tile_b_off,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32((K_TILE_SHARED / NIBBLES_PER_U32) * BYTES_PER_B32),
+        ty: PtxType::U32,
+    }));
+    let rd_k_tile_b_off64 = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Cvt {
+        dst: rd_k_tile_b_off64,
+        src: r_k_tile_b_off,
+        dst_ty: PtxType::U64,
+        src_ty: PtxType::U32,
+    });
+    let rd_b_tile_src = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_b_tile_src,
+        lhs: Operand::Reg(rd_b_block_base),
+        rhs: Operand::Reg(rd_k_tile_b_off64),
+        ty: PtxType::U64,
+    }));
+
+    // Group-scale reload on transitions (every K_TILE_GROUP_RATIO K-tiles).
+    // If (k_tile % K_TILE_GROUP_RATIO) == 0, reload scales[g, block_col..+64].
+    let r_group_phase = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
+        dst: r_group_phase,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(K_TILE_GROUP_RATIO),
+        ty: PtxType::U32,
+    }));
+    let p_new_group = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_new_group,
+        cmp_op: CmpOp::Eq,
+        lhs: Operand::Reg(r_group_phase),
+        rhs: Operand::ImmU32(0),
+        ty: PtxType::U32,
+    }));
+    let scales_load_skip = "SCALES_LOAD_SKIP_I4".to_string();
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_new_group,
+        target: scales_load_skip.clone(),
+        negate: true,
+    }));
+    // Current group id = k_tile / K_TILE_GROUP_RATIO.
+    let r_current_group = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Div {
+        dst: r_current_group,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(K_TILE_GROUP_RATIO),
+        ty: PtxType::U32,
+    }));
+    // scales_base = scales + current_group * N * 2 (f16 = 2 B). Layout: [num_groups, N] row-major.
+    let r_scales_row_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
+        dst: r_scales_row_off,
+        lhs: Operand::Reg(r_current_group),
+        rhs: Operand::Reg(r_n),
+        ty: PtxType::U32,
+    }));
+    let rd_scales_row_off64 = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
+        dst: rd_scales_row_off64,
+        lhs: Operand::Reg(r_scales_row_off),
+        rhs: Operand::ImmU32(BYTES_PER_F16),
+        src_ty: PtxType::U32,
+    }));
+    let rd_scales_base = alloc.alloc(PtxType::U64);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: rd_scales_base,
+        lhs: Operand::Reg(rd_s_g),
+        rhs: Operand::Reg(rd_scales_row_off64),
+        ty: PtxType::U64,
+    }));
+    emit_cooperative_load_group_scales_64(
+        &mut alloc,
+        &mut kernel,
+        rd_scales_base,
+        r_tile_s,
+        r_flat_tid,
+        r_block_col,
+        r_n,
+        "",
+    );
+    kernel.push(PtxInstruction::Label(scales_load_skip));
+
+    // A tile + B tile cooperative loads.
+    emit_mw_load_tile_a_f16_64x16(
+        &mut alloc,
+        &mut kernel,
+        rd_a_tile_src,
+        r_tile_a,
+        r_flat_tid,
+        r_block_row,
+        r_m,
+        r_k_bytes,
+        "",
+    );
+    emit_mw_load_tile_b_packed_2x64(
+        &mut alloc,
+        &mut kernel,
+        rd_b_tile_src,
+        r_tile_b,
+        r_flat_tid,
+        r_block_col,
+        r_n,
+        r_k_words,
+        "",
+    );
+
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+        barrier_id: 0,
+    }));
+
+    // Warp quadrant mma pipeline.
+    emit_warp_quadrant_mma_int4(
+        &mut alloc,
+        &mut kernel,
+        r_tile_a,
+        r_tile_b,
+        r_tile_s,
+        r_wq_row_base,
+        r_wq_col_base,
+        r_tid_x,
+        &mut frag_c_grid,
+    );
+
+    kernel.push(PtxInstruction::Control(ControlOp::BarSync {
+        barrier_id: 0,
+    }));
+
+    // k_tile += 1; if k_tile < num_k_tiles, loop.
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_k_tile,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::ImmU32(1),
+        ty: PtxType::U32,
+    }));
+    let p_k_loop = alloc.alloc(PtxType::Pred);
+    kernel.push(PtxInstruction::Control(ControlOp::SetP {
+        dst: p_k_loop,
+        cmp_op: CmpOp::Lt,
+        lhs: Operand::Reg(r_k_tile),
+        rhs: Operand::Reg(r_num_k_tiles),
+        ty: PtxType::U32,
+    }));
+    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+        pred: p_k_loop,
+        target: "K_LOOP_I4".to_string(),
+        negate: false,
+    }));
+
+    // --- Store output ---
+    // Flatten the 2x4 frag_c_grid into the 8-element flat layout that
+    // matmul_tc_kernel::emit_warp_quadrant_store expects.
+    // That helper indexes accs[m_stripe * MMAS_PER_WARP_N + n_stripe].
+    let accs_flat: [FragmentC; 8] = [
+        frag_c_grid[0][0],
+        frag_c_grid[0][1],
+        frag_c_grid[0][2],
+        frag_c_grid[0][3],
+        frag_c_grid[1][0],
+        frag_c_grid[1][1],
+        frag_c_grid[1][2],
+        frag_c_grid[1][3],
+    ];
+
+    // Map (warp_row_quad, warp_col_quad) at runtime to the two static
+    // warp_quadrant_(row|col)_start values by branching to specialized
+    // store regions. This keeps the store helper happy with u32 constant
+    // args while still supporting 4 warps.
+    let label_store_end = "STORE_END_I4".to_string();
+    for (quad_row, quad_col) in [(0u32, 0u32), (0u32, 1u32), (1u32, 0u32), (1u32, 1u32)]
+        .iter()
+        .copied()
+    {
+        let is_this_warp_label = format!("STORE_WARP_{quad_row}_{quad_col}_I4");
+        let p_match = alloc.alloc(PtxType::Pred);
+        let r_quad_row_imm = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Mov {
+            dst: r_quad_row_imm,
+            src: Operand::ImmU32(quad_row),
+            ty: PtxType::U32,
+        });
+        kernel.push(PtxInstruction::Control(ControlOp::SetP {
+            dst: p_match,
+            cmp_op: CmpOp::Eq,
+            lhs: Operand::Reg(r_warp_row_quad),
+            rhs: Operand::Reg(r_quad_row_imm),
+            ty: PtxType::U32,
+        }));
+        let r_quad_col_imm = alloc.alloc(PtxType::U32);
+        kernel.push(PtxInstruction::Mov {
+            dst: r_quad_col_imm,
+            src: Operand::ImmU32(quad_col),
+            ty: PtxType::U32,
+        });
+        let p_col_match = alloc.alloc(PtxType::Pred);
+        kernel.push(PtxInstruction::Control(ControlOp::SetP {
+            dst: p_col_match,
+            cmp_op: CmpOp::Eq,
+            lhs: Operand::Reg(r_warp_col_quad),
+            rhs: Operand::Reg(r_quad_col_imm),
+            ty: PtxType::U32,
+        }));
+        let p_both = alloc.alloc(PtxType::Pred);
+        kernel.push(PtxInstruction::Arith(ArithOp::And {
+            dst: p_both,
+            lhs: Operand::Reg(p_match),
+            rhs: Operand::Reg(p_col_match),
+            ty: PtxType::Pred,
+        }));
+        kernel.push(PtxInstruction::Control(ControlOp::BraPred {
+            pred: p_both,
+            target: is_this_warp_label.clone(),
+            negate: true,
+        }));
+
+        crate::matmul_tc_kernel::emit_warp_quadrant_store(
+            &mut alloc,
+            &mut kernel,
+            rd_d_g,
+            &accs_flat,
+            r_tid_x,
+            quad_row * WARP_QUAD_M,
+            quad_col * WARP_QUAD_N,
+            r_block_row,
+            r_block_col,
+            r_m,
+            r_n,
+            r_n_f32_stride,
+        );
+        kernel.push(PtxInstruction::Control(ControlOp::Bra {
+            target: label_store_end.clone(),
+        }));
+        kernel.push(PtxInstruction::Label(is_this_warp_label));
+    }
+    kernel.push(PtxInstruction::Label(label_store_end));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new(sm);
+    module.add_kernel(kernel);
+    module
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1248,4 +2272,116 @@ mod tests {
     // INT8's `matmul_api.rs` pattern — a real `KaioDevice` + `alloc_zeros`
     // buffers. The function itself ships in D4.1 so the test harness in
     // D6 can import and exercise it directly.
+
+    // --- D4.3: full kernel module gate ---
+
+    /// Structure canary: the full module must emit exactly 8 `mma.sync`
+    /// instructions (2 m-stripes × 4 n-stripes) per warp quadrant —
+    /// and the module emits the per-warp-quadrant block once, inside
+    /// the K-loop. Count includes only the final assembly's mmas.
+    #[test]
+    fn module_emits_eight_mma_sync_per_warp_quadrant() {
+        use kaio_core::emit::{Emit, PtxWriter};
+        let module = build_matmul_int4_module("sm_80");
+        let mut w = PtxWriter::new();
+        module.emit(&mut w).unwrap();
+        let ptx = w.finish();
+
+        let mma_count = ptx.matches("mma.sync.aligned.m16n8k16").count();
+        assert_eq!(
+            mma_count,
+            (MMAS_PER_WARP_M * MMAS_PER_WARP_N) as usize,
+            "expected {} mma.sync.m16n8k16 ({MMAS_PER_WARP_M} m-stripes × {MMAS_PER_WARP_N} n-stripes); \
+             found {mma_count}\n\n=== emitted PTX (first 4000 chars) ===\n{}",
+            MMAS_PER_WARP_M * MMAS_PER_WARP_N,
+            &ptx[..ptx.len().min(4000)]
+        );
+    }
+
+    /// Structure canary: total `shr.s32` count in the full module.
+    /// Every fragment-B dequant emits 2 `shr.s32` per lane per u32
+    /// (inside the narrow 2-nibble helper). Per K-tile per warp: 4
+    /// n-stripes × 2 u32 × 2 shr.s32 = 16 `shr.s32` call-sites
+    /// emitted. The K-loop wraps this region once statically (runtime
+    /// iteration is via a PTX branch, not unrolled), so the final
+    /// module has exactly 16 `shr.s32` text occurrences from the
+    /// fragment-B dequant pipeline.
+    ///
+    /// This canary would catch a regression where the narrow helper
+    /// accidentally used `shr.u32` at one of the emission sites.
+    #[test]
+    fn module_shr_s32_count_matches_per_lane_dequant_shape() {
+        use kaio_core::emit::{Emit, PtxWriter};
+        let module = build_matmul_int4_module("sm_80");
+        let mut w = PtxWriter::new();
+        module.emit(&mut w).unwrap();
+        let ptx = w.finish();
+
+        let shr_s32 = ptx.matches("shr.s32").count();
+        let shr_u32 = ptx.matches("shr.u32").count();
+        // 4 n-stripes × 2 u32 × 2 nibbles = 16 shr.s32 inside the K-loop body.
+        assert_eq!(
+            shr_s32,
+            16,
+            "expected 16 `shr.s32` (4 n-stripes × 2 u32 × 2 nibbles per fragment-B dequant); \
+             found {shr_s32}\n\n=== emitted PTX (first 4000 chars) ===\n{}",
+            &ptx[..ptx.len().min(4000)]
+        );
+        assert_eq!(
+            shr_u32, 0,
+            "expected zero `shr.u32` in fragment-B dequant (R1 sign-extend canary for INT4 \
+             weights); found {shr_u32}"
+        );
+    }
+
+    /// ptxas_verify for the full `matmul_int4` module (final D4.3
+    /// gate). Runs `ptxas -arch=sm_80` over the complete kernel
+    /// (pre-zero + K-loop + fragment-B dequant + mma grid + store)
+    /// and confirms the whole thing assembles cleanly. `#[ignore]`
+    /// so host-only runs don't fail — invoke via `cargo test --
+    /// --ignored`.
+    #[test]
+    #[ignore]
+    fn ptxas_verify_matmul_int4() {
+        use kaio_core::emit::{Emit, PtxWriter};
+
+        let ptxas_check = std::process::Command::new("ptxas")
+            .arg("--version")
+            .output();
+        if ptxas_check.is_err() {
+            eprintln!("NOTE: ptxas not found in PATH — skipping PTX verification");
+            return;
+        }
+
+        let sm = std::env::var("KAIO_SM_TARGET").unwrap_or_else(|_| "sm_80".to_string());
+        let module = build_matmul_int4_module(&sm);
+        let mut w = PtxWriter::new();
+        module.emit(&mut w).unwrap();
+        let ptx = w.finish();
+
+        let tmp = std::env::temp_dir().join("kaio_matmul_int4_verify.ptx");
+        std::fs::write(&tmp, &ptx).expect("failed to write temp PTX");
+
+        let output = std::process::Command::new("ptxas")
+            .args(["--gpu-name", &sm, "--verbose"])
+            .arg(tmp.to_str().unwrap())
+            .output()
+            .expect("failed to run ptxas");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!("--- ptxas --verbose stdout ({sm}) ---\n{stdout}");
+        eprintln!("--- ptxas --verbose stderr ({sm}) ---\n{stderr}");
+        let _ = std::fs::remove_file(&tmp);
+
+        assert!(
+            output.status.success(),
+            "ptxas verification FAILED for matmul_int4 full module ({sm}):\n\
+             stdout: {}\nstderr: {}\n\n=== PTX (first 6000 chars) ===\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            stderr,
+            &ptx[..ptx.len().min(6000)]
+        );
+
+        eprintln!("ptxas verification PASSED for matmul_int4 full module ({sm})");
+    }
 }

@@ -1,6 +1,6 @@
 # Sprint 7.2 — INT4 dequantize-matmul (`matmul_int4`)
 
-**Status:** 🚧 In progress (D1 + D2 + D3 + D4.1 landed; D4.2 next)
+**Status:** 🚧 In progress (D1 + D2 + D3 + D4 landed; D5 next)
 **Branch:** `phase7-rest` off `main` (shared across Phase 7 remaining
 sprints; no independent crates.io release — Phase 7 closes with an
 aggregate release after 7.4).
@@ -387,6 +387,73 @@ API + rustdoc + D7 showcase's CPU packer align on this.
 ### D4.1 commit
 
 Commit 4: `wip(phase7): D4.1 - validate_dims_int4 + cooperative load helpers for A, B-packed, scales`.
+
+### D4.2 — narrow 2-nibble unpack helper + fragment-B per-lane dequant + warp-quadrant mma
+
+- **`emit_unpack_s4_x2_scale_to_f16_pair`** — narrow sibling of the D2 generic helper. Takes `(packed, scale_f16, shl_count_lo, shl_count_hi)` where the shl counts are `Operand`s (either immediate for compile-time positions or register for per-lane `tig`-varying positions). Emits 2 × (shl + shr.s32 + cvt.f32.s32 + cvt.f16.f32 + mul.f16) followed by a `MovPack` into one `.b32`. Output: one packed-f16-pair register.
+- **`emit_fragment_b_int4_per_lane`** — per-warp-lane dequant for one `FragmentB_M16N8K16`. Decodes the lane's `(group_id, tig)` from `tid.x % 32`, computes `col_abs = n_stripe_col_base + group_id`, loads 2 u32 packed words + 1 f16 scale from shared, computes shift counts `(28 - 8*tig, 24 - 8*tig)`, and calls the narrow helper twice (once per u32 word). Returns a `FragmentB` ready for mma.sync.
+- **`emit_warp_quadrant_mma_int4`** — per-warp-quadrant inner-loop: for each of 4 N-stripes, per-lane dequant a fresh fragment B; for each of 2 M-stripes, load fragment A from shared (reusing `load_fragment_a_m16n8k16_shared_row`) and emit `mma.sync.m16n8k16.f16.f16.f32` accumulating into the caller's `frag_c_grid`.
+
+**Fragment B lane mapping** (PTX ISA §9.7.13.5.8.1 for m16n8k16.f16):
+lane `l ∈ 0..32` owns col `l/4` and rows `{2*tig, 2*tig+1}` for reg[0] +
+`{2*tig+8, 2*tig+9}` for reg[1] where `tig = l%4`. Per fragment-B per
+lane: 4 nibbles at positions `(2*tig, 2*tig+1)` on each of 2 u32s.
+
+### D4.3 — pre-zero + full `build_matmul_int4_module`
+
+- **`emit_pre_zero_shared_tiles_int4`** — cooperative zero of tile_a
+  (2048 B), tile_b (1024 B padded; data region 768 B, tail 768..1024
+  never read), and tile_scales (128 B via lanes 0..31 subset). One
+  bar.sync at end. `TILE_B_BYTES` rounded up to multiple of
+  `THREADS_PER_BLOCK * 4 = 512` to accommodate the cooperative-zero
+  divisibility requirement.
+- **`build_matmul_int4_module(sm)`** — full kernel builder. Assembles:
+  param loads → derived scalars (`k_bytes = K*2`, `k_words = K/8`,
+  `n_f32_stride = N*4`) → thread/block indices (flat_tid,
+  warp_id, warp_row_quad, warp_col_quad, warp-quadrant row/col base,
+  block_row/block_col) → shared base regs → A/B block-base globals
+  → C fragment grid (2×4) zero-init → pre-zero shared → K-loop with
+  group-transition scale reload → A/B cooperative loads → bar.sync →
+  per-warp-quadrant mma pipeline → bar.sync → loop back → output
+  store. Output store reuses `matmul_tc_kernel::emit_warp_quadrant_store`
+  (same f32 fragment C layout) via a 4-way predicated dispatch on
+  `(warp_row_quad, warp_col_quad)` → 4 static
+  `warp_quadrant_(row|col)_start` call-sites.
+- Kernel signature: `matmul_int4(a: f16*, b_packed: u32*, scales: f16*, d: f32*, m, n, k: u32)`. Block dim `(32, 4, 1)`, grid `(N.div_ceil(64), M.div_ceil(64), 1)`.
+
+### D4.3 emit canaries + offline gate
+
+- `module_emits_eight_mma_sync_per_warp_quadrant` — counts `mma.sync.aligned.m16n8k16` in the full module; must equal `MMAS_PER_WARP_M * MMAS_PER_WARP_N = 8`.
+- `module_shr_s32_count_matches_per_lane_dequant_shape` — counts `shr.s32` across the whole module (4 n-stripes × 2 u32 × 2 nibbles = 16 sites). Asserts zero `shr.u32`. Covers the R1 headline risk at the module-assembly layer.
+- `ptxas_verify_matmul_int4` (`#[ignore]`): **PASSED on sm_80 and sm_89**. Full kernel with pre-zero + K-loop + fragment-B dequant + 2×4 mma grid + store assembles cleanly.
+
+### D4.3 register + resource budget (ptxas `--verbose` on sm_89)
+
+```
+ptxas info: Used 64 registers, used 1 barriers, 3200 bytes smem, 396 bytes cmem[0]
+            0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+```
+
+- **64 regs/thread** — exactly at the 64-reg occupancy tier for
+  128-thread CTAs on sm_89. R2 sits at the edge; D7 bench will show
+  whether perf regresses here. **Fallback if needed (R2 mitigation):**
+  drop `MMAS_PER_WARP_N` from 4 to 2.
+- **0 spills** — no register spills to local memory.
+- **3200 B smem** — matches the design budget (2944 B pure data +
+  256 B pre-zero tail padding on tile_b).
+- **1 barrier** — one `bar.sync` instance serves both inter-load and
+  end-of-K-tile barriers.
+
+### Quality gates (D4.2 + D4.3 checkpoint)
+
+- `cargo fmt --all --check` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo test --workspace --lib` ✓ (all 158 + 138 + 36 + 2 host tests green; 7 new emit tests for INT4)
+- `cargo test -- --ignored matmul_int4_kernel::tests::ptxas_verify_*` ✓ PASSED (unpack_s4, coop_loads, full module) on sm_80 + sm_89
+
+### D4 commit
+
+Commit 5: `wip(phase7): D4.2+D4.3 - fragment-B per-lane dequant + full matmul_int4 module (64 regs/thread, 3.2 KB smem)`.
 
 ## Architectural decisions
 
