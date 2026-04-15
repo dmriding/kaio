@@ -1,6 +1,6 @@
 # Sprint 7.1.5 — Warp + block reductions in the DSL
 
-**Status:** In progress
+**Status:** ✅ Complete
 **Branch:** `phase7-rest` off `main` (shared across Phase 7 remaining sprints;
 no independent crates.io release — Phase 7 closes with an aggregate release).
 **Release target:** None this sprint. Part of the eventual Phase 7 aggregate
@@ -73,4 +73,73 @@ arbitrary-permutation use case can add it as a separate IR deliverable.
 
 ## Results
 
-_To be filled in at sprint completion._
+### Correctness — all green
+
+- **Snapshot canary** (new): `kaio-macros/tests/snapshots/block_reduce_sum_f32.tokens.txt`
+  captured from main-tip state pre-D2; D2's helper extraction produced a
+  byte-identical TokenStream (AD2/AD3 hygiene held).
+- **Existing `_kaio_reduce_smem` symbol canary:** unchanged, still green.
+- **`kaio/tests/reduce_macro.rs`** — 18 GPU tests pass bit-exact on
+  sm_89. Coverage: 6 existing `block_reduce_sum/max` tests (regression
+  protection), 5 new `block_reduce_min` tests at block sizes 32 / 64 /
+  128 / 256 / 512, 5 `warp_reduce_*` tests covering sum / max / min
+  across all-ones / ascending / single-hot / alternating-sign / lane-
+  index patterns, 1 two-warp independence canary (block_size = 64
+  with warp 0 fed `lane as f32` and warp 1 fed `lane * 2.0`; asserts
+  warp 0 sees 496.0 and warp 1 sees 3040.0 independently), and 1 2D
+  `block_size = (8, 4)` warp_reduce test proving product-based linear
+  tid works.
+- **`kaio/tests/compile_fail/`** — 4 new trybuild fixtures all fail
+  with the expected errors:
+  - `cf_warp_reduce_small_block.rs` (`block_size = 16`): whole-warp
+    guard fires.
+  - `cf_warp_reduce_2d_small_product.rs` (`(4, 4)`): 2D product 16
+    fails the guard.
+  - `cf_warp_reduce_partial_warp_48.rs` (`(8, 6)` = 48): non-multiple
+    of 32 fails the guard even though ≥ 32. This is the Codex-round-3
+    specific catch.
+  - `cf_warp_reduce_wrong_type.rs`: `i32` passed where `f32` required
+    — caught by `check_f32` with a precise span pointing at the call.
+- **Per-warp semantics and partial-warp guard are exactly as specified
+  in the approved plan.** The `.stderr` for `cf04_unknown_call` was
+  refreshed to list the 4 new builtin names.
+
+### Scope — exactly as planned
+
+- No new IR variants in `kaio-core`.
+- No new showcase example (existing `examples/softmax/` already
+  demonstrates block_reduce; warp_reduce coverage via tests only).
+- No release this sprint — Phase 7 closes with an aggregate release
+  after 7.2 / 7.3 / 7.4.
+- f32-only. Integer / half-precision variants deferred.
+- `shfl.sync.idx` variant deferred.
+
+### Commits
+
+| # | Commit | Scope |
+|---|---|---|
+| 1 | `c39ba45` | D1 — sprint stub + IR audit (no-op on kaio-core) |
+| 2 | `2f28dfa` | D2.0 — pre-refactor TokenStream snapshot canary |
+| 3 | `3edb5c7` | D2 — factor `emit_warp_tree_reduce` helper (byte-identical) |
+| 4 | `b850ee7` | D3 + D4 — warp_reduce + block_reduce_min + whole-warp-multiple guard |
+| 5 | `c5d2548` | D5 — 12 new GPU tests + 4 trybuild compile-fail fixtures |
+| 6 | _this_ | D6 — docs, CHANGELOG `[Unreleased]`, master plan / phases marker |
+
+### Follow-ups noted for future sprints
+
+- Integer-typed reductions (`warp_reduce_sum(i32)` etc.) — follow-up
+  when a quant kernel needs them in DSL rather than IR-authored code.
+  The helper's type parameterization means this is a small extension,
+  not a rewrite.
+- Half-precision reductions (f16 / bf16) — follow-up.
+- `shfl.sync.idx` IR variant — not needed for reductions, but useful
+  for broadcast / general permutation patterns; standalone sprint when
+  a kernel requires it.
+- Atomics — standalone sprint when histogram / scatter-add / gradient
+  accumulation needs it.
+- Dynamic shared memory — runtime-sized tiles for auto-tuning.
+- Per-warp softmax / layer-norm showcase example — would demonstrate
+  `warp_reduce_*` visually well; defer to a polish pass or fold into
+  7.3 (quant + attention).
+- Optional: relax the TokenStream snapshot canary into pattern
+  assertions if it becomes noisy across future refactors (AD7).

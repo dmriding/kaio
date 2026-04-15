@@ -10,6 +10,77 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+### Sprint 7.1.5 — Warp + block reductions in the DSL
+
+Expressiveness bridge sprint between quant milestones. Ships the warp-level
+reduction primitives that unlock softmax / layer-norm / RMS-norm / loss
+functions in pure DSL, plus the missing `min` variants at both warp and
+block level. No independent crates.io release — Phase 7 closes with an
+aggregate release when 7.1.5 → 7.4 are all complete.
+
+#### Added — Sprint 7.1.5
+- **`warp_reduce_sum(f32) -> f32`**, **`warp_reduce_max(f32) -> f32`**,
+  **`warp_reduce_min(f32) -> f32`** — per-warp reductions via 5-round
+  butterfly shuffle tree. Every lane in the warp gets the full reduction
+  result; no shared memory or bar.sync required. In blocks larger than
+  32 threads, each warp computes its own independent result (NOT
+  block-wide — use `block_reduce_*` for block-wide).
+- **`block_reduce_min(f32) -> f32`** — completes the `sum/max/min` trio
+  at block level; matches the existing `block_reduce_sum/max` pattern.
+- **Whole-warp-multiple compile-time guard** for `warp_reduce_*`: a
+  kernel declared with a block size whose total thread count (product
+  of all dimensions) is not a multiple of 32 fails to compile with a
+  diagnostic pointing at the call. Catches the partial-warp `shfl.sync`
+  UB statically — no runtime overhead, no silent misbehavior. Guards
+  1D (`block_size = 16`) and 2D (`block_size = (4, 4)`, `(8, 6)` = 48)
+  cases together.
+- **`emit_warp_tree_reduce` helper** in `kaio-macros/src/lower/builtins.rs`
+  — factored out of the existing `lower_block_reduce` path and
+  parameterized by shuffle variant (`Down` for block_reduce's existing
+  lane-0-only semantics, `Bfly` for warp_reduce's all-lanes semantics),
+  combine op, and PTX type. The type parameterization leaves the door
+  open for a clean follow-up sprint adding `warp_reduce_sum(i32)` /
+  `(f16)` / `(bf16)` without touching the helper.
+- **Pre-refactor TokenStream snapshot canary** at
+  `kaio-macros/tests/snapshots/block_reduce_sum_f32.tokens.txt` — locks
+  the pre-refactor block_reduce expansion structure. D2's helper
+  extraction was PTX-byte-identical; the canary proved it. Scoped as a
+  refactor canary (regenerate via `KAIO_UPDATE_SNAPSHOT=1` for
+  intentional future changes); not a forever byte-identity prison.
+- **GPU test coverage (12 new `#[ignore]`d tests in `kaio/tests/reduce_macro.rs`):**
+  warp_reduce sum / max / min at 32 threads across all-ones, ascending
+  lanes, single-hot, alternating-sign patterns; `block_reduce_min` at
+  block sizes 32 / 64 / 128 / 256 / 512; a 2D-block `(8, 4)` warp_reduce
+  test; and a **64-thread two-warp independence canary** (warp 0 and
+  warp 1 fed different patterns; asserts each warp gets its own
+  reduction and the lowering doesn't accidentally blend across warps).
+  All 18 tests in the reduce_macro harness pass bit-exact on RTX 4090 sm_89.
+- **4 new `trybuild` compile-fail fixtures:** block_size = 16,
+  `(4, 4)` (2D product 16), `(8, 6)` (2D product 48 — whole-warp-
+  multiple violation), and `i32` passed where `f32` is required
+  (type-boundary lock before any future type-generalization sprint).
+
+#### Changed — Sprint 7.1.5
+- `lower_block_reduce` extended to accept `mode = "min"` alongside
+  existing `"sum"` and `"max"`. Shared-memory layout and regression
+  canaries (both symbol-presence and the new TokenStream snapshot)
+  unchanged.
+- Dispatch match at `kaio-macros/src/lower/builtins.rs` lists four
+  new builtin names; `cf04_unknown_call.stderr` trybuild snapshot
+  updated to match.
+
+#### Rustdoc contract for warp_reduce_* (public stubs at `kaio/src/gpu_builtins.rs`)
+- Per-warp semantics spelled out explicitly ("reduces across the
+  calling thread's warp only; in blocks larger than 32 threads each
+  warp computes its own independent result").
+- Whole-warp-multiple block-size requirement with compile-time-check
+  note.
+- Convergent-control-flow requirement (data-dependent branches are UB
+  that the macro cannot detect at expansion time; identity-value
+  padding pattern documented for ragged boundaries — `0.0` for sum,
+  `f32::NEG_INFINITY` for max, `f32::INFINITY` for min).
+- NaN handling documented as implementation-defined per PTX ISA.
+
 ## [0.3.0] — 2026-04-15 — Sprint 7.1: INT8 dequantize-matmul (Phase 7 quant headline)
 
 Sprint 7.1 ships the **reference INT8 symmetric dequantize-matmul**, the

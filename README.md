@@ -254,7 +254,7 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 | Feature                                  | Notes                                                                      |
 | ---------------------------------------- | -------------------------------------------------------------------------- |
 | `#[gpu_kernel]` proc macro               | Rust → PTX IR at compile time; PTX emitted + JIT-loaded at launch. Type-safe launch wrapper auto-generated. |
-| Shared memory + reductions + warp shuffles | `shared_mem![]`, `bar_sync()`, `block_reduce_sum/max`, `shfl_sync_*`.    |
+| Shared memory + reductions + warp shuffles | `shared_mem![]`, `bar_sync()`, `block_reduce_sum/max/min`, `warp_reduce_sum/max/min`, `shfl_sync_*`. |
 | 2D blocks, FMA, math builtins            | `block_size = (16,16)`, `fma`, `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max`. |
 | Scalar tiled matmul                      | `kaio_ops::matmul` / `matmul_auto` — 31% of cuBLAS sgemm. Any SM.          |
 | Fused attention + FlashAttention         | `kaio_ops::attention`, `attention_flash` (O(d_k) memory). Any SM.          |
