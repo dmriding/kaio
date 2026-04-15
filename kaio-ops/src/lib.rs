@@ -57,6 +57,10 @@ mod qkv_project_int8_kernel;
 // Currently hosts the fragment-C → packed-f16 global store path used by
 // both qkv_project variants (D2).
 mod store_out;
+// D2.5 register-pressure skeleton for the tri-output QKV projection.
+// Test-only module; excluded from release builds via its inner `#![cfg(test)]`.
+#[cfg(test)]
+mod qkv_skeleton;
 mod tuner;
 
 pub use attention_kernel::{attention, attention_causal, attention_flash, attention_flash_causal};
