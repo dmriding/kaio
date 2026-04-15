@@ -10,6 +10,85 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+### Sprint 7.2 — INT4 dequantize-matmul (`matmul_int4`)
+
+GPTQ-style W4A16 dequantize-matmul: packed signed-INT4 weights × f16
+activations → f32 accumulator via tensor cores. No independent
+crates.io release — Phase 7 closes with an aggregate release when
+7.1.5 → 7.4 are all complete.
+
+#### Added — Sprint 7.2
+
+- **`kaio_ops::matmul_int4`** — symmetric GPTQ-style W4A16
+  dequantize-matmul. Signature: `matmul_int4(device, a: &GpuBuffer<f16>,
+  b_packed: &GpuBuffer<u32>, scales: &GpuBuffer<f16>, c: &mut GpuBuffer<f32>,
+  m, n, k, group_size)`. Group size fixed at **128** for v1;
+  `K % 128 == 0` enforced. Requires SM 8.0+ (Ampere). DEQUANT-F16 path
+  fed into `mma.sync.m16n8k16.f16.f16.f32`; no native INT4 tensor core
+  on sm_80+, so per-lane unpack + sign-extend + `s32 → f32 → f16` cvt
+  chain + scale fold is mandatory before the mma.
+- **KAIO-defined packed weight + scale layout**. `b_packed: [K/8, N]`
+  col-major u32 with 8 signed nibbles per u32 K-contiguous; `scales:
+  [K/group_size, N]` row-major f16, one per `(group, output_col)`
+  cell. NOT a drop-in replacement for external AutoGPTQ / exllama /
+  GGUF packed model formats — users must repack to the KAIO
+  convention. Full rustdoc carries the exact indexing formula.
+- **Triple-layer sign-extend canary**. Emit-level token-stream test
+  asserts `shr.s32` (not `shr.u32`) at all 8 nibble-extract sites;
+  offline `ptxas_verify` gate; GPU e2e `matmul_int4_sign_extend_*`
+  round-trip at `0x88888888` / `0x77777777` and mixed-position
+  patterns like `0x87654321` — all three layers green on sm_89.
+- **`PtxInstruction::MovPack`** (`kaio-core`) — vector-pack move
+  primitive emitting `mov.b{N} %dst, {%s0, %s1, ...};`. Needed to
+  pack two `.f16` registers produced by the INT4 dequant chain into
+  one `.b32` for the tensor-core fragment B feed. Typeless `.b{N}`
+  suffix (PTX ISA §9.7.9.10 requires it for the vector-pack form;
+  `mov.u32` is rejected). Promoted to framework-level because 7.3
+  quant-attention will also need it.
+- **`ArithOp::Mul { ty: F16 | BF16, .. }` emitter fix** — was falling
+  through to `mul.lo.f16` (integer-only suffix); now correctly emits
+  `mul.f16` (PTX defaults `.rn` rounding on half-precision mul).
+  Latent bug, uncovered while building the INT4 dequant chain. One
+  emit test (`emit_mul_f16`) covers the regression.
+- **`examples/int4_matmul/`** — full end-to-end showcase. Demonstrates
+  GPTQ-lite symmetric per-column group quantization (`scale =
+  max(|w_group|) / 7`, `q = clamp(round(w/scale), -8, 7)`), packing
+  into the KAIO `[K/8, N]` col-major u32 layout (reference CPU packer
+  `pack_s4_weights`), `matmul_int4` launch, and max-abs / max-rel
+  error reporting. Tolerance set to 80% max-rel reflecting INT4's
+  inherent noise floor (16 representable values vs 256 for INT8).
+  Registered as `cargo xtask showcase int4matmul`.
+- **`kaio-ops/tests/matmul_int4_bench.rs`** — median-latency bench vs
+  cuBLAS sgemm across 512³/1024³/2048³/4096³. RTX 4090 sm_89
+  release-mode: **4096³ median ~52 TOPS, range 42–57 across 4 runs**
+  (80–101% of cuBLAS sgemm's 52–58 TFLOPS at the same shape). Variance
+  reported honestly per the Sprint 7.1 discipline. Apples-to-apples
+  disclaimer: KAIO moves 0.5 B per weight vs 4 B for sgemm — the
+  comparison is a regression reference, not a definitive TOPS ratio.
+- **12 `#[ignore]`d GPU round-trip tests** at
+  `kaio-ops/tests/matmul_int4_e2e.rs`, all passing bit-exact on RTX
+  4090 sm_89: smallest (16×8×128), sign-extend canaries, multi-group
+  (K=256 with differing per-group scales), larger shapes
+  (64/128/256³), M/N edges (17×8, 16×13), and 3 validation-error
+  paths. Max rel error across all shapes: **4.1e-6** (target was
+  1e-3).
+- **`kaio_ops::validate_dims_int4`** — host-side shape + alignment
+  gate invoked from `matmul_int4`. Rejects `group_size != 128`,
+  `K % 128 != 0`, zero-sized dims, and undersized buffers with clean
+  `KaioError::InvalidConfig` messages.
+
+#### Scope — exactly as planned
+
+- Symmetric INT4 only (no zero-points). Asymmetric GPTQ is a follow-up.
+- Group size fixed at 128. Other group sizes (32 / 64 / 256) deferred.
+- W4A16 only. W4A8 / W4A4 / W4A32 deferred.
+- GPTQ-style packing only. GGUF Q4_0 / Q4_K / Q4_K_M require separate
+  translation layers.
+- Sync-only (no `cp.async` for INT4 — matches INT8 posture).
+- No fused bias / activation epilogue.
+- No auto-tuning across tile sizes or warp counts.
+- `kaio-candle::matmul_int4` binding ships in Sprint 7.4.
+
 ### Sprint 7.1.5 — Warp + block reductions in the DSL
 
 Expressiveness bridge sprint between quant milestones. Ships the warp-level

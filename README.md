@@ -260,6 +260,7 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 | Fused attention + FlashAttention         | `kaio_ops::attention`, `attention_flash` (O(d_k) memory). Any SM.          |
 | Tensor-core matmul                       | `kaio_ops::matmul_tc` / `matmul_tc_async` / `matmul_auto_tc` — f16 → f32, SM 8.0+, **82.3% sync / 92.5% async of cuBLAS sgemm at 4096²**. |
 | INT8 dequantize-matmul (W8A8)            | `kaio_ops::matmul_int8` — symmetric i8 × i8 → f32 with single-scalar scale, SM 8.0+, K%32==0. **80–94 TOPS at 4096³ on RTX 4090 sm_89 (median ~89 across 6 runs).** v0.3.0 reference quant op. |
+| INT4 dequantize-matmul (W4A16, GPTQ-style) | `kaio_ops::matmul_int4` — packed signed-INT4 weights × f16 activations → f32, f16 group scales (group_size=128), DEQUANT-F16 via `mma.sync.m16n8k16`, SM 8.0+, K%128==0. **42–57 TOPS at 4096³ on RTX 4090 sm_89 (median ~52, 80–101% of cuBLAS sgemm).** Sprint 7.2 on `phase7-rest`; ships in Phase 7 aggregate release. |
 | Auto-tuner + cache                       | `tune_matmul`, `matmul_auto`, `matmul_auto_tc` with JSON cache.            |
 | PTX inspection                           | `KAIO_DUMP_PTX=1`, `KAIO_PTX_STATS=1`, `KAIO_PTX_ANNOTATE=1`.              |
 

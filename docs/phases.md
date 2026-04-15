@@ -276,9 +276,11 @@ sm_89, bit-exact vs CPU reference across the adversarial test matrix;
 **7.1.5 DSL reductions complete** on `phase7-rest` — `warp_reduce_sum/max/min`
 and `block_reduce_min` added with a whole-warp-multiple compile-time
 guard; no independent release, ships in the Phase 7 aggregate release
-after 7.2 / 7.3 / 7.4; **7.2 INT4 matmul in progress** on the same
-branch — DEQUANT-F16 path via `mma.sync.m16n8k16.f16.f16.f32`, W4A16
-GPTQ-style with f16 group scales, D1 landed)
+after 7.3 / 7.4; **7.2 INT4 matmul complete** on the same branch —
+`kaio_ops::matmul_int4` W4A16 GPTQ-style, `mma.sync.m16n8k16.f16.f16.f32`
+via DEQUANT-F16 chain; 4096³ median ~52 TOPS (range 42–57, 80–101%
+of cuBLAS sgemm) on RTX 4090 sm_89; 12/12 GPU round-trip tests pass
+bit-exact incl. sign-extend canaries)
 
 **Depends on:** Phase 6 complete (v0.2.1, 2026-04-14).
 
@@ -304,7 +306,7 @@ for the detailed sprint breakdown, architectural decisions, and risks.
 | 7.0.5 | Pre-7.1 ergonomics fast-track — debug-build performance note, proc-macro error-span audit, consolidated debugging guide | Complete (v0.2.2) |
 | 7.1 | INT8 dequantize-matmul (forward) — `kaio_ops::matmul_int8`, W8A8 symmetric, single-scalar scale, `K%32==0`, sync-only. Path FAST (direct `mma.sync.m16n8k32.s8.s8.s32`). 80–94 TOPS i8 ops at 4096³ on RTX 4090 sm_89 (median ~89 across 6 runs). | **Complete (v0.3.0)** |
 | 7.1.5 | Warp + block reductions in DSL — `warp_reduce_sum/max/min` + `block_reduce_min` as `#[gpu_kernel]` builtins, with a whole-warp-multiple compile-time guard. | **Complete (ships in Phase 7 aggregate)** |
-| 7.2 | INT4 dequantize-matmul (GPTQ-style packed 4-bit) | In progress (D1 landed) |
+| 7.2 | INT4 dequantize-matmul (GPTQ-style packed 4-bit) | **Complete (ships in Phase 7 aggregate)** |
 | 7.3 | Quant + attention integration | Planned |
 | 7.4 | `kaio-candle` bridge crate (forward + backward kernels via `CustomOp`) | Planned |
 

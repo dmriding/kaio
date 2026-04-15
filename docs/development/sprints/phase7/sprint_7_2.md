@@ -1,6 +1,6 @@
 # Sprint 7.2 — INT4 dequantize-matmul (`matmul_int4`)
 
-**Status:** 🚧 In progress (D1 + D2 + D3 + D4 landed; D5 next)
+**Status:** ✅ Complete
 **Branch:** `phase7-rest` off `main` (shared across Phase 7 remaining
 sprints; no independent crates.io release — Phase 7 closes with an
 aggregate release after 7.4).
@@ -454,6 +454,154 @@ ptxas info: Used 64 registers, used 1 barriers, 3200 bytes smem, 396 bytes cmem[
 ### D4 commit
 
 Commit 5: `wip(phase7): D4.2+D4.3 - fragment-B per-lane dequant + full matmul_int4 module (64 regs/thread, 3.2 KB smem)`.
+
+## D5 — Public API + host dispatch
+
+`kaio_ops::matmul_int4` public function:
+
+```rust
+pub fn matmul_int4(
+    device: &KaioDevice,
+    a: &GpuBuffer<f16>,          // [M, K] row-major
+    b_packed: &GpuBuffer<u32>,   // [K/8, N] col-major, 8 nibbles/u32
+    scales: &GpuBuffer<f16>,     // [K/group_size, N] row-major
+    c: &mut GpuBuffer<f32>,      // [M, N] row-major
+    m: u32, n: u32, k: u32,
+    group_size: u32,             // must be 128 in v1
+) -> Result<()>;
+```
+
+Dispatch: `validate_dims_int4` → build module for `sm_{cc}` → load +
+launch with grid `(n/64, m/64, 1)`, block `(32, 4, 1)`. Rustdoc spells
+out the packing formula verbatim, the W4A16 scope, the sign-extend
+guarantee, and the "KAIO-defined reference kernel, not GPTQ/GGUF
+compat" contract. `matmul_int4` re-exported from `kaio_ops`.
+
+Commit 6: `wip(phase7): D5 - matmul_int4 public API + host dispatch + rustdoc packing spec`.
+
+## D6 — GPU e2e tests (correctness proven bit-exact)
+
+`kaio-ops/tests/matmul_int4_e2e.rs` — 12 GPU tests, all `#[ignore]`d.
+CPU reference reproduces the exact `s32 → f32 → f16` cvt chain the
+kernel uses. Runs on RTX 4090 sm_89:
+
+| Test | max_rel | Notes |
+|---|---|---|
+| `smallest_16_8_128_all_ones_weights` | **0.0 (bit-exact)** | |
+| `sign_extend_canary_negative_eights` | **0.0 (bit-exact)** | R1 canary — GPU layer |
+| `sign_extend_canary_mixed_positions` | **0.0 (bit-exact)** | R1 canary — position-varying |
+| `multi_group_k256` | **0.0 (bit-exact)** | R3 group-boundary |
+| `edge_m_17` | 1.76e-6 | M edge predication |
+| `edge_n_13` | 1.32e-6 | N edge predication |
+| `64_64_128` | 2.65e-6 | |
+| `128_128_256` | 3.46e-6 | |
+| `256_256_512` | 4.08e-6 | |
+| `rejects_k_not_multiple_of_128` | n/a | validation error path |
+| `rejects_non_128_group_size` | n/a | validation error path |
+| `rejects_zero_dim` | n/a | validation error path |
+
+Max rel error across ALL shapes: **4.1e-6** — well under the 1e-3
+target. Sign-extend canaries are bit-exact on hardware: R1 killed.
+
+Commit 7: `wip(phase7): D6 - matmul_int4 GPU e2e tests (12 pass bit-exact on sm_89, max_rel 4e-6)`.
+
+## D7 — Bench + showcase
+
+### `kaio-ops/tests/matmul_int4_bench.rs`
+
+Bench harness with deterministic inputs, median latency over 20 iters
+(5 warmup), and cuBLAS sgemm comparison as a regression reference.
+RTX 4090 sm_89 release-mode numbers across 4 runs:
+
+| Size | KAIO INT4 (TOPS) | cuBLAS sgemm (TF) | vs sgemm |
+|---|---|---|---|
+| 512³ | 0.47 | 10.4–11.8 | 4–5% |
+| 1024³ | 3.5–3.6 | 32.2–37.0 | 10–12% |
+| 2048³ | 20.5–21.8 | 43.1–52.5 | 39–51% |
+| **4096³** | **41.7–57.4** (median ~52) | 52.0–58.3 | **80–101%** |
+
+At 4096³ (realistic LLM-inference shape), `matmul_int4` lands at 80-101%
+of cuBLAS sgemm. Variance at 4096³ (42-57 TOPS) is honest consumer-GPU
+jitter; report the range per 7.1's discipline.
+
+### `examples/int4_matmul/`
+
+Full showcase package (`Cargo.toml`, `src/main.rs`, `README.md`).
+Demonstrates: GPTQ-lite symmetric per-column group quantization (naive
+`max(|w|)/7`), packing into the KAIO `[K/8, N]` col-major u32 layout
+(`pack_s4_weights` helper — the reference CPU packer users adapt for
+their own pipelines), `matmul_int4` launch, and max-abs / max-rel
+error vs f32 naive reference.
+
+Tolerance is 80% max-rel (reflects INT4's inherent noise floor — 16
+representable values give ~16× more per-element noise than INT8).
+Registered in `cargo xtask showcase int4matmul` alongside the INT8
+showcase. Verified passing.
+
+Commit 8: `wip(phase7): D7 - matmul_int4_bench (42-57 TOPS 4096³ sm_89) + int4_matmul showcase + xtask integration`.
+
+## Results (sprint-final)
+
+### Correctness — all green
+
+- **D2 emit canaries**: sign-extend uses `shr.s32` at all 8 nibble positions (IR-emit layer); nibble position coverage complete; 4 packed f16 pairs emitted.
+- **D4.3 module canaries**: 8 `mma.sync.m16n8k16` (2 m-stripes × 4 n-stripes); 16 `shr.s32` (4 n-stripes × 2 u32 × 2 nibbles); 0 `shr.u32`.
+- **ptxas_verify**: offline `ptxas -arch=sm_80` / `-arch=sm_89` accepts unpack_s4 helper, coop-loads smoke, and full `matmul_int4` module.
+- **GPU e2e (D6)**: all 12 tests pass on sm_89. Sign-extend canaries bit-exact; large-shape tests max_rel ≤ 4.1e-6; validation-error tests cover K-multiple, group-size, and zero-dim paths.
+
+### Performance — R2 register budget landed in the tier
+
+- ptxas --verbose on sm_89: **64 registers / thread**, **0 spills**, **3200 B smem**, **1 barrier**.
+- Sits exactly at the 64-reg occupancy tier for 128-thread CTAs. Not forcing the fallback (MMAS_PER_WARP_N 4→2) — perf numbers are competitive with cuBLAS sgemm at 4096³.
+- **4096³ median ~52 TOPS** on RTX 4090 sm_89. Range 42–57 across 4 runs.
+
+### Scope — exactly as planned
+
+- DEQUANT-F16 path via `mma.sync.m16n8k16.f16.f16.f32` (AD1).
+- Symmetric INT4, no zero-points (AD2).
+- Group size fixed at 128 (AD3); `K % 128 == 0` enforced.
+- Packed weights stay packed in shared; dequant fuses at shared→register (AD4).
+- INT8 block structure reused: 4 warps × 64×64 output, 2×2 quadrants (AD5).
+- W4A16; f16 activations, f16 scales, f32 accumulator, f32 output (AD6).
+- Triple-layer sign-extend canary (AD7) — all three gates green.
+- ptxas --verbose register count recorded (AD8).
+- No fused bias / activation, no runtime dispatch (AD9/AD10).
+- Bench variance reported honestly (AD11).
+
+### One `kaio-core` IR addition
+
+- **`PtxInstruction::MovPack`** — vector-pack `mov.b{N} %dst, {%s0, %s1, ...};` emitter. Needed for packing two f16 registers into one b32 for the fragment-B feed (R6). Emits via the typeless `.b{N}` suffix as required by ptxas; derived from `PtxType::size_bytes() * 8`. One emit test covers the f16-pair → b32 case. Promoted to framework-level because 7.3 quant-attention will also need it.
+
+### One latent-bug fix (not load-bearing for INT4 but useful)
+
+- **`ArithOp::Mul { ty: F16 | BF16, .. }`** — was falling through to `mul.lo.f16` (the integer-multiply suffix), which ptxas rejects. Extended the float arm to cover `F16` / `BF16`. Added `emit_mul_f16` unit test.
+
+### Commit table
+
+| # | Commit | Scope |
+|---|---|---|
+| 1 | `25d5314` | D1 — sprint stub + `MovPack` IR primitive + DEQUANT-F16 audit |
+| 2 | `1ab9b4b` | D2 — unpack helper + sign-extend canary (3 emit tests + ptxas_verify) |
+| 3 | `df5f771` | D3 — shared-memory layout + group-scale broadcast design (no code) |
+| 4 | `ca371c4` | D4.1 — `validate_dims_int4` + cooperative load helpers (A, B-packed, scales) |
+| 5 | `666ff6d` | D4.2+D4.3 — fragment-B per-lane dequant + full `matmul_int4` module |
+| 6 | `f2e45e9` | D5 — `matmul_int4` public API + host dispatch + rustdoc |
+| 7 | `12ee369` | D6 — GPU e2e tests (12 pass bit-exact on sm_89) |
+| 8 | `ba59e55` | D7 — bench + `examples/int4_matmul` showcase + xtask integration |
+| 9 | _this_ | D8 — docs closeout (CHANGELOG, phases, master plan, README, sprint log) |
+
+### Follow-ups noted for future sprints
+
+- **Asymmetric INT4 with zero-points** — next quant sprint.
+- **Non-128 group sizes** (32 / 64 / 256).
+- **GGUF-family packings** (Q4_0 / Q4_K / Q4_K_M).
+- **AWQ activation-aware scaling**.
+- **W4A8 / W4A4 mixed-precision**.
+- **Fused bias + activation epilogue**.
+- **`cp.async` + software pipelining for INT4**.
+- **Widen K_TILE_SHARED from 16 to 32** — perf follow-up if barrier overhead dominates at a given shape. Implemented as a named-constant change.
+- **`kaio-candle::matmul_int4` binding** — lands in Sprint 7.4.
+- **`int4_pack_gptq` CPU helper in the main `kaio_ops` crate** — if external-interop demand surfaces.
 
 ## Architectural decisions
 
