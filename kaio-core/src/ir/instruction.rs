@@ -50,6 +50,30 @@ pub enum PtxInstruction {
         /// Source PTX type.
         src_ty: PtxType,
     },
+    /// Vector-pack move: concatenate narrow source registers into one
+    /// wider destination register via PTX's braced-source modifier.
+    ///
+    /// Emits `mov{suffix} %dst, {%s0,%s1,...};`
+    ///
+    /// Common use: pack two `.f16` (or `.b16`) registers into one `.b32`
+    /// for tensor-core fragment B feed after a computed-in-register
+    /// dequant chain (INT4 DEQUANT-F16 in Sprint 7.2). The normal
+    /// [`Mov`](Self::Mov) variant is single-source only; loading adjacent
+    /// fp16 values from memory as one `.b32` covers the memory case but
+    /// not the algorithmic-pack case.
+    ///
+    /// The emitter does not validate lane widths against `ty`; callers
+    /// must ensure `srcs.len() * size_of(src_ty) == size_of(ty)` at the
+    /// PTX level (e.g. two `.b16` into one `.b32`).
+    MovPack {
+        /// Destination register (wider type).
+        dst: Register,
+        /// Source registers, low-lane first. Emitted braced and
+        /// comma-separated.
+        srcs: Vec<Register>,
+        /// Destination PTX type suffix (typically `.b32` / `.b64`).
+        ty: PtxType,
+    },
     /// A label target for branches.
     Label(String),
     /// A comment in the emitted PTX (for debugging / readability).

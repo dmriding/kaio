@@ -134,6 +134,10 @@ impl PtxKernel {
                     s.total_instructions += 1;
                     s.cvt += 1;
                 }
+                PtxInstruction::MovPack { .. } => {
+                    s.total_instructions += 1;
+                    s.mov += 1;
+                }
                 PtxInstruction::Label(_) | PtxInstruction::Comment(_) => {}
             }
         }
