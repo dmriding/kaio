@@ -1,13 +1,19 @@
-#![allow(dead_code)]
-// WIP module — helpers + constants are wired up progressively across D4.1/D4.2/D4.3. Final sprint commit removes this.
-
 //! INT4 symmetric dequantize-matmul — `mma.sync.m16n8k16.f16.f16.f32`
 //! with fused unpack + sign-extend + cvt chain feeding fragment B.
 //!
-//! Sprint 7.2. Shipping in stages across D1–D8; this file currently
-//! carries the D2 helper (`emit_unpack_s4_x8_scale_to_f16x8`) plus its
-//! triple-layer sign-extend canary. D4 will add the full K-tile loop
-//! + warp quadrant assembly.
+//! Sprint 7.2 (v0.3+unreleased). Public entry point is [`matmul_int4`];
+//! everything else in this module is `pub(crate)` IR-construction
+//! machinery. Key pieces, top-down:
+//!
+//! - [`matmul_int4`] — host-side launch + shape validation.
+//! - [`build_matmul_int4_module`] — full PTX module builder for a given SM target.
+//! - [`emit_warp_quadrant_mma_int4`] — per-warp-quadrant inner loop: 4 N-stripes × 2 M-stripes = 8 mmas.
+//! - [`emit_fragment_b_int4_per_lane`] — per-lane fragment-B dequant pipeline.
+//! - [`emit_unpack_s4_x2_scale_to_f16_pair`] — narrow 2-nibble dequant helper used by the fragment-B path.
+//! - [`emit_unpack_s4_x8_scale_to_f16x8`] — wider 8-nibble helper reserved for the offline ptxas_verify smoke kernel; kept around as the sign-extend-canary target.
+//! - [`emit_mw_load_tile_a_f16_64x16`] / [`emit_mw_load_tile_b_packed_2x64`] / [`emit_cooperative_load_group_scales_64`] — cooperative load helpers, one per shared tile.
+//! - [`emit_pre_zero_shared_tiles_int4`] — cooperative zero of the three shared tiles.
+//! - [`validate_dims_int4`] — host-side shape + alignment validation.
 //!
 //! # DEQUANT-F16 path (why)
 //!
@@ -46,7 +52,9 @@ use kaio_core::types::RegKind;
 // --- mma.sync.m16n8k16 instance shape (f16 inputs, f32 accumulator) ---
 const BM: u32 = 16; // mma m dim
 const BN: u32 = 8; // mma n dim
-const BK: u32 = 16; // mma k dim
+// `BK` (the mma K dim, 16) is identical to K_TILE_SHARED by design;
+// we use the K_TILE_SHARED name everywhere to reflect the tile-load
+// granularity. BK is kept implicit via that equality.
 
 // --- Multi-warp block tiling (mirrors matmul_int8 / matmul_tc) ---
 const BM_BLOCK: u32 = 64; // output rows per block
@@ -2057,6 +2065,107 @@ pub(crate) fn build_matmul_int4_module(sm: &str) -> kaio_core::ir::PtxModule {
     let mut module = PtxModule::new(sm);
     module.add_kernel(kernel);
     module
+}
+
+/// GPTQ-style W4A16 dequantize-matmul: signed-INT4 packed weights ×
+/// f16 activations → f32 accumulator, with f16 group scales applied
+/// pre-mma.
+///
+/// **KAIO-defined reference kernel** — not a drop-in replacement for
+/// AutoGPTQ / exllama / GGUF packed model formats. Users with an
+/// externally-quantized model must repack to the KAIO convention
+/// documented below. `examples/int4_matmul/` ships a reference CPU
+/// packer that demonstrates the exact layout.
+///
+/// # Shapes + packing convention
+///
+/// - `a: [M, K]` — f16 activations, row-major.
+/// - `b_packed: [K/8, N]` — packed signed INT4 weights, **col-major
+///   `u32`**, 8 nibbles per u32 K-contiguous. For a logical weight
+///   matrix `B[k, n]`:
+///   ```text
+///   word_index   = (k / 8) + n * (K / 8)   // index into b_packed
+///   nibble_index = k % 8                    // lane within the word
+///   nibble_bits  = (b_packed[word_index] >> (4 * nibble_index)) & 0xF
+///   signed_value = sign_extend_from_4_bits(nibble_bits)  // in [-8, +7]
+///   ```
+/// - `scales: [K/group_size, N]` — f16 group scales, **row-major**.
+///   For group `g = k / group_size`, `scales[g * N + n]` is the shared
+///   scale for all `group_size` weights in column `n` over K-range
+///   `[g * group_size, (g + 1) * group_size)`.
+/// - `c: [M, N]` — f32 output, row-major.
+///
+/// Dequantized value: `signed_value as f32 * scales[g, n] as f32`.
+/// The GPU kernel performs this in f16 after `s32 → f32 → f16` cvt;
+/// the CPU reference in `kaio-ops/tests/matmul_int4_e2e.rs`
+/// reproduces the same chain for bit-comparable correctness.
+///
+/// # Constraints (Sprint 7.2 v1)
+///
+/// - `group_size == 128`. Non-128 group sizes are deferred.
+/// - `K % 128 == 0`. Partial groups are not supported.
+/// - `M`, `N`: any positive value. Edge-tile predication inside the
+///   kernel handles ragged output.
+/// - Symmetric INT4 only; no zero-points.
+///
+/// # Hardware
+///
+/// Requires NVIDIA Ampere or newer (SM 8.0+) for the
+/// `mma.sync.m16n8k16.f16.f16.f32` shape. Sub-Ampere targets are
+/// rejected by `PtxModule::validate()` before driver dispatch.
+///
+/// # Out of scope (this sprint)
+///
+/// Asymmetric INT4 (zero-points), non-128 group sizes, W4A8 / W4A32
+/// activation widths, GGUF packings (Q4_0 / Q4_K / Q4_K_M), AWQ,
+/// fused bias + activation, and auto-tuning are additive refinements
+/// planned for follow-up sprints. The `kaio-candle::matmul_int4`
+/// binding lands in Sprint 7.4.
+pub fn matmul_int4(
+    device: &KaioDevice,
+    a: &GpuBuffer<half::f16>,
+    b_packed: &GpuBuffer<u32>,
+    scales: &GpuBuffer<half::f16>,
+    c: &mut GpuBuffer<f32>,
+    m: u32,
+    n: u32,
+    k: u32,
+    group_size: u32,
+) -> Result<()> {
+    use cudarc::driver::{LaunchConfig, PushKernelArg};
+
+    validate_dims_int4(a, b_packed, scales, c, m, n, k, group_size)?;
+
+    let info = device.info()?;
+    let (major, minor) = info.compute_capability;
+    let sm = format!("sm_{major}{minor}");
+    let module = build_matmul_int4_module(&sm);
+
+    let kmodule = device.load_module(&module)?;
+    let func = kmodule.function("matmul_int4")?;
+
+    let grid = (n.div_ceil(BN_BLOCK), m.div_ceil(BM_BLOCK), 1);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (32, WARPS_PER_BLOCK, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(func.inner())
+            .arg(a.inner())
+            .arg(b_packed.inner())
+            .arg(scales.inner())
+            .arg(c.inner_mut())
+            .arg(&m)
+            .arg(&n)
+            .arg(&k)
+            .launch(cfg)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

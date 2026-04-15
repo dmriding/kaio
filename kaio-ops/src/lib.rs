@@ -78,6 +78,13 @@ pub use matmul_tc_kernel::matmul_tc;
 // Requires SM 8.0+ (Ampere) and K%32==0.
 pub use matmul_int8_kernel::matmul_int8;
 
+// Sprint 7.2 — INT4 symmetric dequantize-matmul, W4A16 GPTQ-style
+// packed 4-bit weights with f16 group scales (group_size=128).
+// DEQUANT-F16 path: per-lane unpack + sign-extend + cvt + scale-fold →
+// mma.sync.m16n8k16.f16.f16.f32. Reference quant op — not a drop-in
+// for external GPTQ/GGUF model formats. Requires SM 8.0+ and K%128==0.
+pub use matmul_int4_kernel::matmul_int4;
+
 // TEMP: Sprint 6.6 final `attention_tc` + `attention_tc_causal` —
 // fused TC scaled dot-product attention. #[doc(hidden)] pub use
 // until Phase 7 lifts the divisibility + seq_k constraints and adds
