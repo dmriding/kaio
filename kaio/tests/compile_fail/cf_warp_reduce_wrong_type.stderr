@@ -1,0 +1,13 @@
+error: math function requires f32 argument, got i32
+  --> tests/compile_fail/cf_warp_reduce_wrong_type.rs:13:13
+   |
+13 |     let s = warp_reduce_sum(bad);
+   |             ^^^^^^^^^^^^^^^
+
+warning: unused import: `kaio::prelude::*`
+ --> tests/compile_fail/cf_warp_reduce_wrong_type.rs:7:5
+  |
+7 | use kaio::prelude::*;
+  |     ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

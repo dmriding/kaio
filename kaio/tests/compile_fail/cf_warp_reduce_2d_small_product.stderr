@@ -1,0 +1,13 @@
+error: warp_reduce_sum() requires block_size to contain a whole number of warps (total threads must be a multiple of 32; found: 16). Warp reductions use warp-collective shfl.sync instructions; any partial (incomplete) warp at the call site causes undefined behavior even if at least one full warp exists. For 2D blocks, the PRODUCT of dimensions must be a multiple of 32. Use block_reduce_sum() for smaller or non-aligned block sizes, or adjust block_size so the product is a whole-warp multiple.
+  --> tests/compile_fail/cf_warp_reduce_2d_small_product.rs:10:13
+   |
+10 |     let s = warp_reduce_sum(1.0f32);
+   |             ^^^^^^^^^^^^^^^
+
+warning: unused import: `kaio::prelude::*`
+ --> tests/compile_fail/cf_warp_reduce_2d_small_product.rs:5:5
+  |
+5 | use kaio::prelude::*;
+  |     ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
