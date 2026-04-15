@@ -53,6 +53,10 @@ mod matmul_tc_kernel;
 // D5/D6/D7 correctness gates. Public `pub use` wiring lands at D4 / D6.
 mod qkv_project_int4_kernel;
 mod qkv_project_int8_kernel;
+// Shared emit helpers that outlive any single kernel module.
+// Currently hosts the fragment-C → packed-f16 global store path used by
+// both qkv_project variants (D2).
+mod store_out;
 mod tuner;
 
 pub use attention_kernel::{attention, attention_causal, attention_flash, attention_flash_causal};
