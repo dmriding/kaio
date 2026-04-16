@@ -391,3 +391,233 @@ fn qkv_project_int4_qkv_differentiation_canary() {
         "K and V outputs alias (canary tripped)"
     );
 }
+
+// ============================================================================
+// S+½P slot-mapping canary (Sprint 7.3.5)
+// ============================================================================
+//
+// Distinct from the `qkv_project_int4_qkv_differentiation_canary` above:
+// scale=1.0 (identity) → expected per-element outputs are exact integers
+// `{K, 2K, 3K}` for Q/K/V, crisper failure signal if the ping-pong slot
+// wiring mis-reads a projection's slot.
+//
+// INT4 note: K must be a multiple of `group_size = 128`, so we cannot
+// directly mirror the INT8 K=32/K=48 shapes. K=128 (8 K-tiles) and K=256
+// (16 K-tiles = 2 groups) are the minimal equivalents: both exercise
+// steady → steady back-edge transitions, and K=256 adds coverage of the
+// K_TILE_GROUP_RATIO=8 group boundary transition where scale hoist re-
+// reads from a new row of the scales tensor.
+
+fn run_slot_mapping_canary_int4(m: u32, n: u32, k: u32, label: &str) {
+    let x = vec![f16::from_f32(1.0); (m * k) as usize];
+    let w_q = vec![1i8; (k * n) as usize];
+    let w_k = vec![2i8; (k * n) as usize];
+    let w_v = vec![3i8; (k * n) as usize];
+    let num_groups = (k as usize) / GROUP_SIZE;
+    // scale = 1.0 so expected outputs are exact integers K/2K/3K.
+    let one = f16::from_f32(1.0);
+    let s_q = vec![one; num_groups * n as usize];
+    let s_k = vec![one; num_groups * n as usize];
+    let s_v = vec![one; num_groups * n as usize];
+    let (q_got, k_got, v_got, _, _, _) =
+        round_trip(m, n, k, &x, &w_q, &w_k, &w_v, &s_q, &s_k, &s_v).expect("round_trip");
+    let expected_q = k as f32;
+    let expected_k = 2.0 * k as f32;
+    let expected_v = 3.0 * k as f32;
+    for (proj_label, got, expected) in [
+        ("Q", &q_got, expected_q),
+        ("K", &k_got, expected_k),
+        ("V", &v_got, expected_v),
+    ] {
+        for (i, h) in got.iter().enumerate() {
+            let v = h.to_f32();
+            let err = (v - expected).abs();
+            // f16 can represent all integers ≤ 2048 exactly; at K=256
+            // the max expected (V=768) is well within that range. A
+            // slot swap would shift the magnitude by at least 1×K, far
+            // exceeding the 0.5 tolerance.
+            assert!(
+                err < 0.5,
+                "{label} {proj_label}: at [{i}] expected {expected}, got {v} (err={err})"
+            );
+        }
+    }
+    let q0 = q_got[0].to_f32();
+    let k0 = k_got[0].to_f32();
+    let v0 = v_got[0].to_f32();
+    assert!(
+        (q0 - k0).abs() > 0.5 * k as f32,
+        "{label}: Q≈{q0} aliases K≈{k0} (slot-mapping tripped)"
+    );
+    assert!(
+        (k0 - v0).abs() > 0.5 * k as f32,
+        "{label}: K≈{k0} aliases V≈{v0} (slot-mapping tripped)"
+    );
+    eprintln!("{label}: Q≈{q0} K≈{k0} V≈{v0} (expected {expected_q} {expected_k} {expected_v})");
+}
+
+/// K=128 = 1 group = 8 K-tiles. Smallest valid INT4 shape; exercises the
+/// initial → 7× steady → final ping-pong cadence without crossing a group
+/// boundary.
+#[test]
+#[ignore]
+fn qkv_project_int4_slot_mapping_canary_1_group() {
+    run_slot_mapping_canary_int4(64, 16, 128, "slot_mapping_1g_64_16_128");
+}
+
+/// K=256 = 2 groups = 16 K-tiles. Exercises the group transition at
+/// k_tile=8 where `g = k_tile / K_TILE_GROUP_RATIO` flips 0→1 and the
+/// hoisted scales re-read from scales[1, :]. A bug specifically at the
+/// group transition (e.g. wrong `current_group` division, wrong scales
+/// row-stride math) is caught here that the 1-group test passes.
+#[test]
+#[ignore]
+fn qkv_project_int4_slot_mapping_canary_2_groups() {
+    run_slot_mapping_canary_int4(64, 16, 256, "slot_mapping_2g_64_16_256");
+}
+
+// ============================================================================
+// Determinism stress — cross-launch bit-exactness under the 2-W-slot layout
+// ============================================================================
+//
+// Sprint 7.3.5 S+½P sibling of the INT8 determinism stress. Same rationale:
+// the overlap window between cooperative loads and mma reads on the other
+// slot is a barrier-misplacement race surface. Warp scheduling varies
+// across launches, so such races manifest as cross-launch nondeterminism
+// — same input, same kernel, bit-different output.
+//
+// INT4 adds a second race surface: the scales register-hoist path. If the
+// per-lane `ld.global.f16` is reordered against B1 or a downstream dequant,
+// the dequanted fragment B depends on whether the load reached cache
+// before the mma. Both shapes assert bit-exactness from run 1 onward (no
+// warmup discards).
+//
+// Two shapes cover different regimes:
+//   - Short / group-boundary stress: K=256 = 2 groups × 8 K-tiles each.
+//     16 K-tiles per launch; one group transition per launch. Scheduler
+//     gets little room to drift but the group-boundary scale re-hoist is
+//     exercised once per launch × 100 launches = 100 group transitions.
+//   - Prefill regime / long: K=4096 = 32 groups × 8 K-tiles each.
+//     256 K-tiles per launch, the shape that motivated the sprint's
+//     S+½P rework. Deep K + many overlapping load/mma epochs = maximum
+//     scheduler drift room.
+
+const DETERMINISM_REPS_DEFAULT: usize = 100;
+
+fn run_determinism_stress_int4(m: u32, n: u32, k: u32, reps: usize, label: &str) {
+    let x = deterministic_f16((m * k) as usize, 0xDEAD_BEEF);
+    let w_q = deterministic_s4((k * n) as usize, 0x1111_1111);
+    let w_k = deterministic_s4((k * n) as usize, 0x2222_2222);
+    let w_v = deterministic_s4((k * n) as usize, 0x3333_3333);
+    let num_groups = (k as usize) / GROUP_SIZE;
+    let s_q = small_scales(num_groups, n as usize, 0x4444_4444);
+    let s_k = small_scales(num_groups, n as usize, 0x5555_5555);
+    let s_v = small_scales(num_groups, n as usize, 0x6666_6666);
+
+    let device = KaioDevice::new(0).expect("KaioDevice::new");
+    let (major, _) = device.info().unwrap().compute_capability;
+    assert!(major >= 8, "qkv_project_int4 requires SM 8.0+");
+
+    let packed_q = pack_s4_weights(&w_q, k as usize, n as usize);
+    let packed_k = pack_s4_weights(&w_k, k as usize, n as usize);
+    let packed_v = pack_s4_weights(&w_v, k as usize, n as usize);
+    let x_gpu = device.alloc_from(&x).unwrap();
+    let w_q_gpu = device.alloc_from(&packed_q).unwrap();
+    let w_k_gpu = device.alloc_from(&packed_k).unwrap();
+    let w_v_gpu = device.alloc_from(&packed_v).unwrap();
+    let s_q_gpu = device.alloc_from(&s_q).unwrap();
+    let s_k_gpu = device.alloc_from(&s_k).unwrap();
+    let s_v_gpu = device.alloc_from(&s_v).unwrap();
+
+    // Run 1 establishes the reference. Bit-exactness is asserted from
+    // run 1 onward — no warmup runs are discarded. Warmup-driven
+    // variance (cold-cache first-run differences from steady-state) is
+    // treated as a real failure: barrier races we're hunting don't have
+    // warmup semantics, and if run 1 differs from runs 2..N, that's
+    // either a race OR a cache-subsystem determinism issue — both worth
+    // surfacing rather than papering over.
+    let mut reference: Option<(Vec<f16>, Vec<f16>, Vec<f16>)> = None;
+    for rep in 0..reps {
+        let mut q_out = device.alloc_zeros::<f16>((m * n) as usize).unwrap();
+        let mut k_out = device.alloc_zeros::<f16>((m * n) as usize).unwrap();
+        let mut v_out = device.alloc_zeros::<f16>((m * n) as usize).unwrap();
+        qkv_project_int4(
+            &device,
+            &x_gpu,
+            &w_q_gpu,
+            &w_k_gpu,
+            &w_v_gpu,
+            &s_q_gpu,
+            &s_k_gpu,
+            &s_v_gpu,
+            &mut q_out,
+            &mut k_out,
+            &mut v_out,
+            m,
+            n,
+            k,
+            GROUP_SIZE as u32,
+        )
+        .expect("qkv_project_int4");
+        device.stream().synchronize().unwrap();
+        let q = q_out.to_host(&device).unwrap();
+        let k_h = k_out.to_host(&device).unwrap();
+        let v = v_out.to_host(&device).unwrap();
+        match &reference {
+            None => reference = Some((q, k_h, v)),
+            Some((qr, kr, vr)) => {
+                for (proj_label, got, want) in [("Q", &q, qr), ("K", &k_h, kr), ("V", &v, vr)] {
+                    let mismatch = got
+                        .iter()
+                        .zip(want.iter())
+                        .enumerate()
+                        .find(|(_, (g, w))| g.to_bits() != w.to_bits());
+                    if let Some((i, (g, w))) = mismatch {
+                        panic!(
+                            "{label} {proj_label} rep={rep} i={i}: bits differ \
+                             (got 0x{:04x} want 0x{:04x}, f32 got={} want={})",
+                            g.to_bits(),
+                            w.to_bits(),
+                            g.to_f32(),
+                            w.to_f32()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("{label}: {reps} runs, bit-exact across all runs");
+}
+
+/// Short shape with group-boundary stress. K=256 = 2 groups × 8 K-tiles,
+/// crossing one group boundary per launch. Bumping reps to ~1000 is the
+/// sprint-close / commit-boundary gate; 100 is the default for reasonable
+/// iteration time.
+#[test]
+#[ignore]
+fn qkv_project_int4_determinism_stress_short() {
+    run_determinism_stress_int4(
+        256,
+        512,
+        256,
+        DETERMINISM_REPS_DEFAULT,
+        "determinism_short_256_512_256",
+    );
+}
+
+/// Prefill-regime shape. 32 groups × 8 K-tiles = 256 K-tiles per launch
+/// — the shape that motivated the Sprint 7.3.5 S+½P rework. Schedulers
+/// have the most room to drift between long mma epochs and overlapped
+/// cooperative loads at this depth. 100 reps is ~2-5 minutes of GPU
+/// time on sm_89 — acceptable for an `#[ignore]`d sprint-gate.
+#[test]
+#[ignore]
+fn qkv_project_int4_determinism_stress_prefill() {
+    run_determinism_stress_int4(
+        2048,
+        512,
+        4096,
+        DETERMINISM_REPS_DEFAULT,
+        "determinism_prefill_2048_512_4096",
+    );
+}
