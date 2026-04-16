@@ -102,6 +102,8 @@ pub use matmul_tc_async::{MatmulTcAsyncOp, matmul_tc_async};
 
 #[cfg(feature = "cuda")]
 mod matmul_int4;
+#[cfg(feature = "cuda")]
+pub use matmul_int4::{MatmulInt4Op, matmul_int4};
 
 #[cfg(feature = "cuda")]
 mod attention_tc;

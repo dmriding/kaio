@@ -199,3 +199,95 @@ fn matmul_tc_rejects_nonzero_offset() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// matmul_int4 bit-exact cross-check (INT4 GPTQ-style, group_size=128)
+// ---------------------------------------------------------------------------
+
+fn bit_exact_matmul_int4(m: usize, n: usize, k: usize) -> anyhow::Result<()> {
+    assert!(
+        k.is_multiple_of(128),
+        "test setup: K must be multiple of 128"
+    );
+    let packed_rows = k / 8; // 8 INT4 per u32
+    let scale_rows = k / 128;
+
+    // Deterministic patterned data — same bits on both paths.
+    let a_host: Vec<f16> = (0..m * k)
+        .map(|i| f16::from_f32(((i % 23) as f32) * 0.08 - 0.9))
+        .collect();
+    let b_packed_host: Vec<u32> = (0..packed_rows * n)
+        .map(|i| ((i as u32).wrapping_mul(0x9E37_79B1)) ^ 0x1234_5678)
+        .collect();
+    let scales_host: Vec<f16> = (0..scale_rows * n)
+        .map(|i| f16::from_f32(0.01 + ((i % 7) as f32) * 0.005))
+        .collect();
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // Candle path — rank-2 tensors matching the kaio-ops layout interpretation.
+    let a_candle = Tensor::from_vec(a_host.clone(), (m, k), &candle_dev)?;
+    let b_candle = Tensor::from_vec(b_packed_host.clone(), (packed_rows, n), &candle_dev)?;
+    let s_candle = Tensor::from_vec(scales_host.clone(), (scale_rows, n), &candle_dev)?;
+    let c_candle = kaio_candle::matmul_int4(&kaio_dev, &a_candle, &b_candle, &s_candle)?;
+    let c_candle_host: Vec<f32> = c_candle.flatten_all()?.to_vec1::<f32>()?;
+
+    // Direct kaio-ops path — flat GpuBuffers.
+    let a_buf = kaio_dev.alloc_from(&a_host)?;
+    let b_buf = kaio_dev.alloc_from(&b_packed_host)?;
+    let s_buf = kaio_dev.alloc_from(&scales_host)?;
+    let mut c_buf = kaio_dev.alloc_zeros::<f32>(m * n)?;
+    kaio_ops::matmul_int4(
+        &kaio_dev, &a_buf, &b_buf, &s_buf, &mut c_buf, m as u32, n as u32, k as u32, 128,
+    )?;
+    let c_kaio_host: Vec<f32> = c_buf.to_host(&kaio_dev)?;
+
+    assert_eq!(c_candle_host.len(), c_kaio_host.len());
+    for (i, (cc, ck)) in c_candle_host.iter().zip(c_kaio_host.iter()).enumerate() {
+        assert_eq!(
+            cc.to_bits(),
+            ck.to_bits(),
+            "bit mismatch at {i}: candle={cc} kaio={ck} (shapes {m}x{n}x{k}, group_size=128)"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_int4_bit_exact_256x256x128() -> anyhow::Result<()> {
+    bit_exact_matmul_int4(256, 256, 128)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_int4_bit_exact_1024x1024x512() -> anyhow::Result<()> {
+    bit_exact_matmul_int4(1024, 1024, 512)
+}
+
+/// INT4 bridge must reject K that isn't a multiple of group_size (128).
+/// Pure rejection test — host-reachable error, no kernel launch.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_int4_rejects_k_not_multiple_of_group_size() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // K=100 → not a multiple of 128. Use tiny shapes to minimize allocation.
+    let m = 16usize;
+    let k = 100usize;
+    let n = 16usize;
+    let a = Tensor::zeros((m, k), candle_core::DType::F16, &candle_dev)?;
+    let b_packed = Tensor::zeros((k.div_ceil(8), n), candle_core::DType::U32, &candle_dev)?;
+    let scales = Tensor::zeros((1, n), candle_core::DType::F16, &candle_dev)?;
+
+    let err = kaio_candle::matmul_int4(&kaio_dev, &a, &b_packed, &scales)
+        .expect_err("K=100 must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("group_size") || msg.contains("128"),
+        "expected group-size rejection message, got: {msg}"
+    );
+    Ok(())
+}
