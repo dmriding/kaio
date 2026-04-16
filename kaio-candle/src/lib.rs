@@ -107,3 +107,5 @@ pub use matmul_int4::{MatmulInt4Op, matmul_int4};
 
 #[cfg(feature = "cuda")]
 mod attention_tc;
+#[cfg(feature = "cuda")]
+pub use attention_tc::{AttentionTcOp, attention_tc, attention_tc_causal};

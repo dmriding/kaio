@@ -291,3 +291,108 @@ fn matmul_int4_rejects_k_not_multiple_of_group_size() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// attention_tc + attention_tc_causal bit-exact cross-check
+// ---------------------------------------------------------------------------
+
+fn bit_exact_attention_tc(
+    seq_q: usize,
+    seq_k: usize,
+    d_k: usize,
+    d_v: usize,
+    causal: bool,
+) -> anyhow::Result<()> {
+    let q_host: Vec<f16> = (0..seq_q * d_k)
+        .map(|i| f16::from_f32(((i % 19) as f32) * 0.03 - 0.3))
+        .collect();
+    let k_host: Vec<f16> = (0..seq_k * d_k)
+        .map(|i| f16::from_f32(((i % 23) as f32) * 0.025 - 0.29))
+        .collect();
+    let v_host: Vec<f16> = (0..seq_k * d_v)
+        .map(|i| f16::from_f32(((i % 29) as f32) * 0.02 - 0.28))
+        .collect();
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // Candle path
+    let q_candle = Tensor::from_vec(q_host.clone(), (seq_q, d_k), &candle_dev)?;
+    let k_candle = Tensor::from_vec(k_host.clone(), (seq_k, d_k), &candle_dev)?;
+    let v_candle = Tensor::from_vec(v_host.clone(), (seq_k, d_v), &candle_dev)?;
+    let out_candle = if causal {
+        kaio_candle::attention_tc_causal(&kaio_dev, &q_candle, &k_candle, &v_candle)?
+    } else {
+        kaio_candle::attention_tc(&kaio_dev, &q_candle, &k_candle, &v_candle)?
+    };
+    let out_candle_host: Vec<f32> = out_candle.flatten_all()?.to_vec1::<f32>()?;
+
+    // Direct kaio-ops path — use the #[doc(hidden)] pub re-exports from kaio-ops.
+    let q_buf = kaio_dev.alloc_from(&q_host)?;
+    let k_buf = kaio_dev.alloc_from(&k_host)?;
+    let v_buf = kaio_dev.alloc_from(&v_host)?;
+    let mut out_buf = kaio_dev.alloc_zeros::<f32>(seq_q * d_v)?;
+    if causal {
+        kaio_ops::attention_tc_causal(
+            &kaio_dev,
+            &q_buf,
+            &k_buf,
+            &v_buf,
+            &mut out_buf,
+            seq_q as u32,
+            seq_k as u32,
+            d_k as u32,
+            d_v as u32,
+        )?;
+    } else {
+        kaio_ops::attention_tc(
+            &kaio_dev,
+            &q_buf,
+            &k_buf,
+            &v_buf,
+            &mut out_buf,
+            seq_q as u32,
+            seq_k as u32,
+            d_k as u32,
+            d_v as u32,
+        )?;
+    }
+    let out_kaio_host: Vec<f32> = out_buf.to_host(&kaio_dev)?;
+
+    assert_eq!(out_candle_host.len(), out_kaio_host.len());
+    for (i, (c, k)) in out_candle_host.iter().zip(out_kaio_host.iter()).enumerate() {
+        assert_eq!(
+            c.to_bits(),
+            k.to_bits(),
+            "bit mismatch at {i}: candle={c} kaio={k} \
+             (seq_q={seq_q} seq_k={seq_k} d_k={d_k} d_v={d_v} causal={causal})"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_tc_bit_exact_64x64() -> anyhow::Result<()> {
+    bit_exact_attention_tc(64, 64, 64, 64, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_tc_bit_exact_256x128() -> anyhow::Result<()> {
+    // seq_k ≤ 384 per kaio-ops attention_tc shared-memory score-buffer cap;
+    // FlashAttention-TC will lift this in a later sprint. 256 fits cleanly.
+    bit_exact_attention_tc(256, 256, 128, 128, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_tc_causal_bit_exact_64x64() -> anyhow::Result<()> {
+    bit_exact_attention_tc(64, 64, 64, 64, true)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_tc_causal_bit_exact_256x128() -> anyhow::Result<()> {
+    bit_exact_attention_tc(256, 256, 128, 128, true)
+}
