@@ -1559,7 +1559,14 @@ mod tests {
     use super::*;
 
     fn make_device() -> Result<KaioDevice> {
-        KaioDevice::new(0)
+        // cudarc panics (not returns Err) inside its dlopen path when the
+        // CUDA shared library is unavailable — e.g. host-only CI runners
+        // without a driver. Catch that panic and surface DeviceNotFound so
+        // the `let Ok(device) = ...` skip-guards below fire as intended.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| KaioDevice::new(0))) {
+            Ok(result) => result,
+            Err(_) => Err(KaioError::DeviceNotFound(0)),
+        }
     }
 
     #[test]
