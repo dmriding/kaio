@@ -279,3 +279,214 @@ fn qkv_project_int8_qkv_differentiation_canary() {
         "K and V outputs alias (canary tripped)"
     );
 }
+
+// ============================================================================
+// Slot-mapping canary — ping-pong correctness under the 2-W-slot layout
+// ============================================================================
+//
+// The 2-W-slot ping-pong design selects one of two shared-memory slots
+// per projection per K-tile via runtime `k_tile & 1` arithmetic. A
+// silent mis-wiring — e.g. `cur_w_base` and `next_w_base` accidentally
+// swapped, or the mma reads the wrong slot for a given projection —
+// would produce wrong outputs deterministically. Random-data tests
+// (the correctness cases above) can mask this: if the wrong weights
+// happen to produce plausible accumulator values, the reference
+// comparison still falls within tolerance.
+//
+// The slot-mapping canary makes the wiring observable by seeding W
+// with per-projection-distinguishable constants (W_Q=1, W_K=2, W_V=3,
+// X=1, scale=1.0) so the expected output per element is exactly
+// `{K, 2*K, 3*K}` for `{Q, K, V}`. A wrong slot read flips projections
+// and the output mismatches by an integer ratio — impossible to
+// explain by rounding.
+//
+// The 2-K-tile variant exercises the `steady → final` transition; the
+// 3-K-tile variant exercises `steady → steady → final`, catching
+// wiring bugs that live specifically at the back-edge between two
+// steady-state iterations.
+
+fn run_slot_mapping_canary(m: u32, n: u32, k: u32, label: &str) {
+    let x = vec![f16::from_f32(1.0); (m * k) as usize];
+    let w_q = vec![1i8; (k * n) as usize];
+    let w_k = vec![2i8; (k * n) as usize];
+    let w_v = vec![3i8; (k * n) as usize];
+    // scale = 1.0 (identity) — expected output = exactly {K, 2K, 3K}
+    // per element. Unscaled integer products in f16 representable range:
+    // K=48 → V=144 which is well under f16's max normal (65504).
+    let (q_got, k_got, v_got, _qw, _kw, _vw) =
+        round_trip(m, n, k, &x, &w_q, &w_k, &w_v, 1.0, 1.0, 1.0).expect("round_trip");
+    let expected_q = k as f32;
+    let expected_k = 2.0 * k as f32;
+    let expected_v = 3.0 * k as f32;
+    for (proj_label, got, expected) in [
+        ("Q", &q_got, expected_q),
+        ("K", &k_got, expected_k),
+        ("V", &v_got, expected_v),
+    ] {
+        for (i, h) in got.iter().enumerate() {
+            let v = h.to_f32();
+            let err = (v - expected).abs();
+            // f16 has ~3 decimal digits of precision. At K=48, V=144
+            // rounds to exactly 144 (representable). Tolerance 0.5 is
+            // more than loose enough and tight enough to catch a slot
+            // swap (which would flip magnitudes by at least 1×K).
+            assert!(
+                err < 0.5,
+                "{label} {proj_label}: at [{i}] expected {expected}, got {v} (err={err})"
+            );
+        }
+    }
+    // Sanity check: the three projections must still be distinguishable.
+    let q0 = q_got[0].to_f32();
+    let k0 = k_got[0].to_f32();
+    let v0 = v_got[0].to_f32();
+    assert!(
+        (q0 - k0).abs() > 0.5 * k as f32,
+        "{label}: Q≈{q0} aliases K≈{k0} (slot-mapping tripped)"
+    );
+    assert!(
+        (k0 - v0).abs() > 0.5 * k as f32,
+        "{label}: K≈{k0} aliases V≈{v0} (slot-mapping tripped)"
+    );
+    eprintln!("{label}: Q≈{q0} K≈{k0} V≈{v0} (expected {expected_q} {expected_k} {expected_v})");
+}
+
+/// 2 K-tiles at K_TILE_SHARED=16 → covers steady-state iteration
+/// followed by final iteration. N=16 spans one BN_BLOCK = single
+/// N-block; M=64 spans one BM_BLOCK.
+#[test]
+#[ignore]
+fn qkv_project_int8_slot_mapping_canary_2_k_tiles() {
+    run_slot_mapping_canary(64, 16, 32, "slot_mapping_2ktile_64_16_32");
+}
+
+/// 3 K-tiles at K_TILE_SHARED=16 → steady → steady → final, exercises
+/// the back-edge transition between two steady-state iterations that
+/// the 2-K-tile variant doesn't hit. If the ping-pong slot indexing
+/// breaks specifically when going from k_tile=0 → k_tile=1 (both
+/// steady), the 2-K-tile test passes but this one fails.
+#[test]
+#[ignore]
+fn qkv_project_int8_slot_mapping_canary_3_k_tiles() {
+    run_slot_mapping_canary(64, 16, 48, "slot_mapping_3ktile_64_16_48");
+}
+
+// ============================================================================
+// Determinism stress — cross-launch bit-exactness under the 2-W-slot layout
+// ============================================================================
+//
+// The 2-W-slot design introduces an overlap window where cooperative
+// `ld.global → st.shared` stores to one slot run concurrently with
+// mma reads from the other slot. If a barrier is misplaced or missing,
+// the overlap creates a race window whose resolution depends on warp
+// scheduling. Warp scheduling can vary across launches, so such races
+// manifest as **cross-launch nondeterminism** — same input, same
+// kernel, different bit-exact output between runs.
+//
+// The slot-mapping canary above catches *deterministic* mis-wiring.
+// These determinism tests catch *nondeterministic* barrier races. Both
+// classes exist; neither subsumes the other.
+//
+// Two shapes cover different regimes on the race-window manifold:
+// short/many-K-tiles exercises a lot of steady-state transitions per
+// launch; prefill-regime (M=2048, K=4096) is the shape that motivated
+// the S+½P rework and is where schedulers have the most room to drift.
+
+const DETERMINISM_REPS_DEFAULT: usize = 100;
+
+fn run_determinism_stress(m: u32, n: u32, k: u32, reps: usize, label: &str) {
+    let x = deterministic_f16_activations((m * k) as usize, 0xDEAD_BEEF);
+    let w_q = deterministic_i8_weights((k * n) as usize, 0x1111_1111);
+    let w_k = deterministic_i8_weights((k * n) as usize, 0x2222_2222);
+    let w_v = deterministic_i8_weights((k * n) as usize, 0x3333_3333);
+    let scale = 1.0 / (k as f32);
+
+    let device = KaioDevice::new(0).expect("KaioDevice::new");
+    let (major, _) = device.info().unwrap().compute_capability;
+    assert!(major >= 8, "qkv_project_int8 requires SM 8.0+");
+
+    let x_gpu = device.alloc_from(&x).unwrap();
+    let w_q_gpu = device.alloc_from(&w_q).unwrap();
+    let w_k_gpu = device.alloc_from(&w_k).unwrap();
+    let w_v_gpu = device.alloc_from(&w_v).unwrap();
+
+    // Run 1 establishes the reference. Bit-exactness is asserted from
+    // run 1 onward — no warmup runs are discarded. Warmup-driven
+    // variance (cold-cache first-run differences from steady state) is
+    // treated as a real failure, because barrier races we're hunting
+    // don't have warmup semantics: if run 1 differs from runs 2..N,
+    // that's either a race OR a cache-subsystem determinism issue,
+    // both worth surfacing rather than papering over.
+    let mut reference: Option<(Vec<f16>, Vec<f16>, Vec<f16>)> = None;
+    for rep in 0..reps {
+        let mut q_out = device.alloc_zeros::<f16>((m * n) as usize).unwrap();
+        let mut k_out = device.alloc_zeros::<f16>((m * n) as usize).unwrap();
+        let mut v_out = device.alloc_zeros::<f16>((m * n) as usize).unwrap();
+        qkv_project_int8(
+            &device, &x_gpu, &w_q_gpu, &w_k_gpu, &w_v_gpu, scale, scale, scale, &mut q_out,
+            &mut k_out, &mut v_out, m, n, k,
+        )
+        .expect("qkv_project_int8");
+        device.stream().synchronize().unwrap();
+        let q = q_out.to_host(&device).unwrap();
+        let k_h = k_out.to_host(&device).unwrap();
+        let v = v_out.to_host(&device).unwrap();
+        match &reference {
+            None => reference = Some((q, k_h, v)),
+            Some((qr, kr, vr)) => {
+                for (proj_label, got, want) in [("Q", &q, qr), ("K", &k_h, kr), ("V", &v, vr)] {
+                    let mismatch = got
+                        .iter()
+                        .zip(want.iter())
+                        .enumerate()
+                        .find(|(_, (g, w))| g.to_bits() != w.to_bits());
+                    if let Some((i, (g, w))) = mismatch {
+                        panic!(
+                            "{label} {proj_label} rep={rep} i={i}: bits differ \
+                             (got 0x{:04x} want 0x{:04x}, f32 got={} want={})",
+                            g.to_bits(),
+                            w.to_bits(),
+                            g.to_f32(),
+                            w.to_f32()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("{label}: {reps} runs, bit-exact across all runs");
+}
+
+/// Short shape, many K-tiles per launch. Stresses the steady-state
+/// ping-pong transitions at moderate K and gives the scheduler many
+/// micro-opportunities to drift across the 100 launches. Bumping the
+/// rep count to ~1000 is the sprint-close / commit-boundary gate;
+/// 100 is the default for reasonable iteration time.
+#[test]
+#[ignore]
+fn qkv_project_int8_determinism_stress_short() {
+    run_determinism_stress(
+        256,
+        512,
+        1024,
+        DETERMINISM_REPS_DEFAULT,
+        "determinism_short_256_512_1024",
+    );
+}
+
+/// Prefill-regime shape. The S+½P rework was motivated by recovering
+/// `prefill_m2048` from the 0.85× Design-S ratio; this is the regime
+/// where schedulers have the most room to drift between long mma
+/// epochs and overlapped cooperative loads. 100 reps is ~30-60s of
+/// GPU time on sm_89 — acceptable for an `#[ignore]`d sprint-gate.
+#[test]
+#[ignore]
+fn qkv_project_int8_determinism_stress_prefill() {
+    run_determinism_stress(
+        2048,
+        512,
+        4096,
+        DETERMINISM_REPS_DEFAULT,
+        "determinism_prefill_2048_512_4096",
+    );
+}
