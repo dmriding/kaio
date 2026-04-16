@@ -100,17 +100,23 @@ Two distinct failure modes under S+½P need distinct tests. **Slot-mapping canar
 
 ### Performance
 
-**INT8 S+½P (abs TOPS baseline capture, RTX 4090 sm_89).** INT8 has no fair 3×-standalone reference (`qkv_project_int8` is W8A16; `matmul_int8` is W8A8 with different arithmetic), so the INT8 shipping decision rests on correctness + abs-TOPS no-regression rather than a ratio gate.
+**INT8 S+½P (abs TOPS, RTX 4090 sm_89).** INT8 has no fair 3×-standalone reference (`qkv_project_int8` is W8A16; `matmul_int8` is W8A8 with different arithmetic), so the INT8 shipping decision rests on correctness + a like-for-like comparison against Design-S rather than a ratio gate against a different reference kernel.
 
-| shape | S+½P abs TOPS |
-|---|---|
-| decode_m1 | 3.3 |
-| decode_m64 | 3.3 |
-| decode_m64_large | 10.1 |
-| prefill_m512 | 34.8 |
-| prefill_m2048 | 45.1 |
+Like-for-like captured by reverting the INT8 kernel file to the pre-7.3.5 Design-S state (`2dbad72`), running the 5-shape `benchmark_qkv_project_int8_absolute_tops`, restoring the S+½P state, and re-running same-session:
 
-**INT4 Design S (unchanged on `main`).** Decode 3.0× median, prefill_m2048 0.85× — same shipping story as 7.3. Users needing prefill-heavy INT4 still call three separate `matmul_int4`s, as documented in the rustdoc.
+| shape | Design-S TOPS | S+½P TOPS | speedup |
+|---|---|---|---|
+| decode_m1 | 3.2 | 3.3 | 1.04× |
+| decode_m64 | 3.2 | 3.3 | 1.04× |
+| decode_m64_large | 9.8 | 10.2 | 1.04× |
+| prefill_m512 | 31.4 | 35.6 | 1.13× |
+| **prefill_m2048** | **38.8** | **44.6** | **1.15×** |
+
+S+½P wins at every shape. The gain scales with K-tile count: decode shapes (few K-tiles per launch, barriers not dominant) gain ~4%; `prefill_m2048` (256 K-tiles per launch, barriers dominant in Design-S) gains **15%** — matching the 1.15× threshold that INT4 narrowly missed at median 1.05×.
+
+**INT4 Design S (unchanged on `main`).** Decode 3.0× median, `prefill_m2048` 0.85× — same shipping story as 7.3. Users needing prefill-heavy INT4 still call three separate `matmul_int4`s, as documented in the rustdoc.
+
+**INT8 / INT4 asymmetry interpretation.** Same architectural change (Design S → S+½P) lands differently on the two variants at the same shape. INT8 recovers `prefill_m2048` to 1.15×; INT4 recovers only to 1.05×. The INT8 result localises the remaining INT4 gap: barrier reduction is sufficient for the simpler INT8 dequant path (scalar scale applied at store-out); the INT4 dequant chain (per-column f16 scale hoist + nibble-extract) introduces enough memory-issue latency in the K-loop that, once barriers no longer dominate, load-issue stalls become the new binding constraint. `cp.async` targets exactly that class of stall and is the right candidate for a follow-up contingency sprint — not as an alternative to S+½P, but as the **next** bottleneck to address after S+½P succeeds. See follow-ups.
 
 ### Scope — all D sections landed
 

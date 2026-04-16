@@ -15,7 +15,7 @@ Master plan: [phase7_master_plan.md](phase7_master_plan.md)
 | [7.1.5](sprint_7_1_5.md) | Warp + block reductions in the DSL | ✅ Complete | — |
 | [7.2](sprint_7_2.md) | `matmul_int4` (W4A16 GPTQ-style) | ✅ Complete | 49–58 TOPS at 4096³; 95–116% of cuBLAS sgemm |
 | [7.3](sprint_7_3.md) | Fused tri-output QKV projection (`qkv_project_int8` + `qkv_project_int4`) | ✅ Complete | 3.0× decode over 3× standalone; prefill ship-narrow |
-| [7.3.5](sprint_7_3_5.md) | Design S+½P optimization (2 W slots, barriers 7→4) | ✅ Complete | INT8 shipped S+½P; INT4 measured at 1.05× prefill_m2048, retained Design S |
+| [7.3.5](sprint_7_3_5.md) | Design S+½P optimization (2 W slots, barriers 7→4) | ✅ Complete | INT8 shipped S+½P (1.15× `prefill_m2048` like-for-like vs Design-S); INT4 measured at 1.05× vs 3× standalone, retained Design S |
 | 7.4 | `kaio-candle` bridge crate | 📝 Planned | Candle CustomOp bindings for quant ops |
 | v0.4.0 | Phase 7 aggregate release | 📝 Planned | After 7.4 ships |
 
