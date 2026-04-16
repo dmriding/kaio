@@ -14,9 +14,9 @@ Sprint 7.1 shipped `matmul_int8` (v0.3.0) — W8A8 symmetric, single-scalar scal
 
 **Fusion scope clarifier:** 7.3 fuses the three *linear projections* (Q, K, V) into one launch. It does **not** fuse projection with the attention kernel itself — score matmul, softmax, masking, and V-weighted sum all remain inside `attention_tc` unchanged.
 
-**Why W8A16 (not W8A8) for the INT8 variant** (maintainer decision, Codex round 2): `qkv_project_int8` sits between f16-contract layers in an inference pipeline. W8A16 makes the projection op drop-in across layer boundaries and unifies both INT8 + INT4 variants onto the same mma path (`m16n8k16.f16.f16.f32`, `K_TILE_SHARED=16`). `matmul_int8` remains the right op for users who genuinely need W8A8.
+**Why W8A16 (not W8A8) for the INT8 variant** (maintainer decision, round 2): `qkv_project_int8` sits between f16-contract layers in an inference pipeline. W8A16 makes the projection op drop-in across layer boundaries and unifies both INT8 + INT4 variants onto the same mma path (`m16n8k16.f16.f16.f32`, `K_TILE_SHARED=16`). `matmul_int8` remains the right op for users who genuinely need W8A8.
 
-**MVS posture** (maintainer decision, Codex round 2): `qkv_project_int8` (W8A16) through D4 was declared the minimum shippable core. INT4 shipped contingent on D5/D6/D7 staying clean. Both shipped.
+**MVS posture** (maintainer decision, round 2): `qkv_project_int8` (W8A16) through D4 was declared the minimum shippable core. INT4 shipped contingent on D5/D6/D7 staying clean. Both shipped.
 
 ## Scope
 
@@ -52,7 +52,7 @@ Minimal skeleton allocating all 48 f32 fragment-C regs per lane (3 grids × 2×2
 | sm_80  | 32          | 0      | 392     |
 | sm_89  | 40          | 0      | 392     |
 
-Comfortable 24–32 reg headroom under the 64-reg cliff at the skeleton level. No `.const` bank pathology (all kernel params land uniform in `cmem[0]`, per Gemini round 3 note).
+Comfortable 24–32 reg headroom under the 64-reg cliff at the skeleton level. No `.const` bank pathology (all kernel params land uniform in `cmem[0]`, per round 3 note).
 
 ### D3 — INT8 kernel body (split D3.1 / D3.2 / D3.3 / D3.4)
 
@@ -69,7 +69,7 @@ One framework bug caught: kaio-core's cvt emitter omitted `.rn` for S8→F16 (pt
 
 ### D4 — INT8 public host API + launch (MVS ship point)
 
-`pub fn qkv_project_int8(...)` wired. Rustdoc explicitly spells out W8A16 vs W8A8 contract (Codex round 2 discipline). GPU launch smoke test: zero inputs → zero outputs canary on canonical shape. MVS shippable here. Quality gates all green; velocity + register headroom signals favor continuing to D5.
+`pub fn qkv_project_int8(...)` wired. Rustdoc explicitly spells out W8A16 vs W8A8 contract (round 2 discipline). GPU launch smoke test: zero inputs → zero outputs canary on canonical shape. MVS shippable here. Quality gates all green; velocity + register headroom signals favor continuing to D5.
 
 ### D5 — INT4 kernel body (contingent)
 

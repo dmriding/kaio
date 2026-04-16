@@ -9,7 +9,7 @@
 //! `cargo test -p kaio-ops --test qkv_project_int8_e2e -- --ignored`
 //! on a machine with an Ampere+ GPU.
 //!
-//! # Tolerance posture (Codex round 2)
+//! # Tolerance posture (round 2)
 //!
 //! The fused kernel uses the same arithmetic primitives as a
 //! "3 × INT8-W8A16 dequant + cast f32→f16" reference in the same
@@ -232,7 +232,7 @@ fn qkv_project_int8_medium_256_128_256() {
 }
 
 // ============================================================================
-// Q/K/V differentiation canary (Codex round 2)
+// Q/K/V differentiation canary (round 2)
 // ============================================================================
 
 /// W_Q = +1, W_K = +2, W_V = +3, X = ones, scales = 1.0/K (so output ≈ 1, 2, 3

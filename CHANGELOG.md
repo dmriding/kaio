@@ -81,6 +81,77 @@ Public API rustdoc directs prefill-heavy users to call
 See `docs/development/sprints/phase7/sprint_7_3.md` for the full
 decision log, bench table, and architectural decisions.
 
+### Sprint 7.3.5 — Design S+½P optimization for fused QKV projection
+
+Two-W-slot ping-pong with overlapped cooperative load + mma compute.
+Barrier cadence inside the K-loop drops from **7 to 4** per K-tile.
+Scoped as the Rollback #4 escape from 7.3's `prefill_m2048` shortfall.
+
+**Outcome is asymmetric between variants**: INT8 ships Design S+½P;
+INT4 was ported, measured below the ship threshold, and retained at
+Design S for `main`. The INT4 S+½P port is preserved on the
+`phase7-rest` branch as measured-data for a future `cp.async`
+contingency sprint — it is not on `main`.
+
+#### Changed — Sprint 7.3.5
+
+- **`kaio_ops::qkv_project_int8` → Design S+½P**. Inner K-loop
+  rewritten to the 2-slot ping-pong: `tile_w_slot0` (512 B) + 64 B
+  bank-phase pad + `tile_w_slot1` (512 B). `frag_A` is register-
+  hoisted once per K-tile and reused across Q/K/V epochs (`tile_x`
+  overwrite-after-hoist invariant). Predicated overlap-skip on the
+  last K-tile. Barrier cadence: 4 per K-tile + 2 setup. Public API
+  signature unchanged. `ptxas_verify`: sm_80 **64 regs**, sm_89
+  **56 regs**, 0 spills both.
+- **`kaio_ops::qkv_project_int4` unchanged on `main`**. The S+½P
+  port was implemented and measured (`prefill_m2048` median 1.05×
+  over 3 runs, below the 1.15× ship gate and the 1.10× ship-narrow
+  floor per the sprint plan's outcome tiers). Retained Design S
+  behaviour for production; S+½P kernel lives on `phase7-rest`
+  as the measured-data record.
+
+#### Added — Sprint 7.3.5
+
+- **INT8 S+½P slot-mapping canary** (2 shapes): K=32 and K=48.
+  Deliberately-distinguishable weights (W_Q=1, W_K=2, W_V=3 with
+  scale=1.0) yield exact integer outputs `{K, 2K, 3K}` per element.
+  Catches deterministic ping-pong mis-wiring that random-data e2e
+  can pass by coincidence.
+- **INT8 S+½P determinism stress** (2 shapes, 100 runs each):
+  short (M=256, N=512, K=1024) and prefill (M=2048, N=512, K=4096).
+  Asserts bit-exactness of the output across all 100 runs starting
+  from run 1 (no warmup discards). Catches barrier-misplacement
+  races whose resolution varies with warp scheduling across launches.
+
+#### Tests — Sprint 7.3.5
+
+- **11 `qkv_project_int8` GPU e2e tests** (was 7 in 7.3): 7 from
+  7.3 + 2 slot-mapping canaries + 2 determinism-stress cases. All
+  green on RTX 4090 sm_89.
+- **8 `qkv_project_int4` GPU e2e tests unchanged** — the 7.3 suite
+  continues to pass against the retained Design S kernel.
+- **ptxas_verify** green on sm_80 + sm_89 for both shipping
+  kernels (INT8 S+½P, INT4 Design S).
+
+#### Performance framing — Sprint 7.3.5 (RTX 4090 sm_89)
+
+- **INT8 S+½P**: `qkv_project_int8` has no fair 3×-standalone
+  reference kernel (it is W8A16; `matmul_int8` is W8A8 with
+  different arithmetic). Absolute TOPS at `prefill_m2048` = 45.1
+  on the new kernel; full 5-shape abs-TOPS table in
+  `sprint_7_3_5.md`. INT8 ships on correctness + no-regression
+  rather than a ratio gate.
+- **INT4 measurement** (fused S+½P vs 3× `matmul_int4`, median
+  of 3 runs): decode 3.70–4.05×, `prefill_m512` 1.83×,
+  **`prefill_m2048` 1.05×**. S+½P improved every shape over
+  Design S but `prefill_m2048` missed the 1.15× ship threshold
+  and the 1.10× ship-narrow floor. Per the sprint plan's 5-tier
+  outcomes table, the result lands in **"Measured, not shipped"**
+  — a pre-declared tier, not a fallback.
+
+See `docs/development/sprints/phase7/sprint_7_3_5.md` for the full
+decision log, measured-data table, and architectural decisions.
+
 ### Sprint 7.2 — INT4 dequantize-matmul (`matmul_int4`)
 
 GPTQ-style W4A16 dequantize-matmul: packed signed-INT4 weights × f16

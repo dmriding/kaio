@@ -8,7 +8,7 @@ crates.io landing page improvements.
 
 ## Context
 
-Codex reviewed the repo from an outsider's perspective and identified
+External review of the repo from an outsider's perspective identified
 7 adoption barriers. The technical work is solid (207 host tests, 31%
 cuBLAS matmul) but the "can I run this right now?" experience is poor.
 This sprint adds no new features — it makes what exists easy to try.

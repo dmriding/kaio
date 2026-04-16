@@ -456,7 +456,7 @@ fn warp_reduce_sum_alternating_sign() {
 }
 
 // =========================================================================
-// 64-thread TWO-WARP INDEPENDENCE canary (Codex round 3 high-value test)
+// 64-thread TWO-WARP INDEPENDENCE canary (round 3 high-value test)
 // =========================================================================
 //
 // Block size = 64 = 2 warps. Warp 0 (lanes 0..32) sees pattern A, warp 1

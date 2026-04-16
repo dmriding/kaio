@@ -29,22 +29,41 @@
 //! (INT8: `cvt.rn.f16.s8` + scalar scale; INT4: nibble-extract +
 //! sign-extend + group-scale fold).
 //!
-//! # Tri-output design (Serial fusion, Design S)
+//! # Tri-output design (Design S+½P — Sprint 7.3.5)
 //!
-//! Per K-tile iteration: cooperative-load X tile once into shared,
-//! then sequentially for each projection P ∈ {Q, K, V}: load W_P i8
-//! tile into a shared weight slot, dequant fragment B per-warp,
-//! `mma` into a per-projection f32 accumulator bank. Three fragment-C
-//! banks persist across the entire K-loop; scalar scales are applied
-//! at store-out, not pre-mma.
+//! Sprint 7.3 originally shipped Design S (serial fusion, single W
+//! slot reused per projection, 7 `bar.sync` per K-tile). Sprint 7.3.5
+//! rewrote the inner K-loop to **Design S+½P**: two `tile_w` shared
+//! slots with a ping-pong index, overlapping the cooperative load of
+//! `W_{P+1}` with the mma compute of `W_P`. Barrier cadence drops
+//! from 7 to **4 per K-tile**.
+//!
+//! Per K-tile: cooperative-load `tile_x` once into shared (first
+//! K-tile only — subsequent K-tiles overlap it with Epoch 3's
+//! mma_V); hoist `frag_A` from `tile_x` to registers; pre-compute
+//! `frag_A` once per K-tile and reuse it across all three projection
+//! mma epochs (`tile_x` overwrite-after-hoist invariant); then for
+//! each projection P ∈ {Q, K, V} in turn: load `W_{P+1}` into the
+//! ping-pong NEXT slot while mma_P runs on the CURRENT slot, with
+//! a single `bar.sync` between epochs. Three fragment-C banks
+//! persist across the entire K-loop; scalar per-projection scales
+//! apply at store-out, not pre-mma.
 //!
 //! # Register budget
 //!
-//! Tripled fragment-C (3 × 16 f32 regs per lane = 48) is the dominant
-//! live state. `MMAS_PER_WARP_N` is halved from `matmul_int4`'s 4 to 2
-//! to stay inside the 64-reg occupancy cliff on sm_89 — output tile
-//! becomes 64×32 per block. D2.5 register-pressure skeleton checkpoint
-//! runs ahead of the full kernel body to catch any surprise.
+//! Sprint 7.3 D3.4 Rollback #1 dropped `MMAS_PER_WARP_N` from 2 to 1,
+//! halving per-warp fragment-C live state (3 grids × 8 = 24 f32 regs
+//! per lane, vs 48 at the original 64×32 tile). Per-block output
+//! tile is 64×16 instead of 64×32.
+//!
+//! Sprint 7.3.5 Design S+½P adds ping-pong slot pointer tracking,
+//! hoisted `frag_A` registers, and predicated overlap address math.
+//! Measured `ptxas_verify` (sm_80 + sm_89, 0 spills both): sm_80 lands
+//! at **64 regs** (at the full-occupancy cliff exactly — natural
+//! allocation is 66 regs, ptxas compresses 2 under without spilling);
+//! sm_89 lands at **56 regs** with 8 reg headroom. D1 register-budget
+//! skeleton checkpoint models cross-iteration live ranges and clears
+//! the design ahead of full kernel body work.
 
 use kaio::prelude::*;
 use kaio_core::instr::ArithOp;
@@ -129,7 +148,7 @@ pub(crate) const TILE_W_ROW_STRIDE_BYTES: u32 = 32;
 #[allow(dead_code)] // wired up in D3
 pub(crate) const TILE_W_BYTES: u32 = K_TILE_SHARED * TILE_W_ROW_STRIDE_BYTES; // 512
 
-// ── Sprint 7.3.5 S+½P bank-phase padding (Design invariant #4, Gemini R3-1) ──
+// ── Sprint 7.3.5 S+½P bank-phase padding (Design invariant #4, R3-1) ──
 //
 // Two `tile_w` slots at 512 B each would place `slot1` at a 512 B offset
 // from `slot0`. Since 512 is a multiple of 128 (one SMEM bank-line span),
@@ -1101,7 +1120,7 @@ pub(crate) fn build_qkv_project_int8_module(sm: &str) -> kaio_core::ir::PtxModul
     // be overwritten by `X_next` while the hoisted frag_A serves all
     // three mma epochs.
     //
-    // tile_w splits into slot0 (512 B) + pad (64 B, Gemini R3-1
+    // tile_w splits into slot0 (512 B) + pad (64 B, R3-1
     // Design invariant #4 — non-multiple-of-128 stride avoids cross-warp
     // SMEM bank-port contention during overlap) + slot1 (512 B). Ping-
     // pong indexing selects slot per K-tile × projection per the K-loop
@@ -1459,7 +1478,7 @@ pub(crate) fn build_qkv_project_int8_module(sm: &str) -> kaio_core::ir::PtxModul
 
     // ── Hoist frag_A (2 m_stripes) from tile_x at K-tile start ──
     //
-    // DESIGN INVARIANT #1 (tile_x overwrite-after-hoist, Codex R2-3):
+    // DESIGN INVARIANT #1 (tile_x overwrite-after-hoist, R2-3):
     // frag_A must be fully hoisted to registers before `tile_x` is
     // overwritten by the X_next cooperative load in Epoch 3 below.
     // All three projection mma calls read frag_A from these hoisted

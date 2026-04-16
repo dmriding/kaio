@@ -1,18 +1,19 @@
 # Phase 7 Master Plan — Quantized Kernels & Training Integration
 
-**Status:** In progress (7.0 complete v0.2.1; 7.0.5 complete v0.2.2;
-7.1 INT8 dequantize-matmul complete v0.3.0; 7.1.5 DSL reductions
-complete on `phase7-rest`; 7.2 INT4 dequantize-matmul complete on
-the same branch; 7.3 / 7.4 planned)
+**Status:** In progress. 7.0 (v0.2.1), 7.0.5 (v0.2.2), 7.1 INT8
+dequantize-matmul (v0.3.0), 7.1.5 DSL reductions, 7.2 INT4
+dequantize-matmul, 7.3 fused tri-output QKV projection, and 7.3.5
+Design S+½P optimization all complete on `phase7-rest` /
+`phase7-ship`. 7.4 `kaio-candle` bridge crate is the remaining
+Phase 7 deliverable before the Phase 7 aggregate v0.4.0 release.
 **Depends on:** Phase 6 complete (v0.2.1, 2026-04-14)
-**Per-sprint logs:** see
-[`sprint_7_0.md`](sprint_7_0.md),
-[`sprint_7_0_5.md`](sprint_7_0_5.md),
-[`sprint_7_1.md`](sprint_7_1.md) for commit hashes and results. Older
-sprints may reference a `PHASE_7_LOG` file that was never created —
-the per-sprint logs serve that role.
-**Sprint order (as planned):** 7.0 → 7.0.5 → 7.1 → 7.1.5 → 7.2 → 7.3 →
-7.4. May fold / split as each sprint is scoped.
+**Per-sprint logs:** see the `sprint_7_*.md` files in this directory
+and the per-sprint status row in [`PHASE_7_LOG.md`](PHASE_7_LOG.md)
+for commit hashes and shipped outcomes.
+**Sprint order (as planned + actually shipped):** 7.0 → 7.0.5 → 7.1
+→ 7.1.5 → 7.2 → 7.3 → 7.3.5 → 7.4. 7.3.5 was added mid-phase as
+the plan-authorized Rollback #4 escape from 7.3's prefill_m2048
+shortfall; see [`sprint_7_3_5.md`](sprint_7_3_5.md).
 
 > **Note:** This document is the long-form Phase 7 planning reference.
 > It captures architecture, risks, and sprint sequencing as they were
@@ -122,15 +123,31 @@ Dequant is more complex than INT8:
 Likely uses `mma.sync.m16n8k16.f16.f16.f32` after dequant → f16
 (INT4 × INT4 is not directly supported by the m16n8k16 shape).
 
-### 4. Quant + attention integration (Sprint 7.3 — planned)
+### 4. Quant + attention integration (Sprints 7.3 + 7.3.5 — complete)
 
 Attention's QKV projections are the primary beneficiary of quantized
-matmul (they dominate LLM inference cost). 7.3 wires the 7.1 / 7.2
-quant matmul into the Phase 6 FlashAttention inner loop:
+matmul (they dominate LLM inference cost). 7.3 shipped the fused
+tri-output projection kernels (`qkv_project_int8` W8A16 + `qkv_project_int4`
+W4A16) — single launch producing three f16 outputs ready to feed
+`attention_tc`. Scope clarifier: 7.3 fuses the three linear
+projections into one launch; it does **not** fuse projection with
+the attention kernel itself — score matmul, softmax, masking, and
+V-weighted sum remain inside `attention_tc`.
 
-- Dequant-on-the-fly QKV projection
-- Retains attention score accumulation in fp32
-- Retains softmax + V multiplication in fp16 / fp32
+7.3 shipped with Design S (serial fusion, single shared W slot, 7
+`bar.sync` per K-tile). The D8 bench found the kernels win ~3.0×
+over 3× standalone `matmul_int4` at decode shapes (M ≤ 128) and
+1.19× at mid-prefill (M=512), but **lose 15%** at large prefill
+(M=2048, `prefill_m2048 = 0.85×`). 7.3.5 applied the plan-
+authorized Rollback #4 escape: Design S+½P (two W slots with
+ping-pong index, barriers dropped from 7 to 4 per K-tile). INT8
+S+½P shipped across both correctness and ptxas gates; INT4
+S+½P was measured at median `prefill_m2048 = 1.05×` — improved
+from 0.85× but below the 1.15× ship threshold and the 1.10×
+ship-narrow floor, landing in the plan's "Measured, not shipped"
+tier. INT4 ships on `main` at Design S; the INT4 S+½P port is
+retained on `phase7-rest` as measured-data for a future `cp.async`
+contingency sprint.
 
 ### 5. `kaio-candle` bridge crate (Sprint 7.4 — planned)
 
@@ -151,7 +168,8 @@ perf win immediately; training users wait for backward.
 | 7.1 | INT8 dequantize-matmul | `kaio_ops::matmul_int8` symmetric INT8 × f16 → f32, perf target TBD at sprint kickoff. **Folds in integer-arithmetic DSL support** — mixed-width `u8×u8→u16` / `i8×i8→i32` is a 7.1 prerequisite, not a separate deliverable |
 | 7.1.5 ✅ | Warp + block reductions in DSL | `warp_reduce_sum/max/min` + `block_reduce_min` as `#[gpu_kernel]` builtins; whole-warp-multiple compile-time guard; 12 new GPU tests incl. two-warp independence canary; 4 trybuild compile-fail fixtures. See [`sprint_7_1_5.md`](sprint_7_1_5.md). No release — Phase 7 aggregate. |
 | 7.2 ✅ | INT4 dequantize-matmul | `kaio_ops::matmul_int4` GPTQ-style packed 4-bit + f16 group scales (group_size=128). DEQUANT-F16 via `mma.sync.m16n8k16.f16.f16.f32`. 4096³ median ~57 TOPS, range 49–58 across 6 xtask-bench runs (95–116% of cuBLAS sgemm) on RTX 4090 sm_89; 12/12 GPU round-trip tests bit-exact incl. sign-extend canaries. See [`sprint_7_2.md`](sprint_7_2.md). |
-| 7.3 | Quant + attention integration | Dequant-on-the-fly QKV projection wired into FlashAttention |
+| 7.3 ✅ | Fused tri-output QKV projection | `kaio_ops::qkv_project_int8` (W8A16) + `kaio_ops::qkv_project_int4` (W4A16) — single kernel launch produces three f16 outputs ready for `attention_tc`. Decode (M ≤ 128): ~3.0× over 3× standalone `matmul_int{4,8}`. Prefill mid (M=512): 1.19×. Prefill large (M=2048): 0.85× Design S. Triggered 7.3.5 as Rollback #4 escape. See [`sprint_7_3.md`](sprint_7_3.md). |
+| 7.3.5 ✅ | Design S+½P optimization for the fused QKV kernels | 2-W-slot ping-pong inner loop, barriers 7→4 per K-tile, `frag_A` register-hoisted. **INT8** shipped S+½P on both sm_80 + sm_89. **INT4** measured at median `prefill_m2048 = 1.05×` over 3 runs — improved from 0.85× but below the plan-locked 1.15× ship gate, landed in "Measured, not shipped" tier; INT4 retained at Design S on `main`, S+½P port archived on `phase7-rest`. See [`sprint_7_3_5.md`](sprint_7_3_5.md). |
 | 7.4 | `kaio-candle` bridge crate | Forward-kernel `CustomOp` bindings for core `kaio-ops` operations |
 
 ## Dependency Graph
@@ -165,7 +183,10 @@ perf win immediately; training users wait for backward.
                                                7.2 (INT4 matmul)
                                                     |
                                                     v
-                                               7.3 (quant + attention)
+                                               7.3 (fused QKV projection, Design S)
+                                                    |
+                                                    v
+                                               7.3.5 (Design S+½P; INT8 ships, INT4 measured-not-shipped)
                                                     |
                                                     v
                                                7.4 (candle bridge)
@@ -238,7 +259,8 @@ Both are substantial enough to deserve their own sprint. Sequenced between quant
    values near the sign boundary. (7.2)
 4. Quantized attention (QKV projection quantized, softmax + V in
    fp16) produces output within LLM-inference-grade tolerance vs
-   the fp16 reference attention. (7.3)
+   the fp16 reference attention. (7.3 ✅ — see `sprint_7_3.md` D9
+   quantized_attention showcase; 7.3.5 ✅ for INT8 S+½P follow-up.)
 5. `kaio-candle` crate publishes to crates.io with forward-kernel
    `CustomOp` bindings for `matmul_tc`, `matmul_int8`, `matmul_int4`,
    and `attention_tc`. (7.4)

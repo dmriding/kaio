@@ -245,7 +245,7 @@ fn matmul_int4_sign_extend_canary_negative_eights() {
     assert_close(&got, &want, 1e-3, "sign_extend_negative_eights");
 }
 
-/// Mixed-position nibble canary (Codex round 3 fold). One column has
+/// Mixed-position nibble canary (round 3 fold). One column has
 /// weights {+7, -8, +7, -8, ...} alternating along K; others are 0.
 /// Catches position-mapping bugs the homogeneous canary misses.
 #[test]

@@ -101,7 +101,7 @@ exactly what a GPU kernel framework should prioritize over convenience.
 **Context:** `ControlOp::Bra { target: String }` — in the emit match arm,
 `target` is `&String`. Passing to `instruction(&[...])` needs `&dyn Display`.
 `&String` coerces to `&dyn Display` (String implements Display), but
-Claude Desktop review flagged a potential `&&str` double-reference issue
+External review flagged a potential `&&str` double-reference issue
 if using `target.as_str()`.
 
 **Decision:** Use `&target as &dyn fmt::Display` explicitly. Avoids the

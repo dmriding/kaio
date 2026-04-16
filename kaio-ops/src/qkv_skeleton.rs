@@ -35,9 +35,9 @@
 //! - **≥ 2 unrolled K-loop iterations** (3 modelled here: steady →
 //!   steady → final) so `frag_C` accumulators carry values across
 //!   back-edges and ptxas liveness analysis counts them at the peak
-//!   rather than eliding them as dead-after-use (Opus R1b-2 / Opus
-//!   R3b-3 — without cross-iteration modelling the skeleton reports
-//!   62 regs and the real kernel spills at 68).
+//!   rather than eliding them as dead-after-use (R1b-2 / R3b-3 —
+//!   without cross-iteration modelling the skeleton reports 62 regs
+//!   and the real kernel spills at 68).
 //!
 //! The skeleton still skips real mma.sync emission — register contention
 //! is dominated by frag_C liveness and the surrounding staging, not by
@@ -45,7 +45,7 @@
 //! with `mov.b32 imm` + `ld.shared` + `fma.f32` sequences that have the
 //! right register envelope and right back-edge data-flow.
 //!
-//! # Scale-hoist mechanism note (Gemini R3-2)
+//! # Scale-hoist mechanism note (R3-2)
 //!
 //! The production kernel's INT4 scale-hoist path must use `ld.global.nc`
 //! (read-only cache / TEX path) or a uniform-broadcast pattern to avoid
@@ -62,7 +62,7 @@
 //! - `Used N registers`, **N ≤ 64** on both sm_80 and sm_89.
 //! - `0 bytes spill stores, 0 bytes spill loads` on both architectures.
 //!
-//! **Escape-hatch-before-Rollback-#2 (Gemini R3-4, Opus R3b-2):** if
+//! **Escape-hatch-before-Rollback-#2 (R3-4, R3b-2):** if
 //! `N > 64`, first inspect the emitted SASS via `cuobjdump --dump-sass`
 //! and check whether the 6 invariant base pointers (Q/K/V output, 3
 //! scale bases) are already being sourced from uniform-broadcast
@@ -75,7 +75,7 @@
 //!   placement hints for the base pointers and re-run ptxas. If ≥ 2 regs
 //!   reclaimed under 64 / 0 spills, proceed to D2.
 //!
-//! **Artifact retention (Codex R2-5):** archive both sm_80 and sm_89
+//! **Artifact retention (R2-5):** archive both sm_80 and sm_89
 //! `ptxas -v` outputs (pre- and post-escape-hatch, if applicable) in
 //! the D1 commit message — these are the baseline for D5's full-kernel
 //! comparison and for any future `cp.async`-contingency rework.
@@ -126,7 +126,7 @@ const TILE_W_PAD_BYTES: u32 = 64;
 const SLOT_STRIDE_BYTES: u32 = TILE_W_SLOT_BYTES + TILE_W_PAD_BYTES; // 576
 
 // Three unrolled K-loop iterations to model steady → steady → final
-// transitions (Opus R3b-3 — 2-iteration unroll misses the back-edge
+// transitions (R3b-3 — 2-iteration unroll misses the back-edge
 // transition between two steady-state iterations, which is a class of
 // slot-mapping bug that lives specifically at that back-edge).
 const K_ITERATIONS_MODELLED: u32 = 3;
@@ -149,7 +149,7 @@ pub(crate) fn build_qkv_tri_output_skeleton_ptx(sm: &str) -> String {
 
     // Kernel signature — includes the pointer set the real kernel will
     // receive. Having the 6 base pointers (Q/K/V output + 3 scale bases)
-    // in the param list is what sets up the Opus R3b-2 SASS inspection
+    // in the param list is what sets up the R3b-2 SASS inspection
     // check: we want to observe whether ptxas places them in GPRs or
     // uniform-broadcasts them from constant bank 0.
     kernel.add_param(PtxParam::pointer("q_out", PtxType::F16));
@@ -467,7 +467,7 @@ fn emit_modelled_k_iteration(
 
     // Per-projection scale load: offset = k_tile_group * sizeof(f32) * 2,
     // added to scale_{q,k,v}_base, loaded into 2 f32 regs per projection.
-    // Six f32 regs total (Opus R3b-2: production will use ld.global.nc
+    // Six f32 regs total (R3b-2: production will use ld.global.nc
     // or uniform broadcast; skeleton uses ld.global for the register
     // envelope — caching behavior doesn't affect ptxas count).
     let scale_offset = alloc.alloc(PtxType::U64);

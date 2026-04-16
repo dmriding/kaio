@@ -423,9 +423,9 @@ Median latency:    181.7 μs  (of 100 timed runs, 5 warm-ups skipped)
 
 3. **GELU README — bandwidth-bound teaching moment added post-build.**
    Both variants landed at essentially identical wall-clock speed
-   (104.9%) because they're bandwidth-bound, not compute-bound. Opus
-   flagged this as the best teaching insight in the whole example
-   set. Added a new section explaining why the "fast approximation"
+   (104.9%) because they're bandwidth-bound, not compute-bound.
+   Review flagged this as the best teaching insight in the whole
+   example set. Added a new section explaining why the "fast approximation"
    saves nothing on memory-bound workloads and why kernel fusion
    (not arithmetic micro-optimization) is the load-bearing lever for
    ML kernels.

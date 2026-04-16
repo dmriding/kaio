@@ -344,7 +344,7 @@ fn qkv_project_int4_sign_extend_canary_negative_eights() {
 }
 
 // ============================================================================
-// Q/K/V differentiation canary (Codex round 2)
+// Q/K/V differentiation canary (round 2)
 // ============================================================================
 
 #[test]

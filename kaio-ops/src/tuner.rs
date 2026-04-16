@@ -710,7 +710,7 @@ fn cache_miss_default(m: u32, n: u32, k: u32) -> MatmulTcVariant {
 fn resolve_matmul_tc_variant(device: &KaioDevice, m: u32, n: u32, k: u32) -> MatmulTcVariant {
     let sm = match sm_target(device) {
         Ok(s) => s,
-        // D6 post-review (Codex 2026-04-12): size-heuristic fallback.
+        // D6 post-review (2026-04-12): size-heuristic fallback.
         // Sprint 6.7 bench shows sync wins 256-2048, async wins 4096².
         // A flat TensorCoreAsync default was wrong for 4 of 5 measured
         // sizes. The heuristic matches all 5 with one comparison.
@@ -802,7 +802,7 @@ mod tc_tuner_tests {
 
     #[test]
     fn cache_matmul_and_matmul_tc_entries_coexist() {
-        // Sprint 6.5 D6 / Codex review: scalar matmul and TC matmul
+        // Sprint 6.5 D6 / review feedback: scalar matmul and TC matmul
         // entries share the cache file, disambiguated by the `kernel`
         // field. This test writes one of each for the same
         // (sm_target, dims) tuple and verifies:

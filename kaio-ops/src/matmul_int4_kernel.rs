@@ -70,7 +70,7 @@ const THREADS_PER_BLOCK: u32 = WARPS_PER_BLOCK * 32; // 128
 const NIBBLES_PER_U32: u32 = 8;
 const GROUP_SIZE: u32 = 128;
 
-// --- K-tile granularity (Codex round 3 lock) ---
+// --- K-tile granularity (round 3 lock) ---
 const K_TILE_SHARED: u32 = 16;
 const K_TILE_GROUP_RATIO: u32 = GROUP_SIZE / K_TILE_SHARED; // 8 — group transitions every 8 K-tiles
 

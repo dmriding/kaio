@@ -126,7 +126,7 @@ of 8 signed INT4 nibbles plus a single f16 group scale, emits:
 
 Returns `[Register; 4]` of packed-f16-pair `.b32` registers ready
 for `FragmentB_M16N8K16` feed. Helper is `pub(crate)` + `#[allow(dead_code)]`
-pending D4 wire-up. Contract locked per Opus round 2: assumes all 8
+pending D4 wire-up. Contract locked per round 2: assumes all 8
 nibbles in the input u32 share one group scale; caller aligns u32
 loads to group boundaries.
 
@@ -165,7 +165,7 @@ ptxas_verify_unpack_s4 -- --ignored`).
 
 **Layer 3 — GPU e2e boundary-value tests** — lands in D6 (explicit
 sign-extend round-trip on `0x88888888`, `0x77777777`, mixed-position
-patterns like `0x80000000` / `0x87654321` per Codex round 3).
+patterns like `0x80000000` / `0x87654321` per round 3).
 
 ### Quality gates (D2 checkpoint)
 
@@ -199,7 +199,7 @@ the INT8 kernel's layout documentation style at
 
 ### K-tile granularity — `K_TILE_SHARED = 16`
 
-Locked at 16 f16 elements per the plan (Codex round 3 arbitration).
+Locked at 16 f16 elements per the plan (round 3 arbitration).
 At K=16 exactly one mma K-step per K-tile per warp; the cooperative
 load for A, the unpacked B-feed, and the mma all run on the same
 tile. Rationale captured in the plan file; budget-check numbers

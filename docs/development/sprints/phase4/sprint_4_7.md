@@ -79,7 +79,7 @@ Added "Performance Status" section to `docs/benchmarks.md`:
    macro expansion time is a research problem.
 
 2. **High-signal annotations only** — dropped `Assign` and generic
-   `Expr` annotations per Codex review feedback. Bar_sync is the
+   `Expr` annotations per review feedback. Bar_sync is the
    only bare expression annotated.
 
 3. **Stats framed as structural, not performance** — doc comments

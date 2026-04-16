@@ -96,7 +96,7 @@ arbitrary-permutation use case can add it as a separate IR deliverable.
   - `cf_warp_reduce_2d_small_product.rs` (`(4, 4)`): 2D product 16
     fails the guard.
   - `cf_warp_reduce_partial_warp_48.rs` (`(8, 6)` = 48): non-multiple
-    of 32 fails the guard even though ≥ 32. This is the Codex-round-3
+    of 32 fails the guard even though ≥ 32. This is the round-3
     specific catch.
   - `cf_warp_reduce_wrong_type.rs`: `i32` passed where `f32` required
     — caught by `check_f32` with a precise span pointing at the call.

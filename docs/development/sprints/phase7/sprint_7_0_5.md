@@ -28,7 +28,7 @@ Implementation:
 - `DEBUG_WARNED: OnceLock<()>` latch in `kaio-runtime/src/device.rs` — once per process.
 - Gated on `cfg!(debug_assertions)` — folds to `false` and compiles out entirely in release.
 - `KAIO_SUPPRESS_DEBUG_WARNING=1` opt-out for CI / test harnesses that intentionally run in debug.
-- Message **performance-framed only** per Opus review fold: "Correctness is unaffected" is load-bearing. Debug-mode `cargo test` users checking correctness should not see their results cast into doubt.
+- Message **performance-framed only** per review fold: "Correctness is unaffected" is load-bearing. Debug-mode `cargo test` users checking correctness should not see their results cast into doubt.
 
 Tests:
 - `debug_warning_message_is_performance_framed_not_correctness_framed` — regression canary on message content. Blocks future drift toward "not meaningful" / "invalid" framing.
