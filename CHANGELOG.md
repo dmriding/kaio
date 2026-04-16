@@ -10,6 +10,89 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+### Sprint 7.4a — `kaio-candle` bridge crate (forward-only)
+
+New standalone crate at `kaio-candle/` bridging candle's `Tensor` API
+onto KAIO's forward tensor-core kernels. Five forward-only `CustomOp`
+bindings land in this sprint: `matmul_tc`, `matmul_tc_async`,
+`matmul_int4`, `attention_tc`, `attention_tc_causal`. Backward ops and
+the remaining quant ops (`matmul_int8`, `qkv_project_int{4,8}`) follow
+in 7.4b / 7.4c.
+
+`kaio-candle` is **not** a member of the main KAIO workspace. cudarc
+rejects `dynamic-loading` + `dynamic-linking` as simultaneously active
+features; main KAIO defaults to `dynamic-loading` (no CUDA toolkit
+required for CI host builds), candle-core needs `dynamic-linking`.
+Cargo unions features across a workspace build, so including
+`kaio-candle` in the main workspace would break no-CUDA CI. The crate
+lives standalone and consumes `kaio` / `kaio-ops` with
+`default-features = false, features = ["dynamic-linking"]`.
+
+#### Added — Sprint 7.4a
+
+- **`kaio-candle` crate** — new crate at repo root, excluded from the
+  workspace. `cargo build --features cuda` for the bridge surface;
+  `--no-default-features` compiles as an empty shell for no-CUDA
+  consumers.
+- **`kaio_candle::matmul_tc`** + **`matmul_tc_async`** — `CustomOp2`
+  wrappers around the f16 × f16 → f32 tensor-core matmul kernels.
+- **`kaio_candle::matmul_int4`** — `CustomOp3` wrapper around the
+  GPTQ-style INT4 dequantize-matmul. Group size locked at 128,
+  `K % 128 == 0`.
+- **`kaio_candle::attention_tc`** + **`attention_tc_causal`** —
+  `CustomOp3` wrappers around the fused tensor-core scaled-dot-product
+  attention. `seq_k ≤ 384` per the kaio-ops shared-memory cap.
+- **Input contract gate** — every bridge call rejects rank ≠ 2,
+  non-contiguous, or non-zero-offset inputs with concrete error
+  messages and a reshape hint. Multi-head attention callers flatten
+  `[heads, seq, d]` → `[heads * seq, d]` or go per-head.
+- **Weekly candle-HEAD compat CI** — `.github/workflows/candle-head.yml`
+  builds `kaio-candle` against candle-core's git `main` once per Monday.
+  Step-level `continue-on-error` plus auto-issue on failure via
+  `peter-evans/create-issue-from-file@v5`.
+- **Runnable examples** — `kaio-candle/examples/matmul_tc_candle.rs`
+  and `attention_tc_candle.rs`, small shapes so they finish fast.
+
+#### Changed — Sprint 7.4a
+
+- **`kaio-runtime` `GpuBuffer<T>` made `#[repr(transparent)]`** over
+  `CudaSlice<T>` with compile-time `static_assertions` checks in
+  `repr_soundness`. `GpuBuffer::from_cuda_slice` promoted from
+  `pub(crate)` to `pub`; `into_cuda_slice` added. Enables the bridge's
+  read-only newtype cast.
+- **`kaio-runtime` `KaioDevice::ordinal()`** added (public accessor on
+  the wrapper) so the bridge can check ordinal equality against the
+  candle `CudaDevice`.
+- **cudarc loading strategy becomes a per-crate feature flag** across
+  `kaio-runtime`, `kaio`, and `kaio-ops`. Defaults unchanged
+  (`dynamic-loading` active by default, no CUDA toolkit needed for
+  main-workspace builds); `dynamic-linking` is now opt-in per crate,
+  which is how `kaio-candle` converges with candle-core's cudarc
+  feature set. Downstream consumers using default features see no
+  behaviour change.
+
+#### Tests — Sprint 7.4a
+
+- **15 `kaio-candle` GPU integration tests** (`#[ignore]`-gated):
+  12 bit-exact cross-checks against direct `kaio-ops` calls across
+  the five ops at 2–3 shapes each, plus 3 rejection tests exercising
+  `.t()` non-contiguous, `.narrow(...)` non-zero-offset, and `matmul_int4`
+  K not multiple of 128. All green on RTX 4090 sm_89.
+- **4 host tests** exercising the rank + contiguity + offset gate.
+
+#### Notes — Sprint 7.4a
+
+- **No CPU fallback.** `cpu_fwd` returns a loud error. KAIO's value is
+  GPU-specific PTX; a silent CPU fallback would mask every perf claim.
+- **`DType::F32` output contract** matches the `kaio-ops` accumulator.
+  Cast via `.to_dtype(DType::F16)?` downstream if needed.
+- **CUDA Graph capture incompatible.** The bridge issues
+  `cuCtxSynchronize` fences on either side of each launch for stream
+  safety; this is banned inside a capture region. Event-based stream
+  plumbing in 7.4c unblocks CUDA Graph usage.
+- **crates.io publish** waits for a `kaio 0.3.1` patch release that
+  exposes the new `dynamic-linking` feature. See `PUBLISH_ORDER.md`.
+
 ### Sprint 7.3 — Fused tri-output QKV projection (`qkv_project_int8` + `qkv_project_int4`)
 
 Fused projection kernels producing three `f16` outputs from one kernel

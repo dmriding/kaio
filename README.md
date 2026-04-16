@@ -281,8 +281,9 @@ KAIO is pre-1.0 software. Current engineering constraints:
   doesn't fill the SM array until the grid is large. Scalar matmul
   tops out at 31% of cuBLAS. For small shapes prefer cuBLAS or the
   scalar path. [Details →](docs/performance.md)
-- **Inference only.** No autograd / backward pass. Training integration
-  (`kaio-candle` bridge) is planned for Phase 7.
+- **Inference only.** No autograd / backward pass. Forward-only
+  [`kaio-candle`](kaio-candle/) bridge (5 `CustomOp` bindings) ships in
+  Phase 7 Sprint 7.4a; backward / training integration follows in 7.4c.
 - **DSL is a Rust subset.** No closures, traits, generics, method
   calls, or string operations inside `#[gpu_kernel]` function bodies.
   Arithmetic, comparisons, bitwise operators (`&` `|` `^` `<<` `>>`
@@ -323,6 +324,7 @@ Four layers, bottom to top:
 | `kaio-core`    | PTX IR, instruction emitters, fragment containers, zero external deps   |
 | `kaio-runtime` | CUDA driver wrapper via [cudarc](https://github.com/coreylowman/cudarc) |
 | `kaio-ops`     | Pre-built GPU operations (matmul, attention, TC matmul, auto-tuner)     |
+| `kaio-candle`  | [candle](https://github.com/huggingface/candle) `CustomOp` bridge — standalone crate at [`kaio-candle/`](kaio-candle/), not a workspace member (cudarc feature mutual-exclusion) |
 
 ## Target hardware
 
@@ -443,9 +445,10 @@ for a complete end-to-end example.
   (`cp.async`), bank-conflict padding. **82.3% sync / 92.5% async of
   cuBLAS sgemm at 4096² on Ampere.** Three standalone showcase
   examples. crates.io v0.2.0.
-- [ ] **Phase 7** — Quantized kernels (INT8/INT4), training
-  integration (`kaio-candle` bridge), `ldmatrix.sync` for further TC
-  headroom, bf16 TC matmul variant.
+- [ ] **Phase 7** — Quantized kernels (INT8/INT4, fused QKV
+  projection), candle integration (`kaio-candle` bridge — forward ops
+  in 7.4a, quant ops in 7.4b, backward + stream plumbing in 7.4c),
+  `ldmatrix.sync` for further TC headroom, bf16 TC matmul variant.
 - [ ] **Phase 8** — PyO3 bindings (Python access to `kaio-ops`).
 
 See [CHANGELOG.md](CHANGELOG.md) for per-release detail and
