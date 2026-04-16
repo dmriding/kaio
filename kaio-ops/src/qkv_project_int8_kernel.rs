@@ -2793,6 +2793,29 @@ mod tests {
                 Some(0),
                 "qkv_project_int8 ({sm}) has spill stores"
             );
+            // Diagnostic: re-run with `-maxrregcount 128` to confirm the
+            // default register count is the *natural* allocation, not
+            // ptxas hitting an implicit cap and silently spilling under
+            // it. If the uncapped number differs from the default, that
+            // signals ptxas was being conservative by default and could
+            // have used more registers.
+            std::fs::write(&tmp, &ptx).expect("re-write temp PTX for diag");
+            let diag_output = std::process::Command::new("ptxas")
+                .args(["--gpu-name", sm, "--verbose"])
+                .args(["--maxrregcount", "128"])
+                .arg(tmp.to_str().unwrap())
+                .output()
+                .expect("failed to run ptxas diag");
+            let diag_stdout = String::from_utf8_lossy(&diag_output.stdout);
+            let diag_stderr = String::from_utf8_lossy(&diag_output.stderr);
+            let _ = std::fs::remove_file(&tmp);
+            let diag_combined = format!("{diag_stdout}\n{diag_stderr}");
+            let diag_regs = parse_after(&diag_combined, "Used ", " registers");
+            eprintln!(
+                "  diag (maxrregcount=128) : regs/thread {diag_regs:?}  \
+                 (if equal to default, allocation is natural)"
+            );
+
             assert_eq!(
                 spill_loads,
                 Some(0),
