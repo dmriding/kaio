@@ -2,6 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](https://github.com/dmriding/kaio)
 [![Rust](https://img.shields.io/badge/rust-1.94+-orange.svg)](https://www.rust-lang.org/)
+[![candle HEAD compat](https://github.com/dmriding/kaio/actions/workflows/candle-head.yml/badge.svg)](https://github.com/dmriding/kaio/actions/workflows/candle-head.yml)
 
 **Candle bridge for [KAIO](https://github.com/dmriding/kaio) — forward-only `CustomOp` bindings that let you call KAIO's tensor-core GPU kernels directly on `candle_core::Tensor`.**
 
@@ -113,6 +114,8 @@ Every wrapper call checks that the KAIO device and candle device share the same 
 - cudarc feature conventions change with candle releases.
 
 We re-pin `kaio-candle` against each new candle minor release. Use `kaio-candle 0.1.x` with `candle-core 0.10.x`; `kaio-candle 0.2` will target whichever candle minor is current when we publish.
+
+A weekly GitHub Actions workflow (`.github/workflows/candle-head.yml`) builds kaio-candle against candle-core's git `main` branch once per Monday. If this badge goes red for more than two consecutive weeks, either the pin moves to the new candle minor or this section documents the divergence.
 
 ## Known limitations (v0.1)
 
