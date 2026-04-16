@@ -25,6 +25,16 @@ targets = [
     "x86_64-pc-windows-msvc",
 ]
 
+[features]
+# Umbrella crate — forwards the cudarc loading strategy to kaio-runtime.
+# Default `dynamic-loading` preserves the no-CUDA-toolkit story for
+# standalone users. kaio-candle consumes this crate with
+# `default-features = false, features = ["dynamic-linking"]` to converge
+# with candle-core; see root Cargo.toml comment.
+default = ["dynamic-loading"]
+dynamic-loading = ["kaio-runtime/dynamic-loading"]
+dynamic-linking = ["kaio-runtime/dynamic-linking"]
+
 [dependencies]
 kaio-core = { version = "0.3.0", path = "../kaio-core" }
 kaio-runtime = { version = "0.3.0", path = "../kaio-runtime" }
