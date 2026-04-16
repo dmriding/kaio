@@ -27,9 +27,11 @@
 //! kaio-candle = { version = "0.1", features = ["cuda"] }
 //! ```
 //!
-//! The default (feature-less) build emits a [`compile_error!`] pointing at
-//! the missing feature. This matches candle-core's own opt-in model and
-//! keeps `cargo doc` / no-CUDA CI legs working without the toolkit.
+//! The default (feature-less) build produces an empty shell — attempting
+//! to call a bridge function like `kaio_candle::matmul_tc(...)` surfaces
+//! a "function not found" compile error pointing at the missing feature.
+//! This matches candle-core's own opt-in model and keeps `cargo doc` /
+//! no-CUDA CI legs working without the toolkit.
 //!
 //! The `cuda` feature requires the CUDA toolkit at build time (candle-core's
 //! cudarc feature uses `dynamic-linking`). Downstream consumers who already
@@ -90,9 +92,13 @@ mod bridge;
 
 #[cfg(feature = "cuda")]
 mod matmul_tc;
+#[cfg(feature = "cuda")]
+pub use matmul_tc::{MatmulTcOp, matmul_tc};
 
 #[cfg(feature = "cuda")]
 mod matmul_tc_async;
+#[cfg(feature = "cuda")]
+pub use matmul_tc_async::{MatmulTcAsyncOp, matmul_tc_async};
 
 #[cfg(feature = "cuda")]
 mod matmul_int4;

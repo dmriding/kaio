@@ -39,9 +39,7 @@ use kaio::prelude::{GpuBuffer, KaioDevice, KaioError};
 /// Extract the cudarc [`CudaSlice<T>`] handle from a candle [`CudaStorage`].
 ///
 /// Errors if the storage's dtype doesn't match `T`.
-pub(crate) fn slice_ref_from_storage<T: CudaDType>(
-    storage: &CudaStorage,
-) -> Result<&CudaSlice<T>> {
+pub(crate) fn slice_ref_from_storage<T: CudaDType>(storage: &CudaStorage) -> Result<&CudaSlice<T>> {
     storage.as_cuda_slice::<T>()
 }
 
@@ -108,10 +106,7 @@ fn candle_ordinal(dev: &CudaDevice) -> Result<usize> {
 /// `cuDevicePrimaryCtxRetain`), two same-ordinal context constructions
 /// share the same underlying primary context at the driver level. Ordinal
 /// equality is the right check; Arc-identity would be spurious.
-pub(crate) fn ensure_ordinal_match(
-    candle_dev: &CudaDevice,
-    kaio_dev: &KaioDevice,
-) -> Result<()> {
+pub(crate) fn ensure_ordinal_match(candle_dev: &CudaDevice, kaio_dev: &KaioDevice) -> Result<()> {
     let candle_ord = candle_ordinal(candle_dev)?;
     let kaio_ord = kaio_dev.ordinal();
     if candle_ord != kaio_ord {
@@ -195,4 +190,55 @@ pub(crate) fn ensure_rank2_contiguous_zero_offset(
         )));
     }
     Ok((dims[0], dims[1]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{Layout, Shape};
+
+    /// Happy path: rank-2 contiguous zero-offset layout returns (rows, cols).
+    #[test]
+    fn rank2_contiguous_zero_offset_returns_dims() {
+        let layout = Layout::contiguous(Shape::from_dims(&[64, 128]));
+        let (rows, cols) =
+            ensure_rank2_contiguous_zero_offset("test", 0, &layout).expect("happy path");
+        assert_eq!(rows, 64);
+        assert_eq!(cols, 128);
+    }
+
+    /// Rank-1 input rejected with a concrete reshape hint.
+    #[test]
+    fn rank1_rejected_with_reshape_hint() {
+        let layout = Layout::contiguous(Shape::from_dims(&[128]));
+        let err = ensure_rank2_contiguous_zero_offset("test_op", 0, &layout)
+            .expect_err("rank-1 must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("must be rank-2"),
+            "expected 'must be rank-2' in {msg}"
+        );
+        assert!(msg.contains("reshape"), "expected reshape hint in {msg}");
+        assert!(msg.contains("test_op"), "expected op name in {msg}");
+        assert!(msg.contains("input #0"), "expected input index in {msg}");
+    }
+
+    /// Rank-3 (common for multi-head attention before flatten) rejected
+    /// with the same message shape.
+    #[test]
+    fn rank3_rejected_with_reshape_hint() {
+        let layout = Layout::contiguous(Shape::from_dims(&[8, 64, 64]));
+        let err = ensure_rank2_contiguous_zero_offset("test_op", 1, &layout)
+            .expect_err("rank-3 must fail");
+        let msg = format!("{err}");
+        assert!(msg.contains("must be rank-2"));
+        assert!(msg.contains("input #1"));
+    }
+
+    /// Rank-4 (batch + heads + seq + d) — same rejection.
+    #[test]
+    fn rank4_rejected() {
+        let layout = Layout::contiguous(Shape::from_dims(&[2, 8, 64, 64]));
+        assert!(ensure_rank2_contiguous_zero_offset("test", 0, &layout).is_err());
+    }
 }

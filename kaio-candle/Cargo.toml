@@ -49,6 +49,8 @@ half = "2"
 # Matches kaio-candle's dynamic-linking feature set so the feature graph stays
 # uniform between main build and dev build.
 cudarc = { version = "0.19.4", default-features = false, features = ["driver", "std", "dynamic-linking", "cuda-version-from-build-system", "f16"] }
+# Terse `anyhow::Result<()>` across candle / cudarc / kaio error types in tests.
+anyhow = "1"
 
 [features]
 default = []
