@@ -12,6 +12,7 @@ keywords = ["gpu", "cuda", "candle", "ml", "bridge"]
 categories = ["hardware-support", "science"]
 include = [
     "/src/**/*.rs",
+    "/examples/**/*.rs",
     "/Cargo.toml",
     "/README.md",
 ]
