@@ -31,3 +31,9 @@ dynamic-linking = ["cudarc/dynamic-linking"]
 cudarc = { workspace = true }
 thiserror = { workspace = true }
 kaio-core = { version = "0.3.0", path = "../kaio-core" }
+
+[dev-dependencies]
+# Compile-time soundness asserts for GpuBuffer's #[repr(transparent)] contract
+# — see kaio-runtime/src/buffer.rs::repr_soundness.
+static_assertions = "1"
+half = { workspace = true }

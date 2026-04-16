@@ -15,14 +15,45 @@ use crate::error::Result;
 /// [`CudaSlice`] handles device memory deallocation automatically when
 /// the buffer is dropped. The `CudaSlice` holds an `Arc<CudaContext>`
 /// internally, ensuring the CUDA context outlives the allocation.
+///
+/// # Representation — load-bearing
+///
+/// `#[repr(transparent)]` guarantees this newtype has identical memory
+/// layout, size, and alignment to its sole field [`CudaSlice<T>`]. The
+/// `kaio-candle` bridge crate relies on this to cast `&CudaSlice<T>`
+/// (borrowed from candle's `CudaStorage`) to `&GpuBuffer<T>` for passing
+/// into `kaio-ops` kernel entry points without round-tripping through an
+/// owned clone.
+///
+/// **Do not remove `#[repr(transparent)]` or add a second field without
+/// coordinating with `kaio-candle`.** The soundness-assertion tests at the
+/// bottom of this module will fail at compile time if the layout diverges.
+#[repr(transparent)]
 pub struct GpuBuffer<T> {
     inner: CudaSlice<T>,
 }
 
 impl<T> GpuBuffer<T> {
-    /// Create a `GpuBuffer` from an existing `CudaSlice`.
-    pub(crate) fn from_raw(inner: CudaSlice<T>) -> Self {
+    /// Wrap an existing cudarc [`CudaSlice`] as a [`GpuBuffer`].
+    ///
+    /// Takes ownership of the slice. The returned `GpuBuffer` drops the
+    /// underlying device allocation via cudarc's normal `Drop` on its own
+    /// drop.
+    ///
+    /// Used by bridge crates (e.g. `kaio-candle`) to consume a
+    /// fresh-allocated slice back into the KAIO buffer type after a kernel
+    /// produces its output.
+    pub fn from_cuda_slice(inner: CudaSlice<T>) -> Self {
         Self { inner }
+    }
+
+    /// Consume the buffer and return the underlying cudarc [`CudaSlice`].
+    ///
+    /// Used by bridge crates to hand the owned output slice back to the
+    /// host framework (e.g. wrapping into `candle_core::CudaStorage`) after
+    /// a KAIO kernel has written into the buffer.
+    pub fn into_cuda_slice(self) -> CudaSlice<T> {
+        self.inner
     }
 
     /// Number of elements in the buffer.
@@ -67,4 +98,27 @@ impl<T: cudarc::driver::DeviceRepr + Default + Clone + Unpin> GpuBuffer<T> {
     pub fn to_host(&self, device: &KaioDevice) -> Result<Vec<T>> {
         Ok(device.stream().clone_dtoh(&self.inner)?)
     }
+}
+
+// Soundness assertions for the `#[repr(transparent)]` contract above.
+// Compile-time: any future change to `GpuBuffer`'s layout (adding a field,
+// removing `#[repr(transparent)]`, changing the inner type) fails the build
+// here instead of producing UB at the `kaio-candle` transmute site.
+// Placed at end-of-file to satisfy the `clippy::items_after_test_module`
+// lint.
+#[cfg(test)]
+mod repr_soundness {
+    use super::GpuBuffer;
+    use cudarc::driver::CudaSlice;
+    use half::f16;
+    use static_assertions::{assert_eq_align, assert_eq_size};
+
+    assert_eq_size!(GpuBuffer<f32>, CudaSlice<f32>);
+    assert_eq_align!(GpuBuffer<f32>, CudaSlice<f32>);
+    assert_eq_size!(GpuBuffer<f16>, CudaSlice<f16>);
+    assert_eq_align!(GpuBuffer<f16>, CudaSlice<f16>);
+    assert_eq_size!(GpuBuffer<i8>, CudaSlice<i8>);
+    assert_eq_align!(GpuBuffer<i8>, CudaSlice<i8>);
+    assert_eq_size!(GpuBuffer<u32>, CudaSlice<u32>);
+    assert_eq_align!(GpuBuffer<u32>, CudaSlice<u32>);
 }

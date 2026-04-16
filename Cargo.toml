@@ -1,7 +1,13 @@
 [workspace]
 resolver = "3"
 members = ["kaio-core", "kaio-runtime", "kaio-macros", "kaio", "kaio-ops", "xtask"]
-exclude = ["examples/*"]
+# `kaio-candle` is intentionally outside the main workspace — cudarc's
+# `dynamic-loading` (KAIO default) and `dynamic-linking` (candle-core) features
+# are mutually exclusive, and Cargo unions features across a workspace build.
+# The bridge crate lives standalone at `kaio-candle/` with its own Cargo.toml;
+# build with `cd kaio-candle && cargo build --features cuda`. See
+# docs/development/sprints/phase7/reviews/internal_7.4a_plan.md (P2, G3-1).
+exclude = ["examples/*", "kaio-candle"]
 
 [workspace.package]
 version = "0.3.0"
