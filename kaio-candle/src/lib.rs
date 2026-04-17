@@ -4,11 +4,11 @@
 //! [candle](https://github.com/huggingface/candle) and the
 //! [KAIO](https://github.com/dmriding/kaio) GPU kernel library.
 //!
-//! ## Status — v0.1.0 (Sprint 7.4a + 7.4b-part1)
+//! ## Status — v0.1.0 (Sprint 7.4a + 7.4b)
 //!
-//! Currently bridges the LLM-inference-forward trinity plus two
-//! zero-incremental-cost neighbours and the W8A8 matmul:
+//! Bridges 8 forward ops across two patterns:
 //!
+//! **CustomOp-based** (single-output, return `f32`):
 //! - `matmul_tc` — f16 × f16 → f32 matmul via KAIO tensor-core kernel.
 //! - `matmul_tc_async` — same, `cp.async` variant (92.5% cuBLAS sgemm at 4096² on sm_89).
 //! - `matmul_int4` — GPTQ-style INT4 dequantize-matmul with f16 group scales.
@@ -16,8 +16,15 @@
 //! - `attention_tc` — fused tensor-core scaled-dot-product attention.
 //! - `attention_tc_causal` — same, with decoder causal mask.
 //!
-//! Backward kernels + fused tri-output quant ops (`qkv_project_int{4,8}`)
-//! land in 7.4b-part2 / 7.4c.
+//! **Direct-call** (multi-output, return `f16`):
+//! - `qkv_project_int8` — W8A16 fused tri-output QKV projection (4 inputs → 3 f16 outputs).
+//! - `qkv_project_int4` — W4A16 fused tri-output QKV projection (7 inputs → 3 f16 outputs).
+//!
+//! CustomOp-based ops return `f32` matching the kaio-ops accumulator.
+//! Direct-call ops return `f16` because the fused kernel performs the
+//! `f32→f16` conversion internally as part of the projection fusion.
+//!
+//! Backward kernels land in 7.4c.
 //!
 //! ## Build requirements
 //!
@@ -115,3 +122,13 @@ pub use attention_tc::{AttentionTcOp, attention_tc, attention_tc_causal};
 mod matmul_int8;
 #[cfg(feature = "cuda")]
 pub use matmul_int8::{MatmulInt8Op, matmul_int8};
+
+#[cfg(feature = "cuda")]
+mod qkv_project_int8;
+#[cfg(feature = "cuda")]
+pub use qkv_project_int8::qkv_project_int8;
+
+#[cfg(feature = "cuda")]
+mod qkv_project_int4;
+#[cfg(feature = "cuda")]
+pub use qkv_project_int4::qkv_project_int4;

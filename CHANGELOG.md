@@ -10,6 +10,46 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+### Sprint 7.4b-part2 — Direct-call bridge pattern + `qkv_project_int{4,8}`
+
+New **direct-call bridge pattern** in `kaio-candle` for ops that exceed
+candle's `CustomOpN` arity (max 3 inputs, single output). Two fused
+tri-output QKV projection bindings ship as the first users of this
+pattern: `qkv_project_int8` (W8A16, 4 tensor + 3 scalar inputs) and
+`qkv_project_int4` (W4A16, 7 tensor inputs). Both return
+`(Tensor, Tensor, Tensor)` with `DType::F16` output — the fused kernel
+performs `f32→f16` conversion internally.
+
+#### Added — Sprint 7.4b-part2
+
+- **`kaio_candle::qkv_project_int8`** — direct-call W8A16 fused
+  tri-output QKV projection. `x: f16[M,K]`, three `u8-as-i8[K,N]`
+  weight tensors, three `f32` per-projection scales → three `f16[M,N]`
+  output tensors.
+- **`kaio_candle::qkv_project_int4`** — direct-call W4A16 fused
+  tri-output QKV projection. `x: f16[M,K]`, three `u32[K/8,N]`
+  packed-weight tensors, three `f16[K/128,N]` group-scale tensors →
+  three `f16[M,N]` output tensors. `group_size=128` locked.
+- **`bridge::reinterpret_u8_slice_as_i8`** promoted from
+  `matmul_int8.rs` to `bridge.rs` — single definition for the
+  `DType::U8`-as-INT8 convention, shared by `matmul_int8` and
+  `qkv_project_int8`.
+- **`bridge::ensure_rank2_contiguous_zero_offset_named`** — named-
+  parameter variant of the existing shape gate, used by direct-call
+  ops for error messages that cite parameter names (`w_k: ...`) rather
+  than numeric indices.
+- **Autograd disconnection guard** — direct-call ops reject gradient-
+  tracked inputs with a loud error requiring `.detach()`. Prevents
+  silent computation-graph severance.
+
+#### Tests — Sprint 7.4b-part2
+
+- **12 new GPU integration tests** (`#[ignore]`-gated): 5 bit-exact
+  cross-checks (2 int8 shapes + 3 int4 shapes including K=512 for
+  4-group coverage), 2 Q/K/V differentiation canaries (INT8 + INT4),
+  5 rejection tests. All green on RTX 4090 sm_89.
+- **Total `kaio-candle` GPU tests: 32** (was 20).
+
 ### Sprint 7.4b-part1 — `kaio-candle::matmul_int8` binding
 
 Adds the sixth forward `CustomOp` binding to `kaio-candle`: W8A8

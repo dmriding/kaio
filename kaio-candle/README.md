@@ -6,9 +6,9 @@
 
 **Candle bridge for [KAIO](https://github.com/dmriding/kaio) — forward-only `CustomOp` bindings that let you call KAIO's tensor-core GPU kernels directly on `candle_core::Tensor`.**
 
-Ships six ops today: `matmul_tc`, `matmul_tc_async`, `matmul_int4`, `matmul_int8`, `attention_tc`, `attention_tc_causal`. Backward kernels and the fused tri-output quant ops (`qkv_project_int{4,8}`) land in follow-up sprints.
+Ships eight ops today: `matmul_tc`, `matmul_tc_async`, `matmul_int4`, `matmul_int8`, `attention_tc`, `attention_tc_causal`, `qkv_project_int8`, `qkv_project_int4`. Backward kernels land in 7.4c.
 
-## Status — v0.1.0 (Sprint 7.4a + 7.4b-part1)
+## Status — v0.1.0 (Sprint 7.4a + 7.4b)
 
 Forward-only. Inference / eval use cases only; training (autograd) is not yet supported — `bwd()` falls back to candle's `BackwardNotSupported`.
 
@@ -96,12 +96,16 @@ cargo run --release --features cuda --example attention_tc_candle
 | `matmul_int8(kd, a, b, scale)` | `CustomOp2` | `a: [M, K]`, `b: [K, N]` → `[M, N]` | u8-as-i8 × u8-as-i8 → f32 (× f32 scale) |
 | `attention_tc(kd, q, k, v)` | `CustomOp3` | `q: [seq_q, d_k]`, `k: [seq_k, d_k]`, `v: [seq_k, d_v]` → `[seq_q, d_v]` | f16 × f16 × f16 → f32 |
 | `attention_tc_causal(kd, q, k, v)` | `CustomOp3` | same | f16 × f16 × f16 → f32 |
+| `qkv_project_int8(kd, x, wq, wk, wv, sq, sk, sv)` | Direct-call | `x: [M, K]`, `wq/wk/wv: [K, N]` → `(Q, K, V)` each `[M, N]` | f16 × u8-as-i8 → **f16** |
+| `qkv_project_int4(kd, x, wq, wk, wv, sq, sk, sv)` | Direct-call | `x: [M, K]`, `wq/wk/wv: [K/8, N]`, `sq/sk/sv: [K/128, N]` → `(Q, K, V)` each `[M, N]` | f16 × u32 × f16 → **f16** |
 
 `matmul_int4` is GPTQ-style: `group_size=128` is locked in by the kaio-ops kernel contract. `K` must be a multiple of 128, weights are packed 8 INT4 values per `u32`, one f16 scale per group of 128 elements.
 
 `matmul_int8` is W8A8 symmetric quant. Candle has no `DType::I8`, so the convention is `DType::U8` tensors whose bytes are interpreted as signed INT8 (`-128..=127`) by the kernel. The bridge reinterprets the storage via a same-layout transmute. `scale` is a scalar `f32` applied in the accumulator; a typical realistic value is `max_abs / 127`.
 
 `attention_tc` uses a shared-memory scores buffer capped at `seq_k ≤ 384`. FlashAttention-TC will lift this cap in a later sprint.
+
+`qkv_project_int8` and `qkv_project_int4` are **direct-call** functions (not `CustomOpN` — candle's trait maxes at 3 inputs and single output). They return `(Tensor, Tensor, Tensor)` with `DType::F16` output because the fused kernel performs the `f32→f16` conversion internally as part of the projection fusion. Gradient-tracked inputs are rejected with a loud error requiring `.detach()` — these ops are forward-only.
 
 ## Device lifetime
 

@@ -515,3 +515,433 @@ fn matmul_int8_rejects_nonzero_offset() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// qkv_project_int8 bit-exact cross-check (W8A16 fused tri-output)
+// ---------------------------------------------------------------------------
+
+fn bit_exact_qkv_project_int8(
+    m: usize,
+    n: usize,
+    k: usize,
+    scale_q: f32,
+    scale_k: f32,
+    scale_v: f32,
+) -> anyhow::Result<()> {
+    let x_host: Vec<f16> = (0..m * k)
+        .map(|i| f16::from_f32(((i % 31) as f32) * 0.02 - 0.3))
+        .collect();
+    // i8 weights — candle side is u8
+    let wq_host_i8: Vec<i8> = (0..k * n)
+        .map(|i| (((i % 127) as i32) - 63) as i8)
+        .collect();
+    let wk_host_i8: Vec<i8> = (0..k * n).map(|i| (((i % 97) as i32) - 48) as i8).collect();
+    let wv_host_i8: Vec<i8> = (0..k * n)
+        .map(|i| (((i % 113) as i32) - 56) as i8)
+        .collect();
+    let wq_host_u8: Vec<u8> = wq_host_i8.iter().map(|&x| x as u8).collect();
+    let wk_host_u8: Vec<u8> = wk_host_i8.iter().map(|&x| x as u8).collect();
+    let wv_host_u8: Vec<u8> = wv_host_i8.iter().map(|&x| x as u8).collect();
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // Candle path
+    let x_c = Tensor::from_vec(x_host.clone(), (m, k), &candle_dev)?;
+    let wq_c = Tensor::from_vec(wq_host_u8, (k, n), &candle_dev)?;
+    let wk_c = Tensor::from_vec(wk_host_u8, (k, n), &candle_dev)?;
+    let wv_c = Tensor::from_vec(wv_host_u8, (k, n), &candle_dev)?;
+    let (q_c, k_c, v_c) = kaio_candle::qkv_project_int8(
+        &kaio_dev, &x_c, &wq_c, &wk_c, &wv_c, scale_q, scale_k, scale_v,
+    )?;
+    let q_c_host: Vec<f16> = q_c.flatten_all()?.to_vec1::<f16>()?;
+    let k_c_host: Vec<f16> = k_c.flatten_all()?.to_vec1::<f16>()?;
+    let v_c_host: Vec<f16> = v_c.flatten_all()?.to_vec1::<f16>()?;
+
+    // Direct kaio-ops path
+    let x_buf = kaio_dev.alloc_from(&x_host)?;
+    let wq_buf = kaio_dev.alloc_from(&wq_host_i8)?;
+    let wk_buf = kaio_dev.alloc_from(&wk_host_i8)?;
+    let wv_buf = kaio_dev.alloc_from(&wv_host_i8)?;
+    let mut q_buf = kaio_dev.alloc_zeros::<f16>(m * n)?;
+    let mut k_buf = kaio_dev.alloc_zeros::<f16>(m * n)?;
+    let mut v_buf = kaio_dev.alloc_zeros::<f16>(m * n)?;
+    kaio_ops::qkv_project_int8(
+        &kaio_dev, &x_buf, &wq_buf, &wk_buf, &wv_buf, scale_q, scale_k, scale_v, &mut q_buf,
+        &mut k_buf, &mut v_buf, m as u32, n as u32, k as u32,
+    )?;
+    let q_k_host: Vec<f16> = q_buf.to_host(&kaio_dev)?;
+    let k_k_host: Vec<f16> = k_buf.to_host(&kaio_dev)?;
+    let v_k_host: Vec<f16> = v_buf.to_host(&kaio_dev)?;
+
+    // Independent per-projection bit-exact assertions.
+    for (label, candle_out, kaio_out) in [
+        ("Q", &q_c_host, &q_k_host),
+        ("K", &k_c_host, &k_k_host),
+        ("V", &v_c_host, &v_k_host),
+    ] {
+        assert_eq!(candle_out.len(), kaio_out.len(), "{label} length mismatch");
+        for (i, (cv, kv)) in candle_out.iter().zip(kaio_out.iter()).enumerate() {
+            assert_eq!(
+                cv.to_bits(),
+                kv.to_bits(),
+                "{label} projection mismatch at element {i}: candle={cv} kaio={kv} \
+                 (M={m} N={n} K={k})"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int8_bit_exact_64x64x64() -> anyhow::Result<()> {
+    bit_exact_qkv_project_int8(64, 64, 64, 0.005, 0.01, 0.02)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int8_bit_exact_256x128x256() -> anyhow::Result<()> {
+    bit_exact_qkv_project_int8(256, 128, 256, 1.0, 0.5, 2.0)
+}
+
+/// Q/K/V differentiation canary: W_Q=1, W_K=2, W_V=3, X=ones,
+/// scale=1/K. Expected outputs ≈ 1, 2, 3 per cell. Catches projection-
+/// routing bugs where fragment-C grids alias across projections.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int8_differentiation_canary() -> anyhow::Result<()> {
+    let m = 64usize;
+    let n = 32usize;
+    let k = 128usize;
+    let scale = 1.0 / (k as f32);
+
+    let x_host: Vec<f16> = vec![f16::from_f32(1.0); m * k];
+    let wq_u8: Vec<u8> = vec![1u8; k * n]; // i8 = 1
+    let wk_u8: Vec<u8> = vec![2u8; k * n]; // i8 = 2
+    let wv_u8: Vec<u8> = vec![3u8; k * n]; // i8 = 3
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let x_c = Tensor::from_vec(x_host, (m, k), &candle_dev)?;
+    let wq_c = Tensor::from_vec(wq_u8, (k, n), &candle_dev)?;
+    let wk_c = Tensor::from_vec(wk_u8, (k, n), &candle_dev)?;
+    let wv_c = Tensor::from_vec(wv_u8, (k, n), &candle_dev)?;
+
+    let (q, kk, v) =
+        kaio_candle::qkv_project_int8(&kaio_dev, &x_c, &wq_c, &wk_c, &wv_c, scale, scale, scale)?;
+    let q_host: Vec<f16> = q.flatten_all()?.to_vec1::<f16>()?;
+    let k_host: Vec<f16> = kk.flatten_all()?.to_vec1::<f16>()?;
+    let v_host: Vec<f16> = v.flatten_all()?.to_vec1::<f16>()?;
+
+    // Q ≈ 1.0, K ≈ 2.0, V ≈ 3.0
+    for (label, out, expected) in [
+        ("Q", &q_host, 1.0f32),
+        ("K", &k_host, 2.0),
+        ("V", &v_host, 3.0),
+    ] {
+        for (i, h) in out.iter().enumerate() {
+            let val = h.to_f32();
+            let err = (val - expected).abs();
+            assert!(
+                err < 0.1,
+                "{label}: at [{i}] expected ≈{expected}, got {val} (err={err})"
+            );
+        }
+    }
+    // Outputs must differ across projections.
+    assert!(
+        (q_host[0].to_f32() - k_host[0].to_f32()).abs() > 0.5,
+        "Q and K outputs alias (canary tripped)"
+    );
+    Ok(())
+}
+
+/// Non-contiguous weight tensor → must reject.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int8_rejects_noncontiguous() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let x = Tensor::zeros((64, 64), candle_core::DType::F16, &candle_dev)?;
+    let w = Tensor::zeros((64, 64), candle_core::DType::U8, &candle_dev)?;
+    let w_nc = w.t()?;
+    let w_ok = Tensor::zeros((64, 64), candle_core::DType::U8, &candle_dev)?;
+
+    let err = kaio_candle::qkv_project_int8(&kaio_dev, &x, &w_nc, &w_ok, &w_ok, 1.0, 1.0, 1.0)
+        .expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous"),
+        "expected contiguity rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+/// Non-zero offset weight tensor → must reject.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int8_rejects_nonzero_offset() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let x = Tensor::zeros((64, 64), candle_core::DType::F16, &candle_dev)?;
+    let base = Tensor::zeros((128, 64), candle_core::DType::U8, &candle_dev)?;
+    let w_off = base.narrow(0, 64, 64)?;
+    let w_ok = Tensor::zeros((64, 64), candle_core::DType::U8, &candle_dev)?;
+
+    let err = kaio_candle::qkv_project_int8(&kaio_dev, &x, &w_off, &w_ok, &w_ok, 1.0, 1.0, 1.0)
+        .expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous") || msg.contains("offset"),
+        "expected rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// qkv_project_int4 bit-exact cross-check (W4A16 fused tri-output)
+// ---------------------------------------------------------------------------
+
+fn bit_exact_qkv_project_int4(m: usize, n: usize, k: usize) -> anyhow::Result<()> {
+    assert!(k.is_multiple_of(128), "K must be a multiple of 128");
+    let packed_rows = k / 8;
+    let scale_rows = k / 128;
+
+    let x_host: Vec<f16> = (0..m * k)
+        .map(|i| f16::from_f32(((i % 23) as f32) * 0.02 - 0.22))
+        .collect();
+    // Packed u32 weights — deterministic patterned data.
+    let wq_host: Vec<u32> = (0..packed_rows * n)
+        .map(|i| ((i as u32).wrapping_mul(0x9E37_79B1)) ^ 0x1111_1111)
+        .collect();
+    let wk_host: Vec<u32> = (0..packed_rows * n)
+        .map(|i| ((i as u32).wrapping_mul(0x9E37_79B1)) ^ 0x2222_2222)
+        .collect();
+    let wv_host: Vec<u32> = (0..packed_rows * n)
+        .map(|i| ((i as u32).wrapping_mul(0x9E37_79B1)) ^ 0x3333_3333)
+        .collect();
+    let sq_host: Vec<f16> = (0..scale_rows * n)
+        .map(|i| f16::from_f32(0.01 + ((i % 7) as f32) * 0.005))
+        .collect();
+    let sk_host: Vec<f16> = (0..scale_rows * n)
+        .map(|i| f16::from_f32(0.02 + ((i % 11) as f32) * 0.003))
+        .collect();
+    let sv_host: Vec<f16> = (0..scale_rows * n)
+        .map(|i| f16::from_f32(0.015 + ((i % 13) as f32) * 0.004))
+        .collect();
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // Candle path
+    let x_c = Tensor::from_vec(x_host.clone(), (m, k), &candle_dev)?;
+    let wq_c = Tensor::from_vec(wq_host.clone(), (packed_rows, n), &candle_dev)?;
+    let wk_c = Tensor::from_vec(wk_host.clone(), (packed_rows, n), &candle_dev)?;
+    let wv_c = Tensor::from_vec(wv_host.clone(), (packed_rows, n), &candle_dev)?;
+    let sq_c = Tensor::from_vec(sq_host.clone(), (scale_rows, n), &candle_dev)?;
+    let sk_c = Tensor::from_vec(sk_host.clone(), (scale_rows, n), &candle_dev)?;
+    let sv_c = Tensor::from_vec(sv_host.clone(), (scale_rows, n), &candle_dev)?;
+    let (q_c, k_c, v_c) =
+        kaio_candle::qkv_project_int4(&kaio_dev, &x_c, &wq_c, &wk_c, &wv_c, &sq_c, &sk_c, &sv_c)?;
+    let q_c_host: Vec<f16> = q_c.flatten_all()?.to_vec1::<f16>()?;
+    let k_c_host: Vec<f16> = k_c.flatten_all()?.to_vec1::<f16>()?;
+    let v_c_host: Vec<f16> = v_c.flatten_all()?.to_vec1::<f16>()?;
+
+    // Direct kaio-ops path
+    let x_buf = kaio_dev.alloc_from(&x_host)?;
+    let wq_buf = kaio_dev.alloc_from(&wq_host)?;
+    let wk_buf = kaio_dev.alloc_from(&wk_host)?;
+    let wv_buf = kaio_dev.alloc_from(&wv_host)?;
+    let sq_buf = kaio_dev.alloc_from(&sq_host)?;
+    let sk_buf = kaio_dev.alloc_from(&sk_host)?;
+    let sv_buf = kaio_dev.alloc_from(&sv_host)?;
+    let mut q_buf = kaio_dev.alloc_zeros::<f16>(m * n)?;
+    let mut k_buf = kaio_dev.alloc_zeros::<f16>(m * n)?;
+    let mut v_buf = kaio_dev.alloc_zeros::<f16>(m * n)?;
+    kaio_ops::qkv_project_int4(
+        &kaio_dev, &x_buf, &wq_buf, &wk_buf, &wv_buf, &sq_buf, &sk_buf, &sv_buf, &mut q_buf,
+        &mut k_buf, &mut v_buf, m as u32, n as u32, k as u32, 128,
+    )?;
+    let q_k_host: Vec<f16> = q_buf.to_host(&kaio_dev)?;
+    let k_k_host: Vec<f16> = k_buf.to_host(&kaio_dev)?;
+    let v_k_host: Vec<f16> = v_buf.to_host(&kaio_dev)?;
+
+    for (label, candle_out, kaio_out) in [
+        ("Q", &q_c_host, &q_k_host),
+        ("K", &k_c_host, &k_k_host),
+        ("V", &v_c_host, &v_k_host),
+    ] {
+        assert_eq!(candle_out.len(), kaio_out.len(), "{label} length mismatch");
+        for (i, (c, ko)) in candle_out.iter().zip(kaio_out.iter()).enumerate() {
+            assert_eq!(
+                c.to_bits(),
+                ko.to_bits(),
+                "{label} projection mismatch at element {i}: candle={c} kaio={ko} \
+                 (M={m} N={n} K={k})"
+            );
+        }
+    }
+    Ok(())
+}
+
+// 3 shapes: 1 group, 2 groups, 4 groups.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int4_bit_exact_64x64x128() -> anyhow::Result<()> {
+    bit_exact_qkv_project_int4(64, 64, 128)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int4_bit_exact_256x128x256() -> anyhow::Result<()> {
+    bit_exact_qkv_project_int4(256, 128, 256)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int4_bit_exact_128x64x512() -> anyhow::Result<()> {
+    bit_exact_qkv_project_int4(128, 64, 512)
+}
+
+/// Q/K/V differentiation canary for INT4: packed nibble values 1/2/3
+/// per projection with scale=1.0. Catches deterministic slot-mapping
+/// bugs that random data can pass by coincidence.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int4_differentiation_canary() -> anyhow::Result<()> {
+    let m = 64usize;
+    let n = 32usize;
+    let k = 128usize;
+    let packed_rows = k / 8;
+    let scale_rows = k / 128;
+
+    let x_host: Vec<f16> = vec![f16::from_f32(1.0); m * k];
+    // Pack 8 identical nibble values per u32: nibble=1 → 0x11111111, etc.
+    let wq_host: Vec<u32> = vec![0x1111_1111u32; packed_rows * n];
+    let wk_host: Vec<u32> = vec![0x2222_2222u32; packed_rows * n];
+    let wv_host: Vec<u32> = vec![0x3333_3333u32; packed_rows * n];
+    let sq_host: Vec<f16> = vec![f16::from_f32(1.0 / (k as f32)); scale_rows * n];
+    let sk_host: Vec<f16> = vec![f16::from_f32(1.0 / (k as f32)); scale_rows * n];
+    let sv_host: Vec<f16> = vec![f16::from_f32(1.0 / (k as f32)); scale_rows * n];
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let x_c = Tensor::from_vec(x_host, (m, k), &candle_dev)?;
+    let wq_c = Tensor::from_vec(wq_host, (packed_rows, n), &candle_dev)?;
+    let wk_c = Tensor::from_vec(wk_host, (packed_rows, n), &candle_dev)?;
+    let wv_c = Tensor::from_vec(wv_host, (packed_rows, n), &candle_dev)?;
+    let sq_c = Tensor::from_vec(sq_host, (scale_rows, n), &candle_dev)?;
+    let sk_c = Tensor::from_vec(sk_host, (scale_rows, n), &candle_dev)?;
+    let sv_c = Tensor::from_vec(sv_host, (scale_rows, n), &candle_dev)?;
+
+    let (q, kk, v) =
+        kaio_candle::qkv_project_int4(&kaio_dev, &x_c, &wq_c, &wk_c, &wv_c, &sq_c, &sk_c, &sv_c)?;
+    let q_host: Vec<f16> = q.flatten_all()?.to_vec1::<f16>()?;
+    let k_host: Vec<f16> = kk.flatten_all()?.to_vec1::<f16>()?;
+    let v_host: Vec<f16> = v.flatten_all()?.to_vec1::<f16>()?;
+
+    // Outputs must differ across projections.
+    let q0 = q_host[0].to_f32();
+    let k0 = k_host[0].to_f32();
+    let v0 = v_host[0].to_f32();
+    assert!(
+        (q0 - k0).abs() > 0.01,
+        "Q and K outputs alias: q0={q0}, k0={k0}"
+    );
+    assert!(
+        (k0 - v0).abs() > 0.01,
+        "K and V outputs alias: k0={k0}, v0={v0}"
+    );
+    Ok(())
+}
+
+/// K not multiple of 128 → must reject.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int4_rejects_k_not_multiple_of_128() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // K=64, not a multiple of 128. Use shapes that are otherwise valid for
+    // the packed/scale row counts at K=64 to isolate the group_size check.
+    let m = 16usize;
+    let k = 64usize;
+    let n = 16usize;
+    let packed_rows = k / 8;
+    let scale_rows = 1; // would be K/128 = 0, but we need at least 1 row
+
+    let x = Tensor::zeros((m, k), candle_core::DType::F16, &candle_dev)?;
+    let w = Tensor::zeros((packed_rows, n), candle_core::DType::U32, &candle_dev)?;
+    let s = Tensor::zeros((scale_rows, n), candle_core::DType::F16, &candle_dev)?;
+
+    let err = kaio_candle::qkv_project_int4(&kaio_dev, &x, &w, &w, &w, &s, &s, &s)
+        .expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("multiple of group_size") || msg.contains("multiple of 128"),
+        "expected group_size rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+/// Non-contiguous packed weight → must reject.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int4_rejects_noncontiguous() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let m = 16usize;
+    let k = 128usize;
+    let n = 16usize;
+    let packed_rows = k / 8;
+    let scale_rows = k / 128;
+
+    let x = Tensor::zeros((m, k), candle_core::DType::F16, &candle_dev)?;
+    let w_ok = Tensor::zeros((packed_rows, n), candle_core::DType::U32, &candle_dev)?;
+    let w_nc = w_ok.t()?;
+    let s = Tensor::zeros((scale_rows, n), candle_core::DType::F16, &candle_dev)?;
+
+    let err = kaio_candle::qkv_project_int4(&kaio_dev, &x, &w_nc, &w_ok, &w_ok, &s, &s, &s)
+        .expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous"),
+        "expected contiguity rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+/// Non-zero offset weight → must reject.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn qkv_project_int4_rejects_nonzero_offset() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let m = 16usize;
+    let k = 128usize;
+    let n = 16usize;
+    let packed_rows = k / 8;
+    let scale_rows = k / 128;
+
+    let x = Tensor::zeros((m, k), candle_core::DType::F16, &candle_dev)?;
+    let base = Tensor::zeros((packed_rows * 2, n), candle_core::DType::U32, &candle_dev)?;
+    let w_off = base.narrow(0, packed_rows, packed_rows)?;
+    let w_ok = Tensor::zeros((packed_rows, n), candle_core::DType::U32, &candle_dev)?;
+    let s = Tensor::zeros((scale_rows, n), candle_core::DType::F16, &candle_dev)?;
+
+    let err = kaio_candle::qkv_project_int4(&kaio_dev, &x, &w_off, &w_ok, &w_ok, &s, &s, &s)
+        .expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous") || msg.contains("offset"),
+        "expected rejection, got: {msg}"
+    );
+    Ok(())
+}
