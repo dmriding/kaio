@@ -20,33 +20,10 @@
 use std::sync::Arc;
 
 use candle_core::{CpuStorage, CudaStorage, CustomOp2, Error, Layout, Result, Shape, Tensor};
-use cudarc::driver::CudaSlice;
 use kaio::prelude::{GpuBuffer, KaioDevice};
 use kaio_ops::matmul_int8 as kaio_matmul_int8;
 
 use crate::bridge;
-
-/// Reinterpret `&CudaSlice<u8>` as `&CudaSlice<i8>` without touching
-/// device memory.
-///
-/// # Soundness
-///
-/// cudarc's `CudaSlice<T>` carries `T` only as a `PhantomData` marker;
-/// the underlying storage is a raw `CUdeviceptr` plus a length. Since
-/// `u8` and `i8` have identical size (1 byte) and alignment (1), a
-/// `&CudaSlice<u8>` and a `&CudaSlice<i8>` describe the same bits in
-/// the same addresses. The transmute is metadata-only: no device
-/// memory is read or written.
-///
-/// The input is read-only inside `kaio_ops::matmul_int8` (matmul
-/// inputs are loaded into MMA fragments via LDMATRIX, never written),
-/// so aliasing this reinterpretation against any other `u8` view of
-/// the same storage is safe.
-fn reinterpret_u8_slice_as_i8(slice: &CudaSlice<u8>) -> &CudaSlice<i8> {
-    // SAFETY: see function-level docs. Same-layout T-swap inside a ref
-    // on a phantom-T newtype. No device I/O.
-    unsafe { &*(slice as *const CudaSlice<u8> as *const CudaSlice<i8>) }
-}
 
 /// Candle [`CustomOp2`] wrapper around [`kaio_ops::matmul_int8`].
 ///
@@ -117,8 +94,8 @@ impl CustomOp2 for MatmulInt8Op {
         // the crate-level "Dtype convention" rustdoc on this module.
         let a_slice_u8 = bridge::slice_ref_from_storage::<u8>(s1)?;
         let b_slice_u8 = bridge::slice_ref_from_storage::<u8>(s2)?;
-        let a_slice = reinterpret_u8_slice_as_i8(a_slice_u8);
-        let b_slice = reinterpret_u8_slice_as_i8(b_slice_u8);
+        let a_slice = bridge::reinterpret_u8_slice_as_i8(a_slice_u8);
+        let b_slice = bridge::reinterpret_u8_slice_as_i8(b_slice_u8);
 
         // AD2-Audit: kaio_ops::matmul_int8 runs validate_dims_int8
         // (read-only) then launches the mma.s8.s8.s32 kernel. Inputs

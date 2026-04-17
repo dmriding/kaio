@@ -83,6 +83,30 @@ pub(crate) fn buffer_ref_from_slice_readonly<T>(slice: &CudaSlice<T>) -> &GpuBuf
     unsafe { &*(slice as *const CudaSlice<T> as *const GpuBuffer<T>) }
 }
 
+/// Reinterpret `&CudaSlice<u8>` as `&CudaSlice<i8>` without touching
+/// device memory. Used by `matmul_int8` and `qkv_project_int8` to
+/// bridge candle's `DType::U8` convention for INT8 tensors to the
+/// `GpuBuffer<i8>` that kaio-ops expects.
+///
+/// # Soundness
+///
+/// cudarc's `CudaSlice<T>` carries `T` only as a `PhantomData` marker;
+/// the underlying storage is a raw `CUdeviceptr` plus a length. Since
+/// `u8` and `i8` have identical size (1 byte) and alignment (1), a
+/// `&CudaSlice<u8>` and a `&CudaSlice<i8>` describe the same bits in
+/// the same addresses. The transmute is metadata-only: no device
+/// memory is read or written.
+///
+/// The input is read-only inside the kaio-ops kernels (matmul / QKV
+/// projection inputs are loaded into MMA fragments via LDMATRIX, never
+/// written), so aliasing this reinterpretation against any other `u8`
+/// view of the same storage is safe.
+pub(crate) fn reinterpret_u8_slice_as_i8(slice: &CudaSlice<u8>) -> &CudaSlice<i8> {
+    // SAFETY: see function-level docs. Same-layout T-swap inside a ref
+    // on a phantom-T newtype. No device I/O.
+    unsafe { &*(slice as *const CudaSlice<u8> as *const CudaSlice<i8>) }
+}
+
 /// Extract the CUDA ordinal from a candle [`CudaDevice`].
 ///
 /// candle expresses device location via the [`DeviceLocation`] enum; for
@@ -150,23 +174,18 @@ pub(crate) fn kaio_err(e: KaioError) -> Error {
     Error::Msg(format!("kaio: {e}"))
 }
 
-/// Shape + rank + contiguity + offset + dtype gate (AD4 — Opus #6 + #7,
-/// Codex R3). Called by per-op wrapper fns on every input layout at the
-/// entry point.
-///
-/// Reject any layout that isn't rank-2 AND contiguous AND zero-offset.
-/// Non-rank-2 gets a reshape hint; non-contiguous or non-zero-offset gets
-/// a `.contiguous()?` hint.
-pub(crate) fn ensure_rank2_contiguous_zero_offset(
-    op_name: &'static str,
-    input_index: usize,
+/// Shared inner gate logic — `input_label` is either `"input #0"` or a
+/// named parameter like `"w_k"`.
+fn ensure_rank2_contiguous_zero_offset_inner(
+    op_name: &str,
+    input_label: &str,
     layout: &Layout,
 ) -> Result<(usize, usize)> {
     let shape = layout.shape();
     let dims = shape.dims();
     if dims.len() != 2 {
         return Err(Error::Msg(format!(
-            "kaio-candle::{op_name}: input #{input_index} must be rank-2; \
+            "kaio-candle::{op_name}: {input_label} must be rank-2; \
              got rank-{rank} input of shape {shape:?}. \
              For multi-head attention, reshape to rank-2 via \
              `.reshape((seq, d))?` after flattening batch+heads.",
@@ -175,7 +194,7 @@ pub(crate) fn ensure_rank2_contiguous_zero_offset(
     }
     if !layout.is_contiguous() {
         return Err(Error::Msg(format!(
-            "kaio-candle::{op_name}: input #{input_index} must be contiguous; \
+            "kaio-candle::{op_name}: {input_label} must be contiguous; \
              got shape {shape:?} with strides {strides:?}. \
              Call `.contiguous()?` first.",
             strides = layout.stride()
@@ -183,13 +202,36 @@ pub(crate) fn ensure_rank2_contiguous_zero_offset(
     }
     if layout.start_offset() != 0 {
         return Err(Error::Msg(format!(
-            "kaio-candle::{op_name}: input #{input_index} must start at storage offset 0; \
+            "kaio-candle::{op_name}: {input_label} must start at storage offset 0; \
              got offset {off} (likely from a `.slice(..)` / `.narrow(..)` call). \
              Call `.contiguous()?` to compact.",
             off = layout.start_offset()
         )));
     }
     Ok((dims[0], dims[1]))
+}
+
+/// Shape + rank + contiguity + offset + dtype gate (AD4 — Opus #6 + #7,
+/// Codex R3). Called by CustomOp impls on every input layout. Input is
+/// identified by numeric index (`input #0`).
+pub(crate) fn ensure_rank2_contiguous_zero_offset(
+    op_name: &'static str,
+    input_index: usize,
+    layout: &Layout,
+) -> Result<(usize, usize)> {
+    ensure_rank2_contiguous_zero_offset_inner(op_name, &format!("input #{input_index}"), layout)
+}
+
+/// Named-parameter variant of [`ensure_rank2_contiguous_zero_offset`].
+/// Used by direct-call bridge functions (qkv_project_*) where inputs
+/// are identified by parameter name (`w_k`, `scales_q`) rather than
+/// numeric index.
+pub(crate) fn ensure_rank2_contiguous_zero_offset_named(
+    op_name: &str,
+    param_name: &str,
+    layout: &Layout,
+) -> Result<(usize, usize)> {
+    ensure_rank2_contiguous_zero_offset_inner(op_name, param_name, layout)
 }
 
 #[cfg(test)]
