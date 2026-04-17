@@ -16,7 +16,7 @@
 //! ## Autograd
 //!
 //! Forward-only. Gradient-tracked inputs are rejected with a loud error
-//! requiring `.detach()` — see Gemini G3-1 in the sprint plan.
+//! requiring `.detach()`.
 
 use std::sync::Arc;
 
@@ -30,8 +30,8 @@ use crate::bridge;
 
 const OP_NAME: &str = "qkv_project_int8";
 
-/// Reject gradient-tracked tensors (G3-1: silent autograd disconnection
-/// guard). Direct-call ops bypass candle's BackpropOp graph tracking, so
+/// Reject gradient-tracked tensors. Direct-call ops bypass candle's
+/// BackpropOp graph tracking, so
 /// passing a tracked tensor would silently sever the computation graph.
 fn reject_if_variable(tensor: &Tensor, param_name: &str) -> Result<()> {
     if tensor.is_variable() {
@@ -71,14 +71,12 @@ pub fn qkv_project_int8(
     scale_k: f32,
     scale_v: f32,
 ) -> Result<(Tensor, Tensor, Tensor)> {
-    // G3-1: reject gradient-tracked inputs.
     reject_if_variable(x, "x")?;
     reject_if_variable(w_q, "w_q")?;
     reject_if_variable(w_k, "w_k")?;
     reject_if_variable(w_v, "w_v")?;
 
-    // Extract storage + layout from each input (G3-3: guards live in
-    // this scope, Storage::Cuda match is inline).
+    // Extract storage + layout from each input.
     let (guard_x, layout_x) = x.storage_and_layout();
     let (guard_wq, layout_wq) = w_q.storage_and_layout();
     let (guard_wk, layout_wk) = w_k.storage_and_layout();
@@ -197,8 +195,7 @@ pub fn qkv_project_int8(
     drop(guard_wk);
     drop(guard_wv);
 
-    // Wrap outputs into Tensors. from_storage internally uses
-    // Layout::contiguous(shape) for the strides (G3-2).
+    // Wrap outputs into Tensors.
     let shape = (m, n);
     let q_storage = Storage::Cuda(bridge::storage_from_slice::<f16>(
         q_buf.into_cuda_slice(),

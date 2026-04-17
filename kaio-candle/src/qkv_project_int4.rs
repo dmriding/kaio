@@ -13,7 +13,7 @@
 //!
 //! ## Autograd
 //!
-//! Forward-only. Gradient-tracked inputs are rejected (Gemini G3-1).
+//! Forward-only. Gradient-tracked inputs are rejected.
 
 use std::sync::Arc;
 
@@ -68,7 +68,6 @@ pub fn qkv_project_int4(
     scales_k: &Tensor,
     scales_v: &Tensor,
 ) -> Result<(Tensor, Tensor, Tensor)> {
-    // G3-1: reject gradient-tracked inputs.
     reject_if_variable(x, "x")?;
     reject_if_variable(w_q_packed, "w_q_packed")?;
     reject_if_variable(w_k_packed, "w_k_packed")?;

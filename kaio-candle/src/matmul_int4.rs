@@ -60,7 +60,6 @@ impl CustomOp3 for MatmulInt4Op {
         s_s: &CudaStorage,
         l_s: &Layout,
     ) -> Result<(CudaStorage, Shape)> {
-        // AD4: rank + contiguity + offset gate on every input.
         let (m_a, k_a) = bridge::ensure_rank2_contiguous_zero_offset("matmul_int4", 0, l_a)?;
         let (packed_rows, n_b) =
             bridge::ensure_rank2_contiguous_zero_offset("matmul_int4", 1, l_b)?;
@@ -111,16 +110,14 @@ impl CustomOp3 for MatmulInt4Op {
         let candle_dev = s_a.device.clone();
         bridge::ensure_ordinal_match(&candle_dev, &self.device)?;
 
-        // AD4: dtype gates — a = f16, b_packed = u32, scales = f16.
+        // Dtype gates — a = f16, b_packed = u32, scales = f16.
         let a_slice = bridge::slice_ref_from_storage::<f16>(s_a)?;
         let b_slice = bridge::slice_ref_from_storage::<u32>(s_b)?;
         let s_slice = bridge::slice_ref_from_storage::<f16>(s_s)?;
 
-        // AD2-Audit D4: kaio_ops::matmul_int4 runs validate_dims_int4
-        // (read-only) then launches the dequant-fused kernel. Inner loop
-        // reads A / B_packed / scales into shared memory stagings and
-        // fragments; inputs never mutated. Safe under the readonly
-        // transmute contract.
+        // kaio_ops::matmul_int4 reads A / B_packed / scales into shared
+        // memory and fragments; inputs never mutated. Safe under the
+        // readonly contract.
         let a_buf: &GpuBuffer<f16> = bridge::buffer_ref_from_slice_readonly(a_slice);
         let b_buf: &GpuBuffer<u32> = bridge::buffer_ref_from_slice_readonly(b_slice);
         let s_buf: &GpuBuffer<f16> = bridge::buffer_ref_from_slice_readonly(s_slice);

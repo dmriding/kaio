@@ -215,8 +215,8 @@ lives standalone and consumes `kaio` / `kaio-ops` with
   `cuCtxSynchronize` fences on either side of each launch for stream
   safety; this is banned inside a capture region. Event-based stream
   plumbing in 7.4c unblocks CUDA Graph usage.
-- **crates.io publish** waits for a `kaio 0.3.1` patch release that
-  exposes the new `dynamic-linking` feature. See `PUBLISH_ORDER.md`.
+- **crates.io publish** waits for a `kaio` patch release that
+  exposes the `dynamic-linking` feature on crates.io.
 
 ### Sprint 7.3 — Fused tri-output QKV projection (`qkv_project_int8` + `qkv_project_int4`)
 

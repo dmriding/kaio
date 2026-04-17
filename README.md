@@ -32,7 +32,7 @@ CUDA C++ because their framework doesn't support them.
 
 ## Try KAIO in 30 seconds
 
-Clone the repo, run one command, see six real ML kernels build and execute on your GPU:
+Clone the repo, run one command, see real ML kernels build and execute on your GPU:
 
 ```sh
 git clone https://github.com/dmriding/kaio.git
@@ -281,9 +281,10 @@ KAIO is pre-1.0 software. Current engineering constraints:
   doesn't fill the SM array until the grid is large. Scalar matmul
   tops out at 31% of cuBLAS. For small shapes prefer cuBLAS or the
   scalar path. [Details →](docs/performance.md)
-- **Inference only.** No autograd / backward pass. Forward-only
-  [`kaio-candle`](kaio-candle/) bridge (5 `CustomOp` bindings) ships in
-  Phase 7 Sprint 7.4a; backward / training integration follows in 7.4c.
+- **Mostly inference.** The [`kaio-candle`](kaio-candle/) bridge ships
+  8 forward ops; `matmul_tc` and `matmul_tc_async` support backward
+  (approximate f16-based autograd). Attention and quantized-op backward
+  are not yet implemented.
 - **DSL is a Rust subset.** No closures, traits, generics, method
   calls, or string operations inside `#[gpu_kernel]` function bodies.
   Arithmetic, comparisons, bitwise operators (`&` `|` `^` `<<` `>>`
@@ -445,10 +446,9 @@ for a complete end-to-end example.
   (`cp.async`), bank-conflict padding. **82.3% sync / 92.5% async of
   cuBLAS sgemm at 4096² on Ampere.** Three standalone showcase
   examples. crates.io v0.2.0.
-- [ ] **Phase 7** — Quantized kernels (INT8/INT4, fused QKV
-  projection), candle integration (`kaio-candle` bridge — forward ops
-  in 7.4a, quant ops in 7.4b, backward + stream plumbing in 7.4c),
-  `ldmatrix.sync` for further TC headroom, bf16 TC matmul variant.
+- [x] **Phase 7** — Quantized kernels (INT8/INT4, fused QKV
+  projection), candle integration (`kaio-candle` bridge — 8 forward ops,
+  2 backward ops, event-based stream sync).
 - [ ] **Phase 8** — PyO3 bindings (Python access to `kaio-ops`).
 
 See [CHANGELOG.md](CHANGELOG.md) for per-release detail and

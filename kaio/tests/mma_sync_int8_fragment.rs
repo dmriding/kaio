@@ -17,7 +17,7 @@
 //! reference. Bit-exact — `i8 × i8` fits in `i16` and summing 32 of them
 //! fits in `i32` without overflow in any of the test patterns.
 //!
-//! ## Adversarial test matrix (per multi-reviewer planning feedback)
+//! ## Adversarial test matrix
 //!
 //! Each pattern is designed to expose a specific class of layout bug:
 //!   - **identity-like** (A = i8-identity-ish, B = arbitrary) — catches

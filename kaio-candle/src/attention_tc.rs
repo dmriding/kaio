@@ -1,8 +1,8 @@
 //! `AttentionTcOp` (CustomOp3, `causal: bool` on the struct) + the two
 //! user-facing wrappers [`attention_tc`] and [`attention_tc_causal`].
 //!
-//! Fused tensor-core scaled-dot-product attention. Rank-2 Q/K/V inputs per
-//! P5; multi-head attention callers must flatten `[heads, seq, d]` to
+//! Fused tensor-core scaled-dot-product attention. Rank-2 Q/K/V inputs;
+//! multi-head attention callers must flatten `[heads, seq, d]` to
 //! `[heads * seq, d]` or reshape to `[seq, d]` per-head before calling.
 
 use std::sync::Arc;
@@ -71,7 +71,6 @@ impl CustomOp3 for AttentionTcOp {
             "attention_tc"
         };
 
-        // AD4: rank + contiguity + offset gate on each input.
         let (seq_q, d_k_q) = bridge::ensure_rank2_contiguous_zero_offset(op_name, 0, l_q)?;
         let (seq_k_k, d_k_k) = bridge::ensure_rank2_contiguous_zero_offset(op_name, 1, l_k)?;
         let (seq_k_v, d_v) = bridge::ensure_rank2_contiguous_zero_offset(op_name, 2, l_v)?;
@@ -106,16 +105,14 @@ impl CustomOp3 for AttentionTcOp {
         let candle_dev = s_q.device.clone();
         bridge::ensure_ordinal_match(&candle_dev, &self.device)?;
 
-        // AD4: dtype gate — Q/K/V all f16.
+        // Dtype gate — Q/K/V all f16.
         let q_slice = bridge::slice_ref_from_storage::<f16>(s_q)?;
         let k_slice = bridge::slice_ref_from_storage::<f16>(s_k)?;
         let v_slice = bridge::slice_ref_from_storage::<f16>(s_v)?;
 
-        // AD2-Audit D5: kaio_ops::attention_tc(_causal) calls a fused TC
-        // attention kernel — validate_dims_attn (read-only) + Q·Kᵀ matmul,
-        // softmax (+ causal mask if applicable), P·V matmul. Every stage
-        // READS from Q/K/V shared-mem stagings and fragments; inputs
-        // never mutated. Safe under the readonly-transmute contract.
+        // kaio_ops::attention_tc(_causal) reads Q/K/V into shared-mem
+        // stagings and fragments; inputs never mutated. Safe under the
+        // readonly contract.
         let q_buf: &GpuBuffer<f16> = bridge::buffer_ref_from_slice_readonly(q_slice);
         let k_buf: &GpuBuffer<f16> = bridge::buffer_ref_from_slice_readonly(k_slice);
         let v_buf: &GpuBuffer<f16> = bridge::buffer_ref_from_slice_readonly(v_slice);

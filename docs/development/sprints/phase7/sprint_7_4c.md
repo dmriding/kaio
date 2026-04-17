@@ -33,7 +33,7 @@ Replaced `cuCtxSynchronize` with event-based cross-stream synchronization via cu
 
 ## Follow-ups
 
-- **7.4d** — skeleton plan for backward PTX kernels across all 8 ops. Phase 8 execution.
+- **7.4d** — matmul_tc + matmul_tc_async backward (analytical, forward kernel reuse). ✅ Complete.
 - **Event caching** — `record_event(None)` allocates a transient `CudaEvent` per call. Caching handles inside CustomOp structs eliminates this overhead. Future optimization.
 - **Non-default stream verification** — full CUDA Graph capture requires both candle and KAIO on non-default streams. Testing this needs a graph-capture harness.
 - **kaio 0.3.1 patch + kaio-candle 0.1.0 publish** — `dynamic-linking` feature needed on crates.io.

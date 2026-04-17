@@ -146,7 +146,7 @@ fn matmul_tc_async_bit_exact_1024() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Transposed tensor → non-contiguous → bridge must reject loudly, not
-/// silently produce wrong bits (Codex R3, Opus #7).
+/// silently produce wrong bits.
 #[test]
 #[ignore = "requires NVIDIA GPU"]
 fn matmul_tc_rejects_noncontiguous() -> anyhow::Result<()> {
@@ -173,7 +173,7 @@ fn matmul_tc_rejects_noncontiguous() -> anyhow::Result<()> {
 }
 
 /// `.narrow(...)` on a base tensor produces a contiguous view with non-zero
-/// offset → bridge must reject with the offset hint (Codex R3).
+/// offset → bridge must reject with the offset hint.
 #[test]
 #[ignore = "requires NVIDIA GPU"]
 fn matmul_tc_rejects_nonzero_offset() -> anyhow::Result<()> {
@@ -975,12 +975,15 @@ fn event_based_sync_smoke_test() -> anyhow::Result<()> {
 // matmul_tc / matmul_tc_async backward (gradient correctness, Sprint 7.4d)
 // ---------------------------------------------------------------------------
 
-/// Numerical gradient check via finite differences. For C = A @ B with
-/// loss = C.sum(), the analytical gradients are dA = ones @ B^T and
-/// dB = A^T @ ones (since dL/dC = ones for sum()). We compare against
-/// the autograd-computed gradients from bwd().
+/// Analytical gradient check for C = A @ B with loss = C.sum().
+/// Since dL/dC = ones, the expected gradients are dA = ones @ B^T and
+/// dB = A^T @ ones. We compare the autograd-computed gradients from
+/// bwd() against these host-computed references.
 ///
-/// Inputs initialized near zero with small variance (Gemini G3-3) so
+/// This exercises the `grad_res = ones` case (uniform upstream gradient).
+/// See `gradient_check_matmul_weighted` for a non-uniform gradient test.
+///
+/// Inputs initialized near zero with small variance so
 /// f16 mantissa can represent the values accurately.
 ///
 /// Note: this backward is numerically approximate (f32→f16 downcast on
@@ -1052,7 +1055,7 @@ fn gradient_check_matmul(m: usize, k: usize, n: usize, use_async: bool) -> anyho
         }
     }
 
-    // Compare with dual tolerance (Opus R1): rel < 1e-2 OR abs < 1e-3
+    // Dual tolerance: rel < 1e-2 OR abs < 1e-3
     let variant = if use_async {
         "matmul_tc_async"
     } else {
@@ -1127,4 +1130,130 @@ fn matmul_tc_async_backward_128x128x128() -> anyhow::Result<()> {
 #[ignore = "requires NVIDIA GPU"]
 fn matmul_tc_async_backward_64x32x128() -> anyhow::Result<()> {
     gradient_check_matmul(64, 32, 128, true)
+}
+
+/// Weighted-loss gradient check: loss = sum(W * C) where W is a
+/// non-uniform weight matrix. This exercises a non-ones grad_res,
+/// catching bugs that only appear with arbitrary upstream gradients.
+///
+/// For C = A @ B, loss = sum(W * C), we have dL/dC = W, so:
+///   dA = W @ B^T
+///   dB = A^T @ W
+fn gradient_check_matmul_weighted(
+    m: usize,
+    k: usize,
+    n: usize,
+    use_async: bool,
+) -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // Small-magnitude patterned data.
+    let a_data: Vec<f16> = (0..m * k)
+        .map(|i| f16::from_f32(((i % 19) as f32 - 9.0) * 0.01))
+        .collect();
+    let b_data: Vec<f16> = (0..k * n)
+        .map(|i| f16::from_f32(((i % 23) as f32 - 11.0) * 0.01))
+        .collect();
+    // Non-uniform weight matrix for the loss.
+    let w_data: Vec<f32> = (0..m * n).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
+
+    let a = candle_core::Var::from_vec(a_data.clone(), (m, k), &candle_dev)?;
+    let b = candle_core::Var::from_vec(b_data.clone(), (k, n), &candle_dev)?;
+
+    // Forward: C = A @ B (f32 output)
+    let c = if use_async {
+        kaio_candle::matmul_tc_async(&kaio_dev, a.as_tensor(), b.as_tensor())?
+    } else {
+        kaio_candle::matmul_tc(&kaio_dev, a.as_tensor(), b.as_tensor())?
+    };
+
+    // Weighted loss: sum(W * C) — W is f32 matching C's dtype.
+    let w = Tensor::from_vec(w_data.clone(), (m, n), &candle_dev)?;
+    let loss = (c * w)?.sum_all()?;
+
+    let grads = loss.backward()?;
+    let grad_a = grads.get(a.as_tensor()).expect("a should have gradient");
+    let grad_b = grads.get(b.as_tensor()).expect("b should have gradient");
+
+    let grad_a_host: Vec<f16> = grad_a.flatten_all()?.to_vec1::<f16>()?;
+    let grad_b_host: Vec<f16> = grad_b.flatten_all()?.to_vec1::<f16>()?;
+
+    // Expected dA = W @ B^T  (W is [M,N], B is [K,N], B^T is [N,K])
+    // dA[i,j] = sum_l W[i,l] * B[j,l]
+    let mut expected_grad_a = vec![0.0f32; m * k];
+    for i in 0..m {
+        for j in 0..k {
+            let mut sum = 0.0f32;
+            for l in 0..n {
+                sum += w_data[i * n + l] * b_data[j * n + l].to_f32();
+            }
+            expected_grad_a[i * k + j] = sum;
+        }
+    }
+
+    // Expected dB = A^T @ W  (A is [M,K], A^T is [K,M], W is [M,N])
+    // dB[i,j] = sum_l A[l,i] * W[l,j]
+    let mut expected_grad_b = vec![0.0f32; k * n];
+    for i in 0..k {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for l in 0..m {
+                sum += a_data[l * k + i].to_f32() * w_data[l * n + j];
+            }
+            expected_grad_b[i * n + j] = sum;
+        }
+    }
+
+    let variant = if use_async {
+        "matmul_tc_async"
+    } else {
+        "matmul_tc"
+    };
+    for (idx, (got, expected)) in grad_a_host.iter().zip(expected_grad_a.iter()).enumerate() {
+        let got_f32 = got.to_f32();
+        let exp = *expected;
+        let abs_err = (got_f32 - exp).abs();
+        let rel_err = if exp.abs() > 1e-6 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{variant} weighted grad_a mismatch at [{idx}]: got={got_f32}, expected={expected}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e} (M={m} K={k} N={n})"
+        );
+    }
+    for (idx, (got, expected)) in grad_b_host.iter().zip(expected_grad_b.iter()).enumerate() {
+        let got_f32 = got.to_f32();
+        let exp = *expected;
+        let abs_err = (got_f32 - exp).abs();
+        let rel_err = if exp.abs() > 1e-6 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{variant} weighted grad_b mismatch at [{idx}]: got={got_f32}, expected={expected}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e} (M={m} K={k} N={n})"
+        );
+    }
+
+    Ok(())
+}
+
+/// Non-uniform gradient test — catches bugs that only appear when
+/// grad_res is not all-ones.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_backward_weighted_64x32x128() -> anyhow::Result<()> {
+    gradient_check_matmul_weighted(64, 32, 128, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_async_backward_weighted_64x32x128() -> anyhow::Result<()> {
+    gradient_check_matmul_weighted(64, 32, 128, true)
 }

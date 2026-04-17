@@ -68,8 +68,7 @@
 //! workspace build, so including `kaio-candle` in the main workspace would
 //! break every no-CUDA CI runner. Standalone keeps the two worlds apart.
 //!
-//! See `docs/development/sprints/phase7/reviews/internal_7.4a_plan.md`
-//! Pre-flight P2 and Round 3 G3-1 for the full history.
+//! See `kaio-candle/README.md` for the full rationale.
 //!
 //! ## Device lifetime
 //!
@@ -110,8 +109,8 @@
 // get a clear "function not found" when they try to call into the bridge
 // (e.g. `kaio_candle::matmul_tc(...)`), rather than a lib-level
 // `compile_error!` that breaks `cargo check` / `cargo doc` on no-CUDA CI
-// legs. Ship gate #10 (AD8) specifically exercises the no-default build —
-// it must succeed on a no-CUDA-toolkit host.
+// legs. The no-default build is exercised in CI — it must succeed on a
+// no-CUDA-toolkit host.
 #[cfg(feature = "cuda")]
 mod bridge;
 

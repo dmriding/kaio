@@ -55,7 +55,6 @@ impl CustomOp2 for MatmulTcOp {
         s2: &CudaStorage,
         l2: &Layout,
     ) -> Result<(CudaStorage, Shape)> {
-        // AD4: rank + contiguity + offset gate on each input.
         let (m_a, k_a) = bridge::ensure_rank2_contiguous_zero_offset("matmul_tc", 0, l1)?;
         let (k_b, n_b) = bridge::ensure_rank2_contiguous_zero_offset("matmul_tc", 1, l2)?;
         if k_a != k_b {
@@ -73,26 +72,23 @@ impl CustomOp2 for MatmulTcOp {
         let k = u32::try_from(k_a)
             .map_err(|_| Error::Msg(format!("matmul_tc: K ({k_a}) exceeds u32")))?;
 
-        // AD1: ordinal equality between the candle device and the
-        // user-supplied KaioDevice.
-        // CudaStorage.device is a public field (candle_core::CudaStorage).
+        // CudaStorage.device is a public field.
         let candle_dev = s1.device.clone();
         bridge::ensure_ordinal_match(&candle_dev, &self.device)?;
 
-        // AD4: dtype gate — kaio-ops matmul_tc is f16 × f16 only.
+        // Dtype gate — kaio-ops matmul_tc is f16 × f16 only.
         // as_cuda_slice::<f16>() errors with candle's own dtype-mismatch
-        // message if the storage isn't f16. Upstream bf16 / f32 users get a
-        // clear message at this boundary.
+        // message if the storage isn't f16.
         let a_slice = bridge::slice_ref_from_storage::<f16>(s1)?;
         let b_slice = bridge::slice_ref_from_storage::<f16>(s2)?;
 
-        // AD2: shared-borrow view into candle-owned buffers. Lifetime
-        // invariant: refs do NOT escape this function scope — the AD9
+        // Shared-borrow view into candle-owned buffers. Lifetime
+        // invariant: refs do NOT escape this function scope — the
         // post-launch sync below guarantees the kernel finishes before we
         // return. Aliasing invariant: kaio_ops::matmul_tc does not mutate
-        // its input GpuBuffers (AD2-Audit D3: validate_dims_tc is read-only,
-        // inner loop LDMATRIX-loads fragment A/B via shared memory stagings
-        // — inputs are never written to).
+        // its input GpuBuffers (validate_dims_tc is read-only, inner loop
+        // LDMATRIX-loads fragment A/B via shared memory — inputs are never
+        // written to).
         let a_buf: &GpuBuffer<f16> = bridge::buffer_ref_from_slice_readonly(a_slice);
         let b_buf: &GpuBuffer<f16> = bridge::buffer_ref_from_slice_readonly(b_slice);
 
@@ -103,7 +99,6 @@ impl CustomOp2 for MatmulTcOp {
             .alloc_zeros::<f32>(m_a * n_b)
             .map_err(bridge::kaio_err)?;
 
-        // AD9: stream-safety fence.
         bridge::sync_before_launch(&candle_dev, &self.device)?;
 
         kaio_matmul_tc(&self.device, a_buf, b_buf, &mut out_buf, m, n, k)

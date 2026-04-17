@@ -1,6 +1,3 @@
-// Bridge helpers are wired up incrementally in D3-D5 (per-op CustomOp
-// impls). Suppress dead-code warnings on the D2 scaffold; each helper's
-// caller lands as its corresponding op module is fleshed out.
 #![allow(dead_code)]
 
 //! Bridge primitives between candle's `CudaStorage` / `CudaDevice` and
@@ -19,12 +16,12 @@
 //!   plumbing across the candle boundary.
 //! - [`buffer_ref_from_slice_readonly`]: `#[repr(transparent)]` cast into
 //!   KAIO's buffer type. Semantic + lifetime contracts documented on the
-//!   function (Codex R1 + Gemini G3-2).
-//! - [`ensure_ordinal_match`]: AD1 enforcement — the user-supplied
-//!   `Arc<KaioDevice>` must reference the same CUDA ordinal as the
-//!   tensor's candle device. P4 preflight verified the underlying
-//!   primary-context sharing semantics.
-//! - [`sync_before_launch`] / [`sync_after_launch`]: AD9 stream-safety
+//!   function.
+//! - [`ensure_ordinal_match`]: the user-supplied `Arc<KaioDevice>` must
+//!   reference the same CUDA ordinal as the tensor's candle device.
+//!   Both sides share the same primary context via
+//!   `cuDevicePrimaryCtxRetain`.
+//! - [`sync_before_launch`] / [`sync_after_launch`]: stream-safety
 //!   fences. See `lib.rs` crate docs for the CUDA-Graph limitation this
 //!   implies.
 //! - [`kaio_err`]: `KaioError` → `candle_core::Error` conversion (orphan
@@ -61,19 +58,19 @@ pub(crate) fn storage_from_slice<T: CudaDType>(
 /// - **Memory layout** (enforced by
 ///   `kaio_runtime::buffer::repr_soundness` compile-time asserts):
 ///   `GpuBuffer<T>` and `CudaSlice<T>` have identical size + alignment.
-/// - **Aliasing semantics** (Codex R1): the returned `&GpuBuffer<T>` is
+/// - **Aliasing semantics:** the returned `&GpuBuffer<T>` is
 ///   shared-immutable. Caller MUST NOT route it to any kaio-ops path that
-///   mutates the input buffer. Per-op D-day deliverables audit this per
-///   kernel; see AD2-Audit in the sprint plan.
-/// - **Lifetime** (Gemini G3-2): the returned reference MUST NOT escape
-///   the current synchronous function scope (i.e. `cuda_fwd`'s stack
-///   frame). cudarc's `CudaSlice` is `Arc`-managed by candle; this
-///   transmute does NOT increment the refcount. If the reference leaks
-///   into a detached thread, async task, or static storage, candle could
-///   drop the slice while a kernel is still reading device memory → UB.
-///   AD9's post-launch sync fence makes this safe-by-convention: the
-///   kernel completes before `cuda_fwd` returns, so the borrow cannot
-///   outlive candle's ownership.
+///   mutates the input buffer. Each op module audits its kernel to confirm
+///   inputs are read-only (loaded into MMA fragments via shared memory,
+///   never written).
+/// - **Lifetime:** the returned reference MUST NOT escape the current
+///   synchronous function scope (i.e. `cuda_fwd`'s stack frame). cudarc's
+///   `CudaSlice` is `Arc`-managed by candle; this transmute does NOT
+///   increment the refcount. If the reference leaks into a detached
+///   thread, async task, or static storage, candle could drop the slice
+///   while a kernel is still reading device memory → UB. The post-launch
+///   sync fence makes this safe-by-convention: the kernel completes before
+///   `cuda_fwd` returns, so the borrow cannot outlive candle's ownership.
 pub(crate) fn buffer_ref_from_slice_readonly<T>(slice: &CudaSlice<T>) -> &GpuBuffer<T> {
     // SAFETY:
     // - GpuBuffer<T> is #[repr(transparent)] over CudaSlice<T> (verified
@@ -123,13 +120,13 @@ fn candle_ordinal(dev: &CudaDevice) -> Result<usize> {
     }
 }
 
-/// AD1 enforcement: the user-supplied [`Arc<KaioDevice>`](std::sync::Arc)
-/// must reference the same CUDA ordinal as the tensor's candle device.
+/// The user-supplied [`Arc<KaioDevice>`](std::sync::Arc) must reference
+/// the same CUDA ordinal as the tensor's candle device.
 ///
-/// Per P4 preflight (`cudarc::CudaContext::new(ord)` wraps
-/// `cuDevicePrimaryCtxRetain`), two same-ordinal context constructions
-/// share the same underlying primary context at the driver level. Ordinal
-/// equality is the right check; Arc-identity would be spurious.
+/// `cudarc::CudaContext::new(ord)` wraps `cuDevicePrimaryCtxRetain`, so
+/// two same-ordinal context constructions share the same underlying
+/// primary context at the driver level. Ordinal equality is the right
+/// check; Arc-identity would be spurious.
 pub(crate) fn ensure_ordinal_match(candle_dev: &CudaDevice, kaio_dev: &KaioDevice) -> Result<()> {
     let candle_ord = candle_ordinal(candle_dev)?;
     let kaio_ord = kaio_dev.ordinal();
@@ -143,7 +140,7 @@ pub(crate) fn ensure_ordinal_match(candle_dev: &CudaDevice, kaio_dev: &KaioDevic
     Ok(())
 }
 
-/// AD9 pre-launch sync: ensure candle's prior work on the input tensors
+/// Pre-launch sync: ensure candle's prior work on the input tensors
 /// completes before the KAIO kernel reads from them.
 ///
 /// Uses event-based cross-stream synchronization (Sprint 7.4c):
@@ -161,7 +158,7 @@ pub(crate) fn sync_before_launch(candle_dev: &CudaDevice, kaio_dev: &KaioDevice)
     kaio_stream.join(&candle_stream).map_err(driver_err)
 }
 
-/// AD9 post-launch sync: ensure the KAIO kernel completes before candle
+/// Post-launch sync: ensure the KAIO kernel completes before candle
 /// uses the output storage (which may be scheduled on a different stream).
 ///
 /// Same event-based mechanism as [`sync_before_launch`], reversed:
@@ -224,9 +221,8 @@ fn ensure_rank2_contiguous_zero_offset_inner(
     Ok((dims[0], dims[1]))
 }
 
-/// Shape + rank + contiguity + offset + dtype gate (AD4 — Opus #6 + #7,
-/// Codex R3). Called by CustomOp impls on every input layout. Input is
-/// identified by numeric index (`input #0`).
+/// Shape + rank + contiguity + offset gate. Called by CustomOp impls on
+/// every input layout. Input is identified by numeric index (`input #0`).
 pub(crate) fn ensure_rank2_contiguous_zero_offset(
     op_name: &'static str,
     input_index: usize,

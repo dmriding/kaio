@@ -68,7 +68,6 @@ impl CustomOp2 for MatmulInt8Op {
         s2: &CudaStorage,
         l2: &Layout,
     ) -> Result<(CudaStorage, Shape)> {
-        // AD4: rank + contiguity + offset gate on each input.
         let (m_a, k_a) = bridge::ensure_rank2_contiguous_zero_offset("matmul_int8", 0, l1)?;
         let (k_b, n_b) = bridge::ensure_rank2_contiguous_zero_offset("matmul_int8", 1, l2)?;
         if k_a != k_b {
@@ -89,18 +88,15 @@ impl CustomOp2 for MatmulInt8Op {
         let candle_dev = s1.device.clone();
         bridge::ensure_ordinal_match(&candle_dev, &self.device)?;
 
-        // AD4: dtype gate — candle has no DType::I8, so the convention
-        // is DType::U8 with the bytes interpreted as signed INT8. See
-        // the crate-level "Dtype convention" rustdoc on this module.
+        // Dtype gate — candle has no DType::I8, so the convention is
+        // DType::U8 with the bytes interpreted as signed INT8.
         let a_slice_u8 = bridge::slice_ref_from_storage::<u8>(s1)?;
         let b_slice_u8 = bridge::slice_ref_from_storage::<u8>(s2)?;
         let a_slice = bridge::reinterpret_u8_slice_as_i8(a_slice_u8);
         let b_slice = bridge::reinterpret_u8_slice_as_i8(b_slice_u8);
 
-        // AD2-Audit: kaio_ops::matmul_int8 runs validate_dims_int8
-        // (read-only) then launches the mma.s8.s8.s32 kernel. Inputs
-        // are read through LDMATRIX into fragment A/B; never mutated.
-        // Safe under the readonly-transmute contract.
+        // kaio_ops::matmul_int8 reads inputs through LDMATRIX into
+        // fragment A/B; never mutated. Safe under the readonly contract.
         let a_buf: &GpuBuffer<i8> = bridge::buffer_ref_from_slice_readonly(a_slice);
         let b_buf: &GpuBuffer<i8> = bridge::buffer_ref_from_slice_readonly(b_slice);
 
