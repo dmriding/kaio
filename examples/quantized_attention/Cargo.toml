@@ -12,6 +12,6 @@ publish = false
 # Path-dep form keeps this example buildable from a local KAIO checkout.
 # To copy this directory outside the repo, drop `path = ...` and cargo
 # resolves the crates via crates.io.
-kaio = { path = "../../kaio", version = "0.3.0" }
-kaio-ops = { path = "../../kaio-ops", version = "0.3.0" }
+kaio = { path = "../../kaio", version = "0.4.0" }
+kaio-ops = { path = "../../kaio-ops", version = "0.4.0" }
 half = "2"

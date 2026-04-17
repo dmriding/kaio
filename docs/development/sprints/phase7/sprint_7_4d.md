@@ -53,5 +53,5 @@ Analytical backward for `matmul_tc` and `matmul_tc_async`: `dA = grad @ B^T`, `d
 ## Follow-ups
 
 - **Phase 7 close** — `phase7-wrap → phase7-ship → main` merge, v0.4.0 aggregate release.
-- **kaio 0.3.1 patch + kaio-candle 0.1.0 publish** — `dynamic-linking` feature needed on crates.io.
+- **kaio-candle 0.1.0 publish** — after kaio 0.4.0 is on crates.io.
 - **Attention backward (Phase 8)** — FlashAttention backward requires new tiled PTX kernels with softmax recomputation.

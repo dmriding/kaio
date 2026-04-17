@@ -35,8 +35,8 @@ dynamic-loading = ["cudarc/dynamic-loading", "kaio/dynamic-loading"]
 dynamic-linking = ["cudarc/dynamic-linking", "kaio/dynamic-linking"]
 
 [dependencies]
-kaio = { version = "0.3.0", path = "../kaio", default-features = false }
-kaio-core = { version = "0.3.0", path = "../kaio-core" }
+kaio = { version = "0.4.0", path = "../kaio", default-features = false }
+kaio-core = { version = "0.4.0", path = "../kaio-core" }
 cudarc = { workspace = true }
 half = { workspace = true }
 serde = { version = "1", features = ["derive"] }

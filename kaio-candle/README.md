@@ -42,7 +42,7 @@ Build requirements with `cuda`:
 # Cargo.toml
 [dependencies]
 kaio-candle = { version = "0.1", features = ["cuda"] }
-kaio = "0.3"
+kaio = "0.4"
 candle-core = { version = "0.10", features = ["cuda"] }
 half = "2"
 ```

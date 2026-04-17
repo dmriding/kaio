@@ -40,7 +40,7 @@ cd kaio
 cargo xtask showcase
 ```
 
-You'll see `fused_silu_gate`, `gelu_comparison`, `rms_norm`, `layer_norm`, `softmax`, `int8_dequant`, and `int8_matmul` compile, launch, verify correctness against a CPU reference, and report median latency. The seven examples span activations, normalizations, reductions, and the quantize → matmul pipeline: the canonical transformer-primitive arc plus the v0.3.0 W8A8 headline op.
+You'll see `fused_silu_gate`, `gelu_comparison`, `rms_norm`, `layer_norm`, `softmax`, `int8_dequant`, and `int8_matmul` compile, launch, verify correctness against a CPU reference, and report median latency. The seven examples span activations, normalizations, reductions, and the quantize → matmul pipeline: the canonical transformer-primitive arc plus the W8A8 headline op.
 
 Want the performance pitch instead? `cargo xtask bench` runs the tensor-core matmul benchmark against cuBLAS sgemm across five sizes. Or `cargo xtask all` for both. `cargo xtask --help` for the full tooling surface.
 
@@ -162,7 +162,7 @@ when you need more control than they provide.
 | Windows support             | Yes        | Yes           | Partial       | Yes      |
 | No CUDA toolkit needed      | Yes        | Yes           | Varies        | No       |
 | Type-safe kernel signatures | Yes        | No            | N/A           | No       |
-| ML framework integration    | Standalone | Standalone    | Built-in      | Manual   |
+| ML framework integration    | candle (via `kaio-candle`) | Standalone    | Built-in      | Manual   |
 
 ## Performance
 
@@ -259,10 +259,10 @@ fn reduce(input: &[f32], out: &mut [f32], n: u32) {
 | Scalar tiled matmul                      | `kaio_ops::matmul` / `matmul_auto` — 31% of cuBLAS sgemm. Any SM.          |
 | Fused attention + FlashAttention         | `kaio_ops::attention`, `attention_flash` (O(d_k) memory). Any SM.          |
 | Tensor-core matmul                       | `kaio_ops::matmul_tc` / `matmul_tc_async` / `matmul_auto_tc` — f16 → f32, SM 8.0+, **82.3% sync / 92.5% async of cuBLAS sgemm at 4096²**. |
-| INT8 dequantize-matmul (W8A8)            | `kaio_ops::matmul_int8` — symmetric i8 × i8 → f32 with single-scalar scale, SM 8.0+, K%32==0. **80–94 TOPS at 4096³ on RTX 4090 sm_89 (median ~89 across 6 runs).** v0.3.0 reference quant op. |
+| INT8 dequantize-matmul (W8A8)            | `kaio_ops::matmul_int8` — symmetric i8 × i8 → f32 with single-scalar scale, SM 8.0+, K%32==0. **80–94 TOPS at 4096³ on RTX 4090 sm_89 (median ~89 across 6 runs).** |
 | INT4 dequantize-matmul (W4A16, GPTQ-style) | `kaio_ops::matmul_int4` — packed signed-INT4 weights × f16 activations → f32, f16 group scales (group_size=128), DEQUANT-F16 via `mma.sync.m16n8k16`, SM 8.0+, K%128==0. **49–58 TOPS at 4096³ on RTX 4090 sm_89 (median ~57 across 6 xtask-bench runs, 95–116% of cuBLAS sgemm).** Sprint 7.2 on `phase7-rest`; ships in Phase 7 aggregate release. |
-| Fused tri-output QKV projection (INT8, W8A16) | `kaio_ops::qkv_project_int8` — f16 activations × i8 weights × scalar per-projection scales → three f16 outputs ready for `attention_tc`. Sprint 7.3.5 upgraded the inner K-loop to **Design S+½P** (2 `tile_w` slots with ping-pong, barriers dropped from 7 to 4 per K-tile, `frag_A` register-hoisted). No fair 3×-standalone reference exists (W8A16 vs `matmul_int8`'s W8A8); absolute TOPS at `prefill_m2048` = 45.1 on RTX 4090 sm_89. SM 8.0+, K%16==0, N%2==0. Sprints 7.3 + 7.3.5. |
-| Fused tri-output QKV projection (INT4, W4A16) | `kaio_ops::qkv_project_int4` — packed signed-INT4 weights × f16 activations × f16 group scales → three f16 outputs ready for `attention_tc`. Same packing convention as `matmul_int4`. Ships as **Design S** (single W slot per K-tile). Sprint 7.3.5 evaluated Design S+½P for this variant; `prefill_m2048` measured at median **1.05×** vs 3× standalone `matmul_int4` — improved from Design S's 0.85× but below the 1.15× ship threshold. The S+½P kernel is retained as measured-data on the `phase7-rest` branch. For prefill-heavy INT4, call three separate `matmul_int4`s. Decode tier (M ≤ 128): fused Design S is **~3.0× faster** than three standalone calls. SM 8.0+, K%128==0, N%2==0, group_size=128 fixed. Sprints 7.3 + 7.3.5. |
+| Fused tri-output QKV projection (INT8, W8A16) | `kaio_ops::qkv_project_int8` — f16 activations × i8 weights × per-projection scalar scales → three f16 outputs (Q, K, V). Decode tier ~3× faster than three standalone matmuls; prefill performance varies by shape. SM 8.0+, K%16==0, N%2==0. |
+| Fused tri-output QKV projection (INT4, W4A16) | `kaio_ops::qkv_project_int4` — packed INT4 weights × f16 activations × f16 group scales → three f16 outputs. Decode tier ~3× faster than three standalone calls; for prefill-heavy workloads at M≥2048, three separate `matmul_int4` calls may be faster. SM 8.0+, K%128==0, group_size=128. |
 | Auto-tuner + cache                       | `tune_matmul`, `matmul_auto`, `matmul_auto_tc` with JSON cache.            |
 | PTX inspection                           | `KAIO_DUMP_PTX=1`, `KAIO_PTX_STATS=1`, `KAIO_PTX_ANNOTATE=1`.              |
 
@@ -283,13 +283,24 @@ KAIO is pre-1.0 software. Current engineering constraints:
   scalar path. [Details →](docs/performance.md)
 - **Mostly inference.** The [`kaio-candle`](kaio-candle/) bridge ships
   8 forward ops; `matmul_tc` and `matmul_tc_async` support backward
-  (approximate f16-based autograd). Attention and quantized-op backward
-  are not yet implemented.
-- **DSL is a Rust subset.** No closures, traits, generics, method
-  calls, or string operations inside `#[gpu_kernel]` function bodies.
+  via mixed-precision autograd (gradients are computed in f16, matching
+  the forward-pass precision). Attention and quantized-op backward are
+  not yet implemented.
+- **DSL is a Rust subset, not compiled Rust.** `#[gpu_kernel]` function
+  bodies use Rust syntax but are parsed into KAIO's own IR and lowered
+  directly to PTX. The kernel body **never reaches rustc's backend** —
+  no LLVM, no MIR, no borrow checker. This means `&mut [T]` in a kernel
+  signature does not carry Rust's aliasing guarantees: thousands of GPU
+  threads access the same buffer concurrently, and correctness depends on
+  the kernel author writing disjoint access patterns (e.g. `if idx < n`
+  guards), not on compiler-enforced uniqueness. You cannot call Rust
+  functions declared outside the kernel inside the kernel body. No
+  closures, traits, generics, method calls, or string operations.
   Arithmetic, comparisons, bitwise operators (`&` `|` `^` `<<` `>>`
   `!`), short-circuit `&&` / `||`, and compound assignment (including
-  bitwise `&=` / `|=` / `<<=` / etc.) all supported as of v0.2.1.
+  bitwise `&=` / `|=` / `<<=` / etc.) all supported. A pointer-syntax
+  alternative (`*mut [T]`) that more honestly reflects the GPU memory
+  model is planned — see [RFC-0001](docs/development/rfcs/rfc-0001-pointer-syntax.md).
 - **FlashAttention d_k limit.** `attention_flash()` requires
   d_k ≤ 256 (one thread per output dimension).
 - **Single-device.** No multi-GPU support.
@@ -325,7 +336,24 @@ Four layers, bottom to top:
 | `kaio-core`    | PTX IR, instruction emitters, fragment containers, zero external deps   |
 | `kaio-runtime` | CUDA driver wrapper via [cudarc](https://github.com/coreylowman/cudarc) |
 | `kaio-ops`     | Pre-built GPU operations (matmul, attention, TC matmul, auto-tuner)     |
-| `kaio-candle`  | [candle](https://github.com/huggingface/candle) `CustomOp` bridge — standalone crate at [`kaio-candle/`](kaio-candle/), not a workspace member (cudarc feature mutual-exclusion) |
+| `kaio-candle`  | [candle](https://github.com/huggingface/candle) bridge — 8 forward ops + 2 backward (matmul_tc, matmul_tc_async), event-based stream sync. Standalone crate at [`kaio-candle/`](kaio-candle/) |
+
+## Candle integration
+
+The [`kaio-candle`](kaio-candle/) crate bridges KAIO's GPU kernels into
+[candle](https://github.com/huggingface/candle)'s tensor graph. 8 forward
+ops + 2 backward ops, event-based stream sync (CUDA Graph compatible).
+
+```rust
+use std::sync::Arc;
+use kaio::prelude::KaioDevice;
+
+let kd = Arc::new(KaioDevice::new(0)?);
+let c = kaio_candle::matmul_tc(&kd, &a, &b)?;  // candle Tensor in, candle Tensor out
+```
+
+See [`kaio-candle/README.md`](kaio-candle/README.md) for the full op
+surface and usage guide.
 
 ## Target hardware
 

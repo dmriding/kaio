@@ -36,14 +36,14 @@ dynamic-loading = ["kaio-runtime/dynamic-loading"]
 dynamic-linking = ["kaio-runtime/dynamic-linking"]
 
 [dependencies]
-kaio-core = { version = "0.3.0", path = "../kaio-core" }
+kaio-core = { version = "0.4.0", path = "../kaio-core" }
 # default-features = false — kaio-runtime's default (`dynamic-loading`) is
 # activated here by kaio's own feature forwarder, not by default propagation.
 # Otherwise kaio-candle's `default-features = false, features = ["dynamic-linking"]`
 # opt-in would be bypassed because kaio-runtime's default would remain active,
 # activating cudarc/dynamic-loading alongside cudarc/dynamic-linking → panic.
-kaio-runtime = { version = "0.3.0", path = "../kaio-runtime", default-features = false }
-kaio-macros = { version = "0.3.0", path = "../kaio-macros" }
+kaio-runtime = { version = "0.4.0", path = "../kaio-runtime", default-features = false }
+kaio-macros = { version = "0.4.0", path = "../kaio-macros" }
 
 [dev-dependencies]
 cudarc = { workspace = true }

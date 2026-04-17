@@ -34,8 +34,8 @@ features = ["cuda"]
 # cudarc feature set (cudarc panics if both loading strategies are
 # simultaneously active). The workspace-wide cudarc-loading-strategy
 # feature-gate refactor (prep commits b0213c2 + 320f12c) makes this work.
-kaio = { version = "0.3.0", path = "../kaio", default-features = false, features = ["dynamic-linking"], optional = true }
-kaio-ops = { version = "0.3.0", path = "../kaio-ops", default-features = false, features = ["dynamic-linking"], optional = true }
+kaio = { version = "0.4.0", path = "../kaio", default-features = false, features = ["dynamic-linking"], optional = true }
+kaio-ops = { version = "0.4.0", path = "../kaio-ops", default-features = false, features = ["dynamic-linking"], optional = true }
 candle-core = { version = "=0.10.2", default-features = false, features = ["cuda"], optional = true }
 # cudarc is the shared FFI layer — candle's CudaSlice<T> and KAIO's
 # GpuBuffer<T> both wrap it. Bridge needs direct access to CudaSlice for

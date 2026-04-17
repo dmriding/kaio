@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased]
+## [0.4.0] — 2026-04-18 — Phase 7: Quantization, Attention, Candle Bridge
 
 ### Sprint 7.4d — matmul_tc + matmul_tc_async backward
 
