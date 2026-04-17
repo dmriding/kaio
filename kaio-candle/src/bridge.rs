@@ -143,28 +143,34 @@ pub(crate) fn ensure_ordinal_match(candle_dev: &CudaDevice, kaio_dev: &KaioDevic
     Ok(())
 }
 
-/// AD9 pre-launch sync: wait for candle's prior work on these tensors to
-/// complete before launching a KAIO kernel on the default stream.
+/// AD9 pre-launch sync: ensure candle's prior work on the input tensors
+/// completes before the KAIO kernel reads from them.
 ///
-/// **CUDA Graph limitation (Gemini G3-3):** calls `cuCtxSynchronize` under
-/// the hood, which is banned inside a stream-capture region. Bridge calls
-/// inside a CUDA Graph capture will return
-/// `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`. Stream-plumbing in 7.4c is
-/// expected to unblock Graph usage via event-based sync.
-pub(crate) fn sync_before_launch(candle_dev: &CudaDevice) -> Result<()> {
-    candle_dev
-        .synchronize()
-        .map_err(|e| Error::Msg(format!("kaio-candle pre-launch sync failed: {e}")))
+/// Uses event-based cross-stream synchronization (Sprint 7.4c):
+/// `kaio_stream.join(&candle_stream)` records candle's current work into
+/// a CUDA event and makes KAIO's stream wait on it. GPU-side only — no
+/// CPU blocking. The underlying `cuEventRecord` + `cuStreamWaitEvent`
+/// calls are CUDA Graph capture-compatible (unlike the prior
+/// `cuCtxSynchronize` which was banned during capture).
+///
+/// Both streams must belong to the same CUDA device/context — enforced
+/// by `ensure_ordinal_match` at every call site.
+pub(crate) fn sync_before_launch(candle_dev: &CudaDevice, kaio_dev: &KaioDevice) -> Result<()> {
+    let candle_stream = candle_dev.cuda_stream();
+    let kaio_stream = kaio_dev.stream();
+    kaio_stream.join(&candle_stream).map_err(driver_err)
 }
 
-/// AD9 post-launch sync: wait for the KAIO kernel to complete before
-/// handing the output storage back to candle (which may schedule its next
-/// op on a different stream). Same CUDA-Graph limitation as
-/// [`sync_before_launch`].
-pub(crate) fn sync_after_launch(candle_dev: &CudaDevice) -> Result<()> {
-    candle_dev
-        .synchronize()
-        .map_err(|e| Error::Msg(format!("kaio-candle post-launch sync failed: {e}")))
+/// AD9 post-launch sync: ensure the KAIO kernel completes before candle
+/// uses the output storage (which may be scheduled on a different stream).
+///
+/// Same event-based mechanism as [`sync_before_launch`], reversed:
+/// `candle_stream.join(&kaio_stream)` makes candle wait for KAIO's
+/// kernel completion.
+pub(crate) fn sync_after_launch(candle_dev: &CudaDevice, kaio_dev: &KaioDevice) -> Result<()> {
+    let kaio_stream = kaio_dev.stream();
+    let candle_stream = candle_dev.cuda_stream();
+    candle_stream.join(kaio_stream).map_err(driver_err)
 }
 
 /// Convert a [`KaioError`] into a [`candle_core::Error`]. Use at each
@@ -172,6 +178,13 @@ pub(crate) fn sync_after_launch(candle_dev: &CudaDevice) -> Result<()> {
 /// natural `impl From<KaioError> for candle_core::Error`.
 pub(crate) fn kaio_err(e: KaioError) -> Error {
     Error::Msg(format!("kaio: {e}"))
+}
+
+/// Convert a cudarc [`DriverError`] into a [`candle_core::Error`].
+/// Used by the event-based sync functions (Sprint 7.4c) where cudarc's
+/// stream/event API returns `DriverError` directly.
+pub(crate) fn driver_err(e: cudarc::driver::DriverError) -> Error {
+    Error::Msg(format!("kaio-candle stream sync: {e}"))
 }
 
 /// Shared inner gate logic — `input_label` is either `"input #0"` or a

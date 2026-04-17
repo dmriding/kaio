@@ -102,12 +102,12 @@ impl CustomOp2 for MatmulTcOp {
             .map_err(bridge::kaio_err)?;
 
         // AD9: stream-safety fence.
-        bridge::sync_before_launch(&candle_dev)?;
+        bridge::sync_before_launch(&candle_dev, &self.device)?;
 
         kaio_matmul_tc(&self.device, a_buf, b_buf, &mut out_buf, m, n, k)
             .map_err(bridge::kaio_err)?;
 
-        bridge::sync_after_launch(&candle_dev)?;
+        bridge::sync_after_launch(&candle_dev, &self.device)?;
 
         let out_slice = out_buf.into_cuda_slice();
         let out_storage = bridge::storage_from_slice::<f32>(out_slice, candle_dev);

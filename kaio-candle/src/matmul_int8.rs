@@ -109,7 +109,7 @@ impl CustomOp2 for MatmulInt8Op {
             .alloc_zeros::<f32>(m_a * n_b)
             .map_err(bridge::kaio_err)?;
 
-        bridge::sync_before_launch(&candle_dev)?;
+        bridge::sync_before_launch(&candle_dev, &self.device)?;
 
         kaio_matmul_int8(
             &self.device,
@@ -123,7 +123,7 @@ impl CustomOp2 for MatmulInt8Op {
         )
         .map_err(bridge::kaio_err)?;
 
-        bridge::sync_after_launch(&candle_dev)?;
+        bridge::sync_after_launch(&candle_dev, &self.device)?;
 
         let out_slice = out_buf.into_cuda_slice();
         let out_storage = bridge::storage_from_slice::<f32>(out_slice, candle_dev);

@@ -19,7 +19,8 @@ Master plan: [phase7_master_plan.md](phase7_master_plan.md)
 | [7.4a](sprint_7_4a.md) | `kaio-candle` bridge crate — forward ops | ✅ Complete | 5 forward `CustomOp` bindings (matmul_tc, matmul_tc_async, matmul_int4, attention_tc + causal); 15 bit-exact GPU tests |
 | [7.4b-part1](sprint_7_4b_part1.md) | `kaio-candle::matmul_int8` binding | ✅ Complete | CustomOp2 W8A8 binding with spread-scale bit-exact tests; 20 GPU tests total |
 | [7.4b-part2](sprint_7_4b_part2.md) | `kaio-candle` direct-call pattern + fused QKV bindings | ✅ Complete | New direct-call bridge pattern; qkv_project_int{4,8} with 12 new GPU tests; 32 total |
-| 7.4c | `kaio-candle` — backward + stream plumbing | 📝 Planned | Autograd support; event-based streams (unblocks CUDA Graphs) |
+| [7.4c](sprint_7_4c.md) | `kaio-candle` — event-based stream sync | ✅ Complete | Replaced cuCtxSynchronize with join()-based event sync; CUDA Graph capture partially unblocked |
+| 7.4d | Backward PTX kernel skeleton plan | 📝 Planned | Scoping sprint for backward kernels across all 8 bridge ops |
 | v0.4.0 | Phase 7 aggregate release | 📝 Planned | After 7.4 ships |
 
 ## Branch

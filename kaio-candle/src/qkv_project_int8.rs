@@ -179,7 +179,7 @@ pub fn qkv_project_int8(
     let mut k_buf: GpuBuffer<f16> = device.alloc_zeros::<f16>(m * n).map_err(bridge::kaio_err)?;
     let mut v_buf: GpuBuffer<f16> = device.alloc_zeros::<f16>(m * n).map_err(bridge::kaio_err)?;
 
-    bridge::sync_before_launch(&candle_dev)?;
+    bridge::sync_before_launch(&candle_dev, device)?;
 
     kaio_qkv_project_int8(
         device, x_buf, wq_buf, wk_buf, wv_buf, scale_q, scale_k, scale_v, &mut q_buf, &mut k_buf,
@@ -187,7 +187,7 @@ pub fn qkv_project_int8(
     )
     .map_err(bridge::kaio_err)?;
 
-    bridge::sync_after_launch(&candle_dev)?;
+    bridge::sync_after_launch(&candle_dev, device)?;
 
     // Drop the read guards before wrapping outputs — we're done reading
     // input storage. (Not strictly required since they'd drop at fn end,

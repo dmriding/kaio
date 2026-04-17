@@ -125,7 +125,7 @@ impl CustomOp3 for AttentionTcOp {
             .alloc_zeros::<f32>(seq_q * d_v)
             .map_err(bridge::kaio_err)?;
 
-        bridge::sync_before_launch(&candle_dev)?;
+        bridge::sync_before_launch(&candle_dev, &self.device)?;
 
         let kernel_result = if self.causal {
             kaio_attention_tc_causal(
@@ -154,7 +154,7 @@ impl CustomOp3 for AttentionTcOp {
         };
         kernel_result.map_err(bridge::kaio_err)?;
 
-        bridge::sync_after_launch(&candle_dev)?;
+        bridge::sync_after_launch(&candle_dev, &self.device)?;
 
         let out_slice = out_buf.into_cuda_slice();
         let out_storage = bridge::storage_from_slice::<f32>(out_slice, candle_dev);

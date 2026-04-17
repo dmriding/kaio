@@ -945,3 +945,28 @@ fn qkv_project_int4_rejects_nonzero_offset() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Event-based stream sync API-path smoke test (Sprint 7.4c)
+// ---------------------------------------------------------------------------
+
+/// Validates that the event-based sync API path (join / record_event /
+/// wait) executes without error on real hardware. Does NOT prove cross-
+/// stream ordering semantics — both sides use the default stream, so
+/// ordering is already guaranteed by FIFO. Catches Rollback #1's failure
+/// mode: driver rejection of the event API calls.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn event_based_sync_smoke_test() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // Calling a bridge op exercises both sync_before_launch and
+    // sync_after_launch with the new event-based path internally.
+    let a = Tensor::ones((16, 16), candle_core::DType::F16, &candle_dev)?;
+    let b = Tensor::ones((16, 16), candle_core::DType::F16, &candle_dev)?;
+    let _c = kaio_candle::matmul_tc(&kaio_dev, &a, &b)?;
+
+    // If we get here without error, the event/join API path works.
+    Ok(())
+}

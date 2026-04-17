@@ -10,6 +10,34 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+### Sprint 7.4c — Event-based stream synchronization
+
+Replaced `cuCtxSynchronize` fences with event-based cross-stream sync
+via cudarc's `CudaStream::join()` (`cuEventRecord` + `cuStreamWaitEvent`
+internally). GPU-side only — no CPU blocking.
+
+#### Changed — Sprint 7.4c
+
+- **`bridge::sync_before_launch` + `sync_after_launch`** internals
+  replaced. Now use `kaio_stream.join(&candle_stream)` /
+  `candle_stream.join(&kaio_stream)` for cross-stream event
+  synchronization. Signature gains `&KaioDevice` parameter (both
+  streams needed). All 7 call sites updated.
+- **CUDA Graph capture partially unblocked.** The prior
+  `cuCtxSynchronize` blocker is removed. However, full Graph capture
+  requires non-default streams on both sides, which remains unverified.
+- **Bench-gap caveat updated.** The worst overhead source
+  (`cuCtxSynchronize`) is removed. Dynamic event creation
+  (`record_event(None)`) introduces its own micro-overhead; event
+  handle caching is a future optimization.
+
+#### Added — Sprint 7.4c
+
+- **`bridge::driver_err`** — cudarc `DriverError` → candle `Error`
+  converter, used by the event-based sync functions.
+- **API-path smoke test** — validates that the event/join API path
+  executes without error on real hardware.
+
 ### Sprint 7.4b-part2 — Direct-call bridge pattern + `qkv_project_int{4,8}`
 
 New **direct-call bridge pattern** in `kaio-candle` for ops that exceed

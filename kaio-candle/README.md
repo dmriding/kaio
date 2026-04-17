@@ -130,10 +130,10 @@ A weekly GitHub Actions workflow (`.github/workflows/candle-head.yml`) builds ka
 - **Non-contiguous tensors rejected.** Call `.contiguous()?` upstream.
 - **Non-zero storage offset rejected** (e.g. from `.narrow(...)` / `.slice(...)`). Call `.contiguous()?` to compact.
 - **Rank-2 only.** Multi-head attention callers must reshape `[heads, seq, d]` to `[heads * seq, d]` or call per-head with rank-2 slices. Wrappers error with a concrete reshape hint for higher-rank inputs.
-- **CUDA Graph capture incompatible.** Wrappers call `cuCtxSynchronize` for stream safety, which is banned inside a stream-capture region. Returns `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`. Event-based stream plumbing in a later sprint unblocks Graph usage.
-- **f32 output contract.** Wrappers return `DType::F32` tensors matching the kaio-ops accumulator. Cast via `.to_dtype(DType::F16)?` if you need f16 for downstream graph continuation.
+- **CUDA Graph capture partially unblocked.** Event-based sync (Sprint 7.4c) removes the prior `cuCtxSynchronize` blocker. However, full CUDA Graph capture requires non-default streams on both the candle and KAIO sides, which is not yet verified.
+- **f32 output (CustomOp ops) / f16 output (direct-call ops).** `matmul_tc`, `matmul_int4`, `matmul_int8`, `attention_tc` return `f32` matching the kaio-ops accumulator. `qkv_project_int{4,8}` return `f16` because the fused kernel converts internally.
 - **No CPU fallback.** `cpu_fwd` returns a loud error rather than silently routing to `candle.matmul()`. KAIO's value is GPU-specific PTX; a silent CPU fallback would mask every perf claim.
-- **Bench numbers vs direct-call gap.** Each bridge call issues two `cuCtxSynchronize` fences (one before, one after the kaio-ops launch). Tiny-shape decode is dominated by this overhead; prefill shapes less so. KAIO's published %-of-cuBLAS numbers are measured via direct kaio-ops calls, not through the bridge.
+- **Bench numbers vs direct-call gap.** Each bridge call issues event-based stream sync (two `join()` calls per op). This replaced the heavier `cuCtxSynchronize` from v0.1 but still allocates a transient `CudaEvent` per call. KAIO's published %-of-cuBLAS numbers are measured via direct kaio-ops calls, not through the bridge.
 
 ## License
 

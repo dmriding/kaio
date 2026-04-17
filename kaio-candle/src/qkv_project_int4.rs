@@ -214,7 +214,7 @@ pub fn qkv_project_int4(
     let mut k_buf: GpuBuffer<f16> = device.alloc_zeros::<f16>(m * n).map_err(bridge::kaio_err)?;
     let mut v_buf: GpuBuffer<f16> = device.alloc_zeros::<f16>(m * n).map_err(bridge::kaio_err)?;
 
-    bridge::sync_before_launch(&candle_dev)?;
+    bridge::sync_before_launch(&candle_dev, device)?;
 
     kaio_qkv_project_int4(
         device, x_buf, wq_buf, wk_buf, wv_buf, sq_buf, sk_buf, sv_buf, &mut q_buf, &mut k_buf,
@@ -222,7 +222,7 @@ pub fn qkv_project_int4(
     )
     .map_err(bridge::kaio_err)?;
 
-    bridge::sync_after_launch(&candle_dev)?;
+    bridge::sync_after_launch(&candle_dev, device)?;
 
     // Drop read guards before wrapping outputs.
     drop(guard_x);

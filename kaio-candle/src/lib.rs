@@ -73,18 +73,21 @@
 //!   Call `.contiguous()?` to compact.
 //! - **Rank-2 only.** Multi-head attention reshape to rank-2 before calling;
 //!   wrappers error with a concrete reshape hint for higher-rank inputs.
-//! - **CUDA Graph capture incompatible** — wrappers call `cuCtxSynchronize`
-//!   which is banned inside a stream-capture region. Returns
-//!   `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`. Stream-plumbing in 7.4c
-//!   (event-based sync) unblocks Graph usage.
-//! - **f32 output contract.** Wrappers return `DType::F32` tensors matching
-//!   the kaio-ops accumulator. Cast via `.to_dtype(DType::F16)?` if you need
-//!   f16 for downstream graph continuation.
-//! - **Bench numbers vs direct-call gap.** Each bridge call issues two
-//!   `cuCtxSynchronize`s (one before, one after kaio-ops launch) for stream
-//!   safety. Tiny-shape decode is dominated by this; prefill shapes less so.
-//!   KAIO's published %-of-cuBLAS numbers are measured via direct kaio-ops
-//!   calls, not through the bridge.
+//! - **CUDA Graph capture partially unblocked.** Event-based sync (Sprint
+//!   7.4c) removes the prior `cuCtxSynchronize` blocker. However, full CUDA
+//!   Graph capture requires non-default streams on both the candle and KAIO
+//!   sides, which is not yet verified. Default-stream users should not
+//!   attempt graph capture.
+//! - **f32 output contract (CustomOp ops).** `matmul_tc`, `matmul_int4`,
+//!   `matmul_int8`, and `attention_tc` return `DType::F32` matching the
+//!   kaio-ops accumulator. Direct-call ops (`qkv_project_int{4,8}`) return
+//!   `DType::F16` because the fused kernel converts internally.
+//! - **Bench numbers vs direct-call gap.** Each bridge call issues event-
+//!   based stream sync (two `join()` calls — `cuEventRecord` +
+//!   `cuStreamWaitEvent` per sync point). This replaced the heavier
+//!   `cuCtxSynchronize` from v0.1 but still allocates a transient
+//!   `CudaEvent` per call. KAIO's published %-of-cuBLAS numbers are
+//!   measured via direct kaio-ops calls, not through the bridge.
 
 #![warn(missing_docs)]
 
