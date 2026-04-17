@@ -1,22 +1,22 @@
 //! # kaio-candle — Candle bridge for KAIO
 //!
-//! Forward-only `CustomOp2` / `CustomOp3` bindings between
+//! `CustomOp2` / `CustomOp3` bindings between
 //! [candle](https://github.com/huggingface/candle) and the
 //! [KAIO](https://github.com/dmriding/kaio) GPU kernel library.
 //!
-//! ## Status — v0.1.0 (Sprint 7.4a + 7.4b)
+//! ## Status — v0.1.0 (Sprint 7.4a–7.4d)
 //!
-//! Bridges 8 forward ops across two patterns:
+//! Bridges 8 ops across two patterns:
 //!
 //! **CustomOp-based** (single-output, return `f32`):
-//! - `matmul_tc` — f16 × f16 → f32 matmul via KAIO tensor-core kernel.
-//! - `matmul_tc_async` — same, `cp.async` variant (92.5% cuBLAS sgemm at 4096² on sm_89).
-//! - `matmul_int4` — GPTQ-style INT4 dequantize-matmul with f16 group scales.
-//! - `matmul_int8` — W8A8 symmetric-quant matmul with scalar f32 scale (80–94 TOPS at 4096³ on sm_89).
-//! - `attention_tc` — fused tensor-core scaled-dot-product attention.
-//! - `attention_tc_causal` — same, with decoder causal mask.
+//! - `matmul_tc` — f16 × f16 → f32 matmul via KAIO tensor-core kernel. **Backward supported.**
+//! - `matmul_tc_async` — same, `cp.async` variant (92.5% cuBLAS sgemm at 4096² on sm_89). **Backward supported.**
+//! - `matmul_int4` — GPTQ-style INT4 dequantize-matmul with f16 group scales. Forward-only.
+//! - `matmul_int8` — W8A8 symmetric-quant matmul with scalar f32 scale (80–94 TOPS at 4096³ on sm_89). Forward-only.
+//! - `attention_tc` — fused tensor-core scaled-dot-product attention. Forward-only.
+//! - `attention_tc_causal` — same, with decoder causal mask. Forward-only.
 //!
-//! **Direct-call** (multi-output, return `f16`):
+//! **Direct-call** (multi-output, return `f16`, forward-only):
 //! - `qkv_project_int8` — W8A16 fused tri-output QKV projection (4 inputs → 3 f16 outputs).
 //! - `qkv_project_int4` — W4A16 fused tri-output QKV projection (7 inputs → 3 f16 outputs).
 //!
@@ -24,7 +24,21 @@
 //! Direct-call ops return `f16` because the fused kernel performs the
 //! `f32→f16` conversion internally as part of the projection fusion.
 //!
-//! Backward kernels land in 7.4c.
+//! ## Backward support
+//!
+//! `matmul_tc` and `matmul_tc_async` implement `CustomOp2::bwd()` for
+//! candle autograd integration. The backward pass computes
+//! `dA = grad @ B^T` and `dB = A^T @ grad` by reusing the same
+//! forward kernel — no new PTX.
+//!
+//! **Numerically approximate:** the f32 upstream gradient is downcast to
+//! f16 before the tensor-core matmul, and output gradients are cast back
+//! to f16 to satisfy candle's dtype-matching constraint. This is an
+//! initial autograd integration, not a final mixed-precision training
+//! stack.
+//!
+//! Remaining ops are forward-only: attention backward requires new PTX
+//! kernels (Phase 8); quantized ops are inference-only by design.
 //!
 //! ## Build requirements
 //!

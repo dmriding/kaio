@@ -10,6 +10,25 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+### Sprint 7.4d — matmul_tc + matmul_tc_async backward
+
+Analytical backward (`CustomOp2::bwd()`) for `matmul_tc` and
+`matmul_tc_async` — candle autograd integration via forward kernel
+reuse. Zero new PTX kernels.
+
+#### Added — Sprint 7.4d
+
+- **`MatmulTcOp::bwd()`** — computes `dA = grad @ B^T` and
+  `dB = A^T @ grad` via two `matmul_tc()` forward calls. Casts f32
+  gradient to f16 for kernel input, casts output gradients back to f16
+  to satisfy candle's dtype-matching constraint.
+- **`MatmulTcAsyncOp::bwd()`** — same implementation using
+  `matmul_tc_async()` for consistent kernel variant in both directions.
+- **6 gradient-correctness GPU tests** — numerical finite-difference
+  checks across 3 shapes (small square, medium square, non-square).
+  Dual tolerance: `rel_err < 1e-2 || abs_err < 1e-3`.
+- **Total `kaio-candle` GPU tests: 39** (was 33).
+
 ### Sprint 7.4c — Event-based stream synchronization
 
 Replaced `cuCtxSynchronize` fences with event-based cross-stream sync

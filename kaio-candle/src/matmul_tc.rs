@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use candle_core::{CpuStorage, CudaStorage, CustomOp2, Error, Layout, Result, Shape, Tensor};
+use candle_core::{
+    CpuStorage, CudaStorage, CustomOp2, DType, Error, Layout, Result, Shape, Tensor,
+};
 use half::f16;
 use kaio::prelude::{GpuBuffer, KaioDevice};
 use kaio_ops::matmul_tc as kaio_matmul_tc;
@@ -112,6 +114,50 @@ impl CustomOp2 for MatmulTcOp {
         let out_slice = out_buf.into_cuda_slice();
         let out_storage = bridge::storage_from_slice::<f32>(out_slice, candle_dev);
         Ok((out_storage, Shape::from_dims(&[m_a, n_b])))
+    }
+
+    /// Backward pass: dA = grad @ B^T, dB = A^T @ grad.
+    ///
+    /// Reuses the forward `matmul_tc` kernel — no new PTX. The f32
+    /// `grad_res` is downcast to f16 before each matmul call, and
+    /// the f32 output gradients are cast back to f16 to match the
+    /// input dtypes (candle's gradient accumulator requires matching
+    /// dtypes — verified in `backprop.rs:672`).
+    ///
+    /// **Precision note:** the double f16 cast (input grad + output
+    /// grad) is a known approximation. Negligible for a single matmul
+    /// backward; may compound in deep networks. This is the initial
+    /// autograd integration, not a final mixed-precision training stack.
+    ///
+    /// **Memory:** allocates two materialized transposes (`.t()?.contiguous()?`)
+    /// plus the casted `grad_res`. Peak backward memory ≈ 2-3× forward
+    /// input size.
+    fn bwd(
+        &self,
+        a: &Tensor,
+        b: &Tensor,
+        _res: &Tensor,
+        grad_res: &Tensor,
+    ) -> Result<(Option<Tensor>, Option<Tensor>)> {
+        // grad_res is f32 [M, N]; matmul_tc needs f16 inputs.
+        let grad_f16 = grad_res.to_dtype(DType::F16)?;
+
+        // dA = grad @ B^T → f32 [M, K]
+        let b_t = b.t()?.contiguous()?;
+        let grad_a = matmul_tc(&self.device, &grad_f16, &b_t)?;
+
+        // dB = A^T @ grad → f32 [K, N]
+        let a_t = a.t()?.contiguous()?;
+        let grad_b = matmul_tc(&self.device, &a_t, &grad_f16)?;
+
+        // Cast output gradients to f16 to match input dtypes.
+        // Candle's gradient accumulation (backprop.rs:672) uses
+        // sum_grad.add(&arg_grad) without auto-casting — dtype
+        // mismatch would error.
+        Ok((
+            Some(grad_a.to_dtype(DType::F16)?),
+            Some(grad_b.to_dtype(DType::F16)?),
+        ))
     }
 }
 

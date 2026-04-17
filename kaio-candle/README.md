@@ -4,13 +4,11 @@
 [![Rust](https://img.shields.io/badge/rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 [![candle HEAD compat](https://github.com/dmriding/kaio/actions/workflows/candle-head.yml/badge.svg)](https://github.com/dmriding/kaio/actions/workflows/candle-head.yml)
 
-**Candle bridge for [KAIO](https://github.com/dmriding/kaio) — forward-only `CustomOp` bindings that let you call KAIO's tensor-core GPU kernels directly on `candle_core::Tensor`.**
+**Candle bridge for [KAIO](https://github.com/dmriding/kaio) — `CustomOp` bindings that let you call KAIO's tensor-core GPU kernels directly on `candle_core::Tensor`.**
 
-Ships eight ops today: `matmul_tc`, `matmul_tc_async`, `matmul_int4`, `matmul_int8`, `attention_tc`, `attention_tc_causal`, `qkv_project_int8`, `qkv_project_int4`. Backward kernels land in 7.4c.
+Ships eight ops: `matmul_tc`, `matmul_tc_async`, `matmul_int4`, `matmul_int8`, `attention_tc`, `attention_tc_causal`, `qkv_project_int8`, `qkv_project_int4`. `matmul_tc` and `matmul_tc_async` support backward (autograd); all other ops are forward-only.
 
-## Status — v0.1.0 (Sprint 7.4a + 7.4b)
-
-Forward-only. Inference / eval use cases only; training (autograd) is not yet supported — `bwd()` falls back to candle's `BackwardNotSupported`.
+## Status — v0.1.0 (Sprint 7.4a–7.4d)
 
 All ops are bit-exact verified against direct `kaio-ops` calls with the same input bits.
 
@@ -106,6 +104,20 @@ cargo run --release --features cuda --example attention_tc_candle
 `attention_tc` uses a shared-memory scores buffer capped at `seq_k ≤ 384`. FlashAttention-TC will lift this cap in a later sprint.
 
 `qkv_project_int8` and `qkv_project_int4` are **direct-call** functions (not `CustomOpN` — candle's trait maxes at 3 inputs and single output). They return `(Tensor, Tensor, Tensor)` with `DType::F16` output because the fused kernel performs the `f32→f16` conversion internally as part of the projection fusion. Gradient-tracked inputs are rejected with a loud error requiring `.detach()` — these ops are forward-only.
+
+## Backward support
+
+| Op | Backward | Notes |
+| --- | --- | --- |
+| `matmul_tc` | Supported | `dA = grad @ B^T`, `dB = A^T @ grad` via forward kernel |
+| `matmul_tc_async` | Supported | Same, uses `cp.async` variant in both directions |
+| `attention_tc` / `attention_tc_causal` | Not yet | FlashAttention backward requires new PTX kernels (Phase 8) |
+| `matmul_int4` / `matmul_int8` | No | Quantized inference ops — frozen weights, no backprop in practice |
+| `qkv_project_int8` / `qkv_project_int4` | No | Direct-call ops, inference-only by design |
+
+**Numerically approximate:** The backward implementation downcasts the f32 upstream gradient to f16 to reuse the existing tensor-core forward kernels, and casts the output gradients back to f16 to satisfy candle's dtype-matching constraint. This is an initial autograd integration proving the `bwd()` bridge pattern, not a final mixed-precision training stack.
+
+**Memory:** The backward pass materializes transposed tensors in VRAM (`.t()?.contiguous()` = allocation + copy). Peak backward memory is approximately 2–3x the forward input size. Designed for integration testing and light training, not high-throughput training loops where allocator overhead matters.
 
 ## Device lifetime
 

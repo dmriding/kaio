@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use candle_core::{CpuStorage, CudaStorage, CustomOp2, Error, Layout, Result, Shape, Tensor};
+use candle_core::{
+    CpuStorage, CudaStorage, CustomOp2, DType, Error, Layout, Result, Shape, Tensor,
+};
 use half::f16;
 use kaio::prelude::{GpuBuffer, KaioDevice};
 use kaio_ops::matmul_tc_async as kaio_matmul_tc_async;
@@ -100,6 +102,33 @@ impl CustomOp2 for MatmulTcAsyncOp {
         let out_slice = out_buf.into_cuda_slice();
         let out_storage = bridge::storage_from_slice::<f32>(out_slice, candle_dev);
         Ok((out_storage, Shape::from_dims(&[m_a, n_b])))
+    }
+
+    /// Backward pass: dA = grad @ B^T, dB = A^T @ grad.
+    ///
+    /// Uses the `matmul_tc_async` forward kernel for backward — same
+    /// cp.async variant in both directions for consistent perf.
+    /// See [`MatmulTcOp::bwd`](super::matmul_tc::MatmulTcOp) for the
+    /// full precision + memory documentation; identical constraints apply.
+    fn bwd(
+        &self,
+        a: &Tensor,
+        b: &Tensor,
+        _res: &Tensor,
+        grad_res: &Tensor,
+    ) -> Result<(Option<Tensor>, Option<Tensor>)> {
+        let grad_f16 = grad_res.to_dtype(DType::F16)?;
+
+        let b_t = b.t()?.contiguous()?;
+        let grad_a = matmul_tc_async(&self.device, &grad_f16, &b_t)?;
+
+        let a_t = a.t()?.contiguous()?;
+        let grad_b = matmul_tc_async(&self.device, &a_t, &grad_f16)?;
+
+        Ok((
+            Some(grad_a.to_dtype(DType::F16)?),
+            Some(grad_b.to_dtype(DType::F16)?),
+        ))
     }
 }
 
