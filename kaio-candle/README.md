@@ -6,9 +6,9 @@
 
 **Candle bridge for [KAIO](https://github.com/dmriding/kaio) — forward-only `CustomOp` bindings that let you call KAIO's tensor-core GPU kernels directly on `candle_core::Tensor`.**
 
-Ships five ops today: `matmul_tc`, `matmul_tc_async`, `matmul_int4`, `attention_tc`, `attention_tc_causal`. Backward kernels and the remaining quant ops (`matmul_int8`, `qkv_project_int{4,8}`) land in follow-up sprints.
+Ships six ops today: `matmul_tc`, `matmul_tc_async`, `matmul_int4`, `matmul_int8`, `attention_tc`, `attention_tc_causal`. Backward kernels and the fused tri-output quant ops (`qkv_project_int{4,8}`) land in follow-up sprints.
 
-## Status — v0.1.0 (Sprint 7.4a)
+## Status — v0.1.0 (Sprint 7.4a + 7.4b-part1)
 
 Forward-only. Inference / eval use cases only; training (autograd) is not yet supported — `bwd()` falls back to candle's `BackwardNotSupported`.
 
@@ -77,11 +77,12 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-Two runnable examples ship in `examples/`:
+Three runnable examples ship in `examples/`:
 
 ```sh
 cd kaio-candle
 cargo run --release --features cuda --example matmul_tc_candle
+cargo run --release --features cuda --example matmul_int8_candle
 cargo run --release --features cuda --example attention_tc_candle
 ```
 
@@ -92,10 +93,13 @@ cargo run --release --features cuda --example attention_tc_candle
 | `matmul_tc(kd, a, b)` | `CustomOp2` | `a: [M, K]`, `b: [K, N]` → `[M, N]` | f16 × f16 → f32 |
 | `matmul_tc_async(kd, a, b)` | `CustomOp2` | same | f16 × f16 → f32 |
 | `matmul_int4(kd, a, b_packed, scales)` | `CustomOp3` | `a: [M, K]`, `b_packed: [K/8, N]`, `scales: [K/128, N]` → `[M, N]` | f16 × u32 × f16 → f32 |
+| `matmul_int8(kd, a, b, scale)` | `CustomOp2` | `a: [M, K]`, `b: [K, N]` → `[M, N]` | u8-as-i8 × u8-as-i8 → f32 (× f32 scale) |
 | `attention_tc(kd, q, k, v)` | `CustomOp3` | `q: [seq_q, d_k]`, `k: [seq_k, d_k]`, `v: [seq_k, d_v]` → `[seq_q, d_v]` | f16 × f16 × f16 → f32 |
 | `attention_tc_causal(kd, q, k, v)` | `CustomOp3` | same | f16 × f16 × f16 → f32 |
 
 `matmul_int4` is GPTQ-style: `group_size=128` is locked in by the kaio-ops kernel contract. `K` must be a multiple of 128, weights are packed 8 INT4 values per `u32`, one f16 scale per group of 128 elements.
+
+`matmul_int8` is W8A8 symmetric quant. Candle has no `DType::I8`, so the convention is `DType::U8` tensors whose bytes are interpreted as signed INT8 (`-128..=127`) by the kernel. The bridge reinterprets the storage via a same-layout transmute. `scale` is a scalar `f32` applied in the accumulator; a typical realistic value is `max_abs / 127`.
 
 `attention_tc` uses a shared-memory scores buffer capped at `seq_k ≤ 384`. FlashAttention-TC will lift this cap in a later sprint.
 

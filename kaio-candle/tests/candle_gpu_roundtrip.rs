@@ -396,3 +396,122 @@ fn attention_tc_causal_bit_exact_64x64() -> anyhow::Result<()> {
 fn attention_tc_causal_bit_exact_256x128() -> anyhow::Result<()> {
     bit_exact_attention_tc(256, 256, 128, 128, true)
 }
+
+// ---------------------------------------------------------------------------
+// matmul_int8 bit-exact cross-check (W8A8 symmetric, scalar f32 scale)
+// ---------------------------------------------------------------------------
+
+fn bit_exact_matmul_int8(m: usize, n: usize, k: usize, scale: f32) -> anyhow::Result<()> {
+    // Deterministic signed-INT8 patterned data. `as u8` is a bit-preserving
+    // cast for i8 → u8 (-1_i8 is 255_u8), so candle's DType::U8 storage
+    // and kaio-ops' GpuBuffer<i8> see the exact same bytes on the device.
+    let a_host_i8: Vec<i8> = (0..m * k)
+        .map(|i| (((i % 127) as i32) - 63) as i8)
+        .collect();
+    let b_host_i8: Vec<i8> = (0..k * n).map(|i| (((i % 97) as i32) - 48) as i8).collect();
+    let a_host_u8: Vec<u8> = a_host_i8.iter().map(|&x| x as u8).collect();
+    let b_host_u8: Vec<u8> = b_host_i8.iter().map(|&x| x as u8).collect();
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // Candle path — DType::U8 tensors, bridge reinterprets as i8 internally.
+    let a_candle = Tensor::from_vec(a_host_u8, (m, k), &candle_dev)?;
+    let b_candle = Tensor::from_vec(b_host_u8, (k, n), &candle_dev)?;
+    let c_candle = kaio_candle::matmul_int8(&kaio_dev, &a_candle, &b_candle, scale)?;
+    let c_candle_host: Vec<f32> = c_candle.flatten_all()?.to_vec1::<f32>()?;
+
+    // Direct kaio-ops path — native i8 GpuBuffers.
+    let a_buf = kaio_dev.alloc_from(&a_host_i8)?;
+    let b_buf = kaio_dev.alloc_from(&b_host_i8)?;
+    let mut c_buf = kaio_dev.alloc_zeros::<f32>(m * n)?;
+    kaio_ops::matmul_int8(
+        &kaio_dev, &a_buf, &b_buf, &mut c_buf, scale, m as u32, n as u32, k as u32,
+    )?;
+    let c_kaio_host: Vec<f32> = c_buf.to_host(&kaio_dev)?;
+
+    assert_eq!(
+        c_candle_host.len(),
+        c_kaio_host.len(),
+        "output length mismatch"
+    );
+    for (i, (cc, ck)) in c_candle_host.iter().zip(c_kaio_host.iter()).enumerate() {
+        assert_eq!(
+            cc.to_bits(),
+            ck.to_bits(),
+            "bit mismatch at element {i}: candle={cc} kaio={ck} (shapes {m}x{n}x{k}, scale={scale})"
+        );
+    }
+    Ok(())
+}
+
+// Scale values span three regimes:
+//   - 0.00125 — realistic INT8 quant (≈ max_abs / 127)
+//   - 1.0     — identity
+//   - 47.3    — large
+// A dropped-scale bug produces obviously-wrong output in at least two of
+// these, and the failing test's scale localises which regime broke.
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_int8_bit_exact_256_small_scale() -> anyhow::Result<()> {
+    bit_exact_matmul_int8(256, 256, 256, 0.00125)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_int8_bit_exact_1024_identity_scale() -> anyhow::Result<()> {
+    bit_exact_matmul_int8(1024, 1024, 1024, 1.0)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_int8_bit_exact_4096_large_scale() -> anyhow::Result<()> {
+    bit_exact_matmul_int8(4096, 4096, 4096, 47.3)
+}
+
+/// Transposed tensor → non-contiguous → bridge must reject loudly.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_int8_rejects_noncontiguous() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a = Tensor::zeros((64, 64), candle_core::DType::U8, &candle_dev)?;
+    let b = Tensor::zeros((64, 64), candle_core::DType::U8, &candle_dev)?;
+
+    let a_nc = a.t()?;
+    assert!(
+        !a_nc.is_contiguous(),
+        "setup sanity: .t() should be non-contiguous"
+    );
+
+    let err = kaio_candle::matmul_int8(&kaio_dev, &a_nc, &b, 1.0).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous"),
+        "expected contiguity rejection message, got: {msg}"
+    );
+    Ok(())
+}
+
+/// `.narrow(...)` on a base tensor produces a contiguous view with non-zero
+/// offset (or non-contiguous, depending on axis) → bridge must reject.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_int8_rejects_nonzero_offset() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let base = Tensor::zeros((128, 64), candle_core::DType::U8, &candle_dev)?;
+    let a_off = base.narrow(0, 64, 64)?;
+    let b = Tensor::zeros((64, 64), candle_core::DType::U8, &candle_dev)?;
+
+    let err = kaio_candle::matmul_int8(&kaio_dev, &a_off, &b, 1.0).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous") || msg.contains("offset"),
+        "expected contiguity or offset rejection, got: {msg}"
+    );
+    Ok(())
+}

@@ -4,19 +4,20 @@
 //! [candle](https://github.com/huggingface/candle) and the
 //! [KAIO](https://github.com/dmriding/kaio) GPU kernel library.
 //!
-//! ## Status — v0.1.0 (Sprint 7.4a)
+//! ## Status — v0.1.0 (Sprint 7.4a + 7.4b-part1)
 //!
 //! Currently bridges the LLM-inference-forward trinity plus two
-//! zero-incremental-cost neighbours:
+//! zero-incremental-cost neighbours and the W8A8 matmul:
 //!
 //! - `matmul_tc` — f16 × f16 → f32 matmul via KAIO tensor-core kernel.
 //! - `matmul_tc_async` — same, `cp.async` variant (92.5% cuBLAS sgemm at 4096² on sm_89).
 //! - `matmul_int4` — GPTQ-style INT4 dequantize-matmul with f16 group scales.
+//! - `matmul_int8` — W8A8 symmetric-quant matmul with scalar f32 scale (80–94 TOPS at 4096³ on sm_89).
 //! - `attention_tc` — fused tensor-core scaled-dot-product attention.
 //! - `attention_tc_causal` — same, with decoder causal mask.
 //!
-//! Backward kernels + remaining quant ops (`matmul_int8`, `qkv_project_int{4,8}`)
-//! land in 7.4b / 7.4c.
+//! Backward kernels + fused tri-output quant ops (`qkv_project_int{4,8}`)
+//! land in 7.4b-part2 / 7.4c.
 //!
 //! ## Build requirements
 //!
@@ -109,3 +110,8 @@ pub use matmul_int4::{MatmulInt4Op, matmul_int4};
 mod attention_tc;
 #[cfg(feature = "cuda")]
 pub use attention_tc::{AttentionTcOp, attention_tc, attention_tc_causal};
+
+#[cfg(feature = "cuda")]
+mod matmul_int8;
+#[cfg(feature = "cuda")]
+pub use matmul_int8::{MatmulInt8Op, matmul_int8};

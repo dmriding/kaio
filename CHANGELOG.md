@@ -10,6 +10,44 @@ Updated at phase completion. Per-sprint detail lives in
 
 ## [Unreleased]
 
+### Sprint 7.4b-part1 — `kaio-candle::matmul_int8` binding
+
+Adds the sixth forward `CustomOp` binding to `kaio-candle`: W8A8
+symmetric-quant matmul (`i8 × i8 → f32` with a scalar `f32` scale).
+Clean continuation of the 7.4a pattern — zero new bridge primitives,
+scalar scale threaded through the op struct the same way
+`AttentionTcOp::causal` is. The larger part2 sprint (fused tri-output
+`qkv_project_int{4,8}` via a new direct-call pattern) ships next.
+
+#### Added — Sprint 7.4b-part1
+
+- **`kaio_candle::matmul_int8`** — `CustomOp2` wrapper around
+  `kaio_ops::matmul_int8`. Signature:
+  `matmul_int8(device, a: &Tensor, b: &Tensor, scale: f32) -> Result<Tensor>`.
+- **`kaio-candle/examples/matmul_int8_candle.rs`** — runnable
+  demonstration, small shape (128³), fixed scale.
+
+#### Changed — Sprint 7.4b-part1
+
+- **Dtype convention: `DType::U8`-as-INT8 on the candle side.** candle
+  has no `DType::I8` variant; the standard convention is `DType::U8`
+  with bytes interpreted as signed INT8 (`-128..=127`). The bridge
+  reinterprets the storage via a same-layout (size + alignment)
+  transmute from `&CudaSlice<u8>` to `&CudaSlice<i8>`, sound because
+  cudarc's `CudaSlice<T>` carries `T` only as a `PhantomData` marker
+  and the transmute is metadata-only. Documented in the op's module
+  rustdoc and in `kaio-candle/README.md`.
+
+#### Tests — Sprint 7.4b-part1
+
+- **5 new GPU integration tests** (`#[ignore]`-gated): 3 bit-exact
+  cross-checks at 256³ / 1024³ / 4096³, 2 rejection tests (`.t()` +
+  `.narrow(...)`). Scale values spread across three regimes
+  (`0.00125 / 1.0 / 47.3`) so a dropped-scale bug produces
+  obviously-wrong output in at least two of the three tests. All green
+  on RTX 4090 sm_89.
+- **Total `kaio-candle` GPU tests: 20** (was 15).
+
 ### Sprint 7.4a — `kaio-candle` bridge crate (forward-only)
 
 New standalone crate at `kaio-candle/` bridging candle's `Tensor` API
