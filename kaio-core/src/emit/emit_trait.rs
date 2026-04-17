@@ -149,14 +149,18 @@ impl Emit for PtxInstruction {
                 // consistency and PTX validity, even where the conversion is
                 // exact (e.g., f16→f32).
                 let rounding = match (dst_ty, src_ty) {
-                    // int → float (including half): round to nearest even
+                    // int → float (including half): round to nearest even.
+                    // PTX requires `.rn` even for exact conversions like s8→f16
+                    // (ptxas rejects bare `cvt.f16.s8` with "Rounding modifier
+                    // required for instruction 'cvt'"); spec wording about
+                    // optional modifiers does not match real ptxas validation.
                     (
                         PtxType::F16 | PtxType::BF16 | PtxType::F32 | PtxType::F64,
-                        PtxType::S32 | PtxType::U32 | PtxType::S64 | PtxType::U64,
+                        PtxType::S8 | PtxType::S32 | PtxType::U32 | PtxType::S64 | PtxType::U64,
                     ) => ".rn",
                     // float (including half) → int: round toward zero (matches Rust `as`)
                     (
-                        PtxType::S32 | PtxType::U32 | PtxType::S64 | PtxType::U64,
+                        PtxType::S8 | PtxType::S32 | PtxType::U32 | PtxType::S64 | PtxType::U64,
                         PtxType::F16 | PtxType::BF16 | PtxType::F32 | PtxType::F64,
                     ) => ".rzi",
                     // float → float (any width, including half): round to nearest
@@ -173,6 +177,23 @@ impl Emit for PtxInstruction {
                     src_ty.ptx_suffix()
                 );
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, src])
+            }
+            Self::MovPack { dst, srcs, ty } => {
+                // mov.b{N} %dst, {%s0,%s1,...};
+                //
+                // The vector-pack form of `mov` requires the typeless `.b{N}`
+                // suffix (PTX ISA 9.7.9.10) — `mov.u32 %r, {%h0, %h1};` is
+                // rejected by ptxas. We derive `.b{N}` from the destination
+                // type's byte width.
+                let joined = srcs
+                    .iter()
+                    .map(|r| format!("{r}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let src_list = format!("{{{joined}}}");
+                let bits = ty.size_bytes() * 8;
+                let mnemonic = format!("mov.b{bits}");
+                w.instruction(&mnemonic, &[dst as &dyn fmt::Display, &src_list])
             }
             Self::Label(name) => {
                 // Labels are at column 0 — dedent, emit, re-indent.
@@ -387,6 +408,22 @@ mod tests {
         let instr = PtxInstruction::Comment("bounds check".to_string());
         instr.emit(&mut w).unwrap();
         assert_eq!(w.finish(), "    // bounds check\n");
+    }
+
+    #[test]
+    fn emit_mov_pack_two_f16_into_b32() {
+        let mut w = PtxWriter::new();
+        w.indent();
+        let instr = PtxInstruction::MovPack {
+            dst: reg(RegKind::R, 7, PtxType::U32),
+            srcs: vec![
+                reg(RegKind::H, 3, PtxType::F16),
+                reg(RegKind::H, 4, PtxType::F16),
+            ],
+            ty: PtxType::U32,
+        };
+        instr.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    mov.b32 %r7, {%h3,%h4};\n");
     }
 
     /// End-to-end emitter test: a mini f16 kernel proving half types flow

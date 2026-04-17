@@ -43,10 +43,24 @@
 
 mod attention_kernel;
 mod attention_tc_kernel;
+mod matmul_int4_kernel;
 mod matmul_int8_kernel;
 mod matmul_kernel;
 mod matmul_tc_async_kernel;
 mod matmul_tc_kernel;
+// Sprint 7.3 — fused tri-output QKV projection. INT8 (W8A16) is the MVS
+// deliverable; INT4 (W4A16) is contingent on D2.5 register budget and
+// D5/D6/D7 correctness gates. Public `pub use` wiring lands at D4 / D6.
+mod qkv_project_int4_kernel;
+mod qkv_project_int8_kernel;
+// Shared emit helpers that outlive any single kernel module.
+// Currently hosts the fragment-C → packed-f16 global store path used by
+// both qkv_project variants (D2).
+mod store_out;
+// D2.5 register-pressure skeleton for the tri-output QKV projection.
+// Test-only module; excluded from release builds via its inner `#![cfg(test)]`.
+#[cfg(test)]
+mod qkv_skeleton;
 mod tuner;
 
 pub use attention_kernel::{attention, attention_causal, attention_flash, attention_flash_causal};
@@ -76,6 +90,28 @@ pub use matmul_tc_kernel::matmul_tc;
 // additive refinements. Sync-only; async INT8 deferred to 7.1.5+.
 // Requires SM 8.0+ (Ampere) and K%32==0.
 pub use matmul_int8_kernel::matmul_int8;
+
+// Sprint 7.2 — INT4 symmetric dequantize-matmul, W4A16 GPTQ-style
+// packed 4-bit weights with f16 group scales (group_size=128).
+// DEQUANT-F16 path: per-lane unpack + sign-extend + cvt + scale-fold →
+// mma.sync.m16n8k16.f16.f16.f32. Reference quant op — not a drop-in
+// for external GPTQ/GGUF model formats. Requires SM 8.0+ and K%128==0.
+pub use matmul_int4_kernel::matmul_int4;
+
+// Sprint 7.3 MVS — fused tri-output INT8 QKV projection (W8A16: f16
+// activations × i8 weights, scalar per-projection scales). Single launch
+// produces three GpuBuffer<f16> outputs ready for attention_tc. Saves
+// 2× global activation reads vs three matmul_int8 calls. Per-block tile:
+// 64×16 (Rollback #1 from D3.4 register-pressure trigger). 7-barrier
+// Design-S K-tile cadence. Requires SM 8.0+ and K%16==0, N%2==0.
+pub use qkv_project_int8_kernel::qkv_project_int8;
+
+// Sprint 7.3 contingent — fused tri-output INT4 QKV projection (W4A16:
+// f16 activations × packed-INT4 weights × f16 group scales, group_size=128).
+// Same Design-S serial fusion as the INT8 path; group-scale reload folds
+// into the per-projection W load epoch on group-boundary K-tiles. Per-block
+// tile 64×16 (Rollback #1 mirror). Requires SM 8.0+ and K%128==0, N%2==0.
+pub use qkv_project_int4_kernel::qkv_project_int4;
 
 // TEMP: Sprint 6.6 final `attention_tc` + `attention_tc_causal` —
 // fused TC scaled dot-product attention. #[doc(hidden)] pub use

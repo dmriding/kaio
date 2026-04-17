@@ -272,7 +272,16 @@ crate layered on top of the forward kernels.
 **Status:** In progress (7.0 DSL completeness complete, v0.2.1; 7.0.5
 ergonomics fast-track complete, v0.2.2; **7.1 INT8 dequantize-matmul
 complete, v0.3.0** — 4096³ at 80–94 TOPS i8 ops (median ~89) on RTX 4090
-sm_89, bit-exact vs CPU reference across the adversarial test matrix)
+sm_89, bit-exact vs CPU reference across the adversarial test matrix;
+**7.1.5 DSL reductions complete** on `phase7-rest` — `warp_reduce_sum/max/min`
+and `block_reduce_min` added with a whole-warp-multiple compile-time
+guard; no independent release, ships in the Phase 7 aggregate release
+after 7.3 / 7.4; **7.2 INT4 matmul complete** on the same branch —
+`kaio_ops::matmul_int4` W4A16 GPTQ-style, `mma.sync.m16n8k16.f16.f16.f32`
+via DEQUANT-F16 chain; 4096³ median ~57 TOPS (range 49–58 across 6
+xtask-bench runs, 95–116% of cuBLAS sgemm) on RTX 4090 sm_89; 12/12
+GPU round-trip tests pass bit-exact incl. sign-extend canaries; no
+regressions in `matmul_tc` or `matmul_int8` across the same runs)
 
 **Depends on:** Phase 6 complete (v0.2.1, 2026-04-14).
 
@@ -297,8 +306,8 @@ for the detailed sprint breakdown, architectural decisions, and risks.
 | 7.0 | DSL completeness (bitops + short-circuit `&&` / `\|\|` + compound bitwise assign) + Phase 6 closeout + Phase 7 scaffold | Complete (v0.2.1, combined with Sprint 6.10) |
 | 7.0.5 | Pre-7.1 ergonomics fast-track — debug-build performance note, proc-macro error-span audit, consolidated debugging guide | Complete (v0.2.2) |
 | 7.1 | INT8 dequantize-matmul (forward) — `kaio_ops::matmul_int8`, W8A8 symmetric, single-scalar scale, `K%32==0`, sync-only. Path FAST (direct `mma.sync.m16n8k32.s8.s8.s32`). 80–94 TOPS i8 ops at 4096³ on RTX 4090 sm_89 (median ~89 across 6 runs). | **Complete (v0.3.0)** |
-| 7.1.5 | Warp + block reductions in DSL (optional, between quant milestones) | Planned |
-| 7.2 | INT4 dequantize-matmul (GPTQ-style packed 4-bit) | Planned |
+| 7.1.5 | Warp + block reductions in DSL — `warp_reduce_sum/max/min` + `block_reduce_min` as `#[gpu_kernel]` builtins, with a whole-warp-multiple compile-time guard. | **Complete (ships in Phase 7 aggregate)** |
+| 7.2 | INT4 dequantize-matmul (GPTQ-style packed 4-bit) | **Complete (ships in Phase 7 aggregate)** |
 | 7.3 | Quant + attention integration | Planned |
 | 7.4 | `kaio-candle` bridge crate (forward + backward kernels via `CustomOp`) | Planned |
 

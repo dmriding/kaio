@@ -55,7 +55,7 @@ fn tc_matmul_small_32_16_32() {
     run_matmul_tc_test(32, 16, 32, "small");
 }
 
-/// Non-square test (Opus review catch): many M blocks, one N block,
+/// Non-square test (review catch): many M blocks, one N block,
 /// one K tile. Catches `block_idx_x` ↔ `block_idx_y` swaps that square
 /// dimensions would mask.
 #[test]

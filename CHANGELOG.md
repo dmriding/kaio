@@ -8,7 +8,507 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased]
+## [0.4.0] — 2026-04-18 — Phase 7: Quantization, Attention, Candle Bridge
+
+### Sprint 7.4d — matmul_tc + matmul_tc_async backward
+
+Analytical backward (`CustomOp2::bwd()`) for `matmul_tc` and
+`matmul_tc_async` — candle autograd integration via forward kernel
+reuse. Zero new PTX kernels.
+
+#### Added — Sprint 7.4d
+
+- **`MatmulTcOp::bwd()`** — computes `dA = grad @ B^T` and
+  `dB = A^T @ grad` via two `matmul_tc()` forward calls. Casts f32
+  gradient to f16 for kernel input, casts output gradients back to f16
+  to satisfy candle's dtype-matching constraint.
+- **`MatmulTcAsyncOp::bwd()`** — same implementation using
+  `matmul_tc_async()` for consistent kernel variant in both directions.
+- **6 gradient-correctness GPU tests** — numerical finite-difference
+  checks across 3 shapes (small square, medium square, non-square).
+  Dual tolerance: `rel_err < 1e-2 || abs_err < 1e-3`.
+- **Total `kaio-candle` GPU tests: 39** (was 33).
+
+### Sprint 7.4c — Event-based stream synchronization
+
+Replaced `cuCtxSynchronize` fences with event-based cross-stream sync
+via cudarc's `CudaStream::join()` (`cuEventRecord` + `cuStreamWaitEvent`
+internally). GPU-side only — no CPU blocking.
+
+#### Changed — Sprint 7.4c
+
+- **`bridge::sync_before_launch` + `sync_after_launch`** internals
+  replaced. Now use `kaio_stream.join(&candle_stream)` /
+  `candle_stream.join(&kaio_stream)` for cross-stream event
+  synchronization. Signature gains `&KaioDevice` parameter (both
+  streams needed). All 7 call sites updated.
+- **CUDA Graph capture partially unblocked.** The prior
+  `cuCtxSynchronize` blocker is removed. However, full Graph capture
+  requires non-default streams on both sides, which remains unverified.
+- **Bench-gap caveat updated.** The worst overhead source
+  (`cuCtxSynchronize`) is removed. Dynamic event creation
+  (`record_event(None)`) introduces its own micro-overhead; event
+  handle caching is a future optimization.
+
+#### Added — Sprint 7.4c
+
+- **`bridge::driver_err`** — cudarc `DriverError` → candle `Error`
+  converter, used by the event-based sync functions.
+- **API-path smoke test** — validates that the event/join API path
+  executes without error on real hardware.
+
+### Sprint 7.4b-part2 — Direct-call bridge pattern + `qkv_project_int{4,8}`
+
+New **direct-call bridge pattern** in `kaio-candle` for ops that exceed
+candle's `CustomOpN` arity (max 3 inputs, single output). Two fused
+tri-output QKV projection bindings ship as the first users of this
+pattern: `qkv_project_int8` (W8A16, 4 tensor + 3 scalar inputs) and
+`qkv_project_int4` (W4A16, 7 tensor inputs). Both return
+`(Tensor, Tensor, Tensor)` with `DType::F16` output — the fused kernel
+performs `f32→f16` conversion internally.
+
+#### Added — Sprint 7.4b-part2
+
+- **`kaio_candle::qkv_project_int8`** — direct-call W8A16 fused
+  tri-output QKV projection. `x: f16[M,K]`, three `u8-as-i8[K,N]`
+  weight tensors, three `f32` per-projection scales → three `f16[M,N]`
+  output tensors.
+- **`kaio_candle::qkv_project_int4`** — direct-call W4A16 fused
+  tri-output QKV projection. `x: f16[M,K]`, three `u32[K/8,N]`
+  packed-weight tensors, three `f16[K/128,N]` group-scale tensors →
+  three `f16[M,N]` output tensors. `group_size=128` locked.
+- **`bridge::reinterpret_u8_slice_as_i8`** promoted from
+  `matmul_int8.rs` to `bridge.rs` — single definition for the
+  `DType::U8`-as-INT8 convention, shared by `matmul_int8` and
+  `qkv_project_int8`.
+- **`bridge::ensure_rank2_contiguous_zero_offset_named`** — named-
+  parameter variant of the existing shape gate, used by direct-call
+  ops for error messages that cite parameter names (`w_k: ...`) rather
+  than numeric indices.
+- **Autograd disconnection guard** — direct-call ops reject gradient-
+  tracked inputs with a loud error requiring `.detach()`. Prevents
+  silent computation-graph severance.
+
+#### Tests — Sprint 7.4b-part2
+
+- **12 new GPU integration tests** (`#[ignore]`-gated): 5 bit-exact
+  cross-checks (2 int8 shapes + 3 int4 shapes including K=512 for
+  4-group coverage), 2 Q/K/V differentiation canaries (INT8 + INT4),
+  5 rejection tests. All green on RTX 4090 sm_89.
+- **Total `kaio-candle` GPU tests: 32** (was 20).
+
+### Sprint 7.4b-part1 — `kaio-candle::matmul_int8` binding
+
+Adds the sixth forward `CustomOp` binding to `kaio-candle`: W8A8
+symmetric-quant matmul (`i8 × i8 → f32` with a scalar `f32` scale).
+Clean continuation of the 7.4a pattern — zero new bridge primitives,
+scalar scale threaded through the op struct the same way
+`AttentionTcOp::causal` is. The larger part2 sprint (fused tri-output
+`qkv_project_int{4,8}` via a new direct-call pattern) ships next.
+
+#### Added — Sprint 7.4b-part1
+
+- **`kaio_candle::matmul_int8`** — `CustomOp2` wrapper around
+  `kaio_ops::matmul_int8`. Signature:
+  `matmul_int8(device, a: &Tensor, b: &Tensor, scale: f32) -> Result<Tensor>`.
+- **`kaio-candle/examples/matmul_int8_candle.rs`** — runnable
+  demonstration, small shape (128³), fixed scale.
+
+#### Changed — Sprint 7.4b-part1
+
+- **Dtype convention: `DType::U8`-as-INT8 on the candle side.** candle
+  has no `DType::I8` variant; the standard convention is `DType::U8`
+  with bytes interpreted as signed INT8 (`-128..=127`). The bridge
+  reinterprets the storage via a same-layout (size + alignment)
+  transmute from `&CudaSlice<u8>` to `&CudaSlice<i8>`, sound because
+  cudarc's `CudaSlice<T>` carries `T` only as a `PhantomData` marker
+  and the transmute is metadata-only. Documented in the op's module
+  rustdoc and in `kaio-candle/README.md`.
+
+#### Tests — Sprint 7.4b-part1
+
+- **5 new GPU integration tests** (`#[ignore]`-gated): 3 bit-exact
+  cross-checks at 256³ / 1024³ / 4096³, 2 rejection tests (`.t()` +
+  `.narrow(...)`). Scale values spread across three regimes
+  (`0.00125 / 1.0 / 47.3`) so a dropped-scale bug produces
+  obviously-wrong output in at least two of the three tests. All green
+  on RTX 4090 sm_89.
+- **Total `kaio-candle` GPU tests: 20** (was 15).
+
+### Sprint 7.4a — `kaio-candle` bridge crate (forward-only)
+
+New standalone crate at `kaio-candle/` bridging candle's `Tensor` API
+onto KAIO's forward tensor-core kernels. Five forward-only `CustomOp`
+bindings land in this sprint: `matmul_tc`, `matmul_tc_async`,
+`matmul_int4`, `attention_tc`, `attention_tc_causal`. Backward ops and
+the remaining quant ops (`matmul_int8`, `qkv_project_int{4,8}`) follow
+in 7.4b / 7.4c.
+
+`kaio-candle` is **not** a member of the main KAIO workspace. cudarc
+rejects `dynamic-loading` + `dynamic-linking` as simultaneously active
+features; main KAIO defaults to `dynamic-loading` (no CUDA toolkit
+required for CI host builds), candle-core needs `dynamic-linking`.
+Cargo unions features across a workspace build, so including
+`kaio-candle` in the main workspace would break no-CUDA CI. The crate
+lives standalone and consumes `kaio` / `kaio-ops` with
+`default-features = false, features = ["dynamic-linking"]`.
+
+#### Added — Sprint 7.4a
+
+- **`kaio-candle` crate** — new crate at repo root, excluded from the
+  workspace. `cargo build --features cuda` for the bridge surface;
+  `--no-default-features` compiles as an empty shell for no-CUDA
+  consumers.
+- **`kaio_candle::matmul_tc`** + **`matmul_tc_async`** — `CustomOp2`
+  wrappers around the f16 × f16 → f32 tensor-core matmul kernels.
+- **`kaio_candle::matmul_int4`** — `CustomOp3` wrapper around the
+  GPTQ-style INT4 dequantize-matmul. Group size locked at 128,
+  `K % 128 == 0`.
+- **`kaio_candle::attention_tc`** + **`attention_tc_causal`** —
+  `CustomOp3` wrappers around the fused tensor-core scaled-dot-product
+  attention. `seq_k ≤ 384` per the kaio-ops shared-memory cap.
+- **Input contract gate** — every bridge call rejects rank ≠ 2,
+  non-contiguous, or non-zero-offset inputs with concrete error
+  messages and a reshape hint. Multi-head attention callers flatten
+  `[heads, seq, d]` → `[heads * seq, d]` or go per-head.
+- **Weekly candle-HEAD compat CI** — `.github/workflows/candle-head.yml`
+  builds `kaio-candle` against candle-core's git `main` once per Monday.
+  Step-level `continue-on-error` plus auto-issue on failure via
+  `peter-evans/create-issue-from-file@v5`.
+- **Runnable examples** — `kaio-candle/examples/matmul_tc_candle.rs`
+  and `attention_tc_candle.rs`, small shapes so they finish fast.
+
+#### Changed — Sprint 7.4a
+
+- **`kaio-runtime` `GpuBuffer<T>` made `#[repr(transparent)]`** over
+  `CudaSlice<T>` with compile-time `static_assertions` checks in
+  `repr_soundness`. `GpuBuffer::from_cuda_slice` promoted from
+  `pub(crate)` to `pub`; `into_cuda_slice` added. Enables the bridge's
+  read-only newtype cast.
+- **`kaio-runtime` `KaioDevice::ordinal()`** added (public accessor on
+  the wrapper) so the bridge can check ordinal equality against the
+  candle `CudaDevice`.
+- **cudarc loading strategy becomes a per-crate feature flag** across
+  `kaio-runtime`, `kaio`, and `kaio-ops`. Defaults unchanged
+  (`dynamic-loading` active by default, no CUDA toolkit needed for
+  main-workspace builds); `dynamic-linking` is now opt-in per crate,
+  which is how `kaio-candle` converges with candle-core's cudarc
+  feature set. Downstream consumers using default features see no
+  behaviour change.
+
+#### Tests — Sprint 7.4a
+
+- **15 `kaio-candle` GPU integration tests** (`#[ignore]`-gated):
+  12 bit-exact cross-checks against direct `kaio-ops` calls across
+  the five ops at 2–3 shapes each, plus 3 rejection tests exercising
+  `.t()` non-contiguous, `.narrow(...)` non-zero-offset, and `matmul_int4`
+  K not multiple of 128. All green on RTX 4090 sm_89.
+- **4 host tests** exercising the rank + contiguity + offset gate.
+
+#### Notes — Sprint 7.4a
+
+- **No CPU fallback.** `cpu_fwd` returns a loud error. KAIO's value is
+  GPU-specific PTX; a silent CPU fallback would mask every perf claim.
+- **`DType::F32` output contract** matches the `kaio-ops` accumulator.
+  Cast via `.to_dtype(DType::F16)?` downstream if needed.
+- **CUDA Graph capture incompatible.** The bridge issues
+  `cuCtxSynchronize` fences on either side of each launch for stream
+  safety; this is banned inside a capture region. Event-based stream
+  plumbing in 7.4c unblocks CUDA Graph usage.
+- **crates.io publish** waits for a `kaio` patch release that
+  exposes the `dynamic-linking` feature on crates.io.
+
+### Sprint 7.3 — Fused tri-output QKV projection (`qkv_project_int8` + `qkv_project_int4`)
+
+Fused projection kernels producing three `f16` outputs from one kernel
+launch — Q, K, V projections share a single load of the input
+activation X per K-tile and accumulate into three independent
+fragment-C banks. Output format matches `attention_tc`'s f16 input
+contract, so the pipeline `X → qkv_project → attention_tc` is one
+kernel launch + one attention launch total (vs four in the naive path:
+three separate projection launches + attention). No independent
+crates.io release — Phase 7 closes with an aggregate release after 7.4.
+
+#### Added — Sprint 7.3
+
+- **`kaio_ops::qkv_project_int8`** — **W8A16** (f16 activations × i8
+  weights) fused tri-output projection with scalar per-projection
+  `f32` scales. Single kernel launch produces three `GpuBuffer<f16>`
+  outputs ready to feed [`attention_tc`]. Does **not** require i8
+  activations — users who genuinely need W8A8 call `matmul_int8` three
+  times. `K % 16 == 0` and `N % 2 == 0`. Requires SM 8.0+.
+- **`kaio_ops::qkv_project_int4`** — **W4A16** (f16 activations ×
+  packed signed-INT4 weights × f16 group scales) fused tri-output
+  projection. Same packing convention as `matmul_int4` (8 signed
+  nibbles per u32, K-contiguous, col-major `[K/8, N]`). Group size
+  fixed at 128 for v1; `K % 128 == 0` required. Not a drop-in for
+  AutoGPTQ / exllama / GGUF formats.
+- **`emit_store_fragment_c_f32_to_f16_packed`** (shared helper in
+  `kaio-ops/src/store_out.rs`) — fragment-C f32 → packed-f16 global
+  store chain (`cvt.rn.f16.f32` + `MovPack` + `st.global.u32`) with
+  optional scalar scale. Reused by both INT8 (scale-at-store-out) and
+  INT4 (scale folded into fragment B during dequant, pass `None`).
+- **`kaio-core` `cvt` emitter extended to S8 source** — fixes
+  `cvt.f16.s8` rejection by ptxas ("Rounding modifier required"). Any
+  kernel doing `int8 → f16` now emits `cvt.rn.f16.s8` explicitly.
+- **`examples/quantized_attention/`** — end-to-end showcase:
+  GPTQ-lite quantize → `qkv_project_int4` → `attention_tc` with an f16
+  reference path for correctness + quality metrics (cosine similarity,
+  max abs, mean rel). Wired into `cargo xtask showcase qkvattn`.
+
+#### Tests — Sprint 7.3
+
+- **7 `qkv_project_int8` GPU e2e tests** (`kaio-ops/tests/qkv_project_int8_e2e.rs`)
+  — canonical shapes, multi-N-block, multi-M-block, larger K, and a
+  Q/K/V differentiation canary (W_Q=+1, W_K=+2, W_V=+3 → outputs
+  differ by exact ratios; catches fragment-C grid aliasing).
+- **8 `qkv_project_int4` GPU e2e tests** (`kaio-ops/tests/qkv_project_int4_e2e.rs`)
+  — 1-group / 2-group / 8-group K shapes exercising the scale reload
+  cadence, multi-block shapes, sign-extend canary (all weights `-8`),
+  and a Q/K/V differentiation canary.
+- **Fused-vs-3× bench** (`kaio-ops/tests/qkv_project_bench.rs`) — 9
+  shapes across decode (M ≤ 128) and prefill (M ≥ 512) tiers.
+- **Host emit + ptxas_verify** for both kernel modules (`sm_80` +
+  `sm_89`): INT8 lands at **48 regs / 0 spills**, INT4 at **56 regs /
+  0 spills**, both under the 64-reg full-occupancy cliff.
+
+#### Performance framing — Sprint 7.3 (RTX 4090 sm_89)
+
+- **Decode tier (M ≤ 128)**: fused `qkv_project_int4` wins **~3.0×**
+  over three sequential `matmul_int4` calls across every tested shape.
+- **Prefill mid (M = 512)**: 1.19× (above ship threshold).
+- **Prefill large (M = 2048)**: 0.85× (fused loses 15% — barrier
+  overhead in Design S exceeds the X-reuse win when the standalone
+  kernel is already compute-bound on dequant arithmetic).
+
+Public API rustdoc directs prefill-heavy users to call
+`matmul_int{4,8}` three times. Design S+½P optimization (barriers
+7→4 per K-tile, 2 shared W slots with ping-pong) is scoped as Sprint
+7.3.5; ships only if bench confirms prefill recovery to ≥ 1.15×.
+
+See `docs/development/sprints/phase7/sprint_7_3.md` for the full
+decision log, bench table, and architectural decisions.
+
+### Sprint 7.3.5 — Design S+½P optimization for fused QKV projection
+
+Two-W-slot ping-pong with overlapped cooperative load + mma compute.
+Barrier cadence inside the K-loop drops from **7 to 4** per K-tile.
+Scoped as the Rollback #4 escape from 7.3's `prefill_m2048` shortfall.
+
+**Outcome is asymmetric between variants**: INT8 ships Design S+½P;
+INT4 was ported, measured below the ship threshold, and retained at
+Design S for `main`. The INT4 S+½P port is preserved on the
+`phase7-rest` branch as measured-data for a future `cp.async`
+contingency sprint — it is not on `main`.
+
+#### Changed — Sprint 7.3.5
+
+- **`kaio_ops::qkv_project_int8` → Design S+½P**. Inner K-loop
+  rewritten to the 2-slot ping-pong: `tile_w_slot0` (512 B) + 64 B
+  bank-phase pad + `tile_w_slot1` (512 B). `frag_A` is register-
+  hoisted once per K-tile and reused across Q/K/V epochs (`tile_x`
+  overwrite-after-hoist invariant). Predicated overlap-skip on the
+  last K-tile. Barrier cadence: 4 per K-tile + 2 setup. Public API
+  signature unchanged. `ptxas_verify`: sm_80 **64 regs**, sm_89
+  **56 regs**, 0 spills both.
+- **`kaio_ops::qkv_project_int4` unchanged on `main`**. The S+½P
+  port was implemented and measured (`prefill_m2048` median 1.05×
+  over 3 runs, below the 1.15× ship gate and the 1.10× ship-narrow
+  floor per the sprint plan's outcome tiers). Retained Design S
+  behaviour for production; S+½P kernel lives on `phase7-rest`
+  as the measured-data record.
+
+#### Added — Sprint 7.3.5
+
+- **INT8 S+½P slot-mapping canary** (2 shapes): K=32 and K=48.
+  Deliberately-distinguishable weights (W_Q=1, W_K=2, W_V=3 with
+  scale=1.0) yield exact integer outputs `{K, 2K, 3K}` per element.
+  Catches deterministic ping-pong mis-wiring that random-data e2e
+  can pass by coincidence.
+- **INT8 S+½P determinism stress** (2 shapes, 100 runs each):
+  short (M=256, N=512, K=1024) and prefill (M=2048, N=512, K=4096).
+  Asserts bit-exactness of the output across all 100 runs starting
+  from run 1 (no warmup discards). Catches barrier-misplacement
+  races whose resolution varies with warp scheduling across launches.
+
+#### Tests — Sprint 7.3.5
+
+- **11 `qkv_project_int8` GPU e2e tests** (was 7 in 7.3): 7 from
+  7.3 + 2 slot-mapping canaries + 2 determinism-stress cases. All
+  green on RTX 4090 sm_89.
+- **8 `qkv_project_int4` GPU e2e tests unchanged** — the 7.3 suite
+  continues to pass against the retained Design S kernel.
+- **ptxas_verify** green on sm_80 + sm_89 for both shipping
+  kernels (INT8 S+½P, INT4 Design S).
+
+#### Performance framing — Sprint 7.3.5 (RTX 4090 sm_89)
+
+- **INT8 S+½P**: `qkv_project_int8` has no fair 3×-standalone
+  reference kernel (it is W8A16; `matmul_int8` is W8A8 with
+  different arithmetic). Absolute TOPS at `prefill_m2048` = 45.1
+  on the new kernel; full 5-shape abs-TOPS table in
+  `sprint_7_3_5.md`. INT8 ships on correctness + no-regression
+  rather than a ratio gate.
+- **INT4 measurement** (fused S+½P vs 3× `matmul_int4`, median
+  of 3 runs): decode 3.70–4.05×, `prefill_m512` 1.83×,
+  **`prefill_m2048` 1.05×**. S+½P improved every shape over
+  Design S but `prefill_m2048` missed the 1.15× ship threshold
+  and the 1.10× ship-narrow floor. Per the sprint plan's 5-tier
+  outcomes table, the result lands in **"Measured, not shipped"**
+  — a pre-declared tier, not a fallback.
+
+See `docs/development/sprints/phase7/sprint_7_3_5.md` for the full
+decision log, measured-data table, and architectural decisions.
+
+### Sprint 7.2 — INT4 dequantize-matmul (`matmul_int4`)
+
+GPTQ-style W4A16 dequantize-matmul: packed signed-INT4 weights × f16
+activations → f32 accumulator via tensor cores. No independent
+crates.io release — Phase 7 closes with an aggregate release when
+7.1.5 → 7.4 are all complete.
+
+#### Added — Sprint 7.2
+
+- **`kaio_ops::matmul_int4`** — symmetric GPTQ-style W4A16
+  dequantize-matmul. Signature: `matmul_int4(device, a: &GpuBuffer<f16>,
+  b_packed: &GpuBuffer<u32>, scales: &GpuBuffer<f16>, c: &mut GpuBuffer<f32>,
+  m, n, k, group_size)`. Group size fixed at **128** for v1;
+  `K % 128 == 0` enforced. Requires SM 8.0+ (Ampere). DEQUANT-F16 path
+  fed into `mma.sync.m16n8k16.f16.f16.f32`; no native INT4 tensor core
+  on sm_80+, so per-lane unpack + sign-extend + `s32 → f32 → f16` cvt
+  chain + scale fold is mandatory before the mma.
+- **KAIO-defined packed weight + scale layout**. `b_packed: [K/8, N]`
+  col-major u32 with 8 signed nibbles per u32 K-contiguous; `scales:
+  [K/group_size, N]` row-major f16, one per `(group, output_col)`
+  cell. NOT a drop-in replacement for external AutoGPTQ / exllama /
+  GGUF packed model formats — users must repack to the KAIO
+  convention. Full rustdoc carries the exact indexing formula.
+- **Triple-layer sign-extend canary**. Emit-level token-stream test
+  asserts `shr.s32` (not `shr.u32`) at all 8 nibble-extract sites;
+  offline `ptxas_verify` gate; GPU e2e `matmul_int4_sign_extend_*`
+  round-trip at `0x88888888` / `0x77777777` and mixed-position
+  patterns like `0x87654321` — all three layers green on sm_89.
+- **`PtxInstruction::MovPack`** (`kaio-core`) — vector-pack move
+  primitive emitting `mov.b{N} %dst, {%s0, %s1, ...};`. Needed to
+  pack two `.f16` registers produced by the INT4 dequant chain into
+  one `.b32` for the tensor-core fragment B feed. Typeless `.b{N}`
+  suffix (PTX ISA §9.7.9.10 requires it for the vector-pack form;
+  `mov.u32` is rejected). Promoted to framework-level because 7.3
+  quant-attention will also need it.
+- **`ArithOp::Mul { ty: F16 | BF16, .. }` emitter fix** — was falling
+  through to `mul.lo.f16` (integer-only suffix); now correctly emits
+  `mul.f16` (PTX defaults `.rn` rounding on half-precision mul).
+  Latent bug, uncovered while building the INT4 dequant chain. One
+  emit test (`emit_mul_f16`) covers the regression.
+- **`examples/int4_matmul/`** — full end-to-end showcase. Demonstrates
+  GPTQ-lite symmetric per-column group quantization (`scale =
+  max(|w_group|) / 7`, `q = clamp(round(w/scale), -8, 7)`), packing
+  into the KAIO `[K/8, N]` col-major u32 layout (reference CPU packer
+  `pack_s4_weights`), `matmul_int4` launch, and max-abs / max-rel
+  error reporting. Tolerance set to 80% max-rel reflecting INT4's
+  inherent noise floor (16 representable values vs 256 for INT8).
+  Registered as `cargo xtask showcase int4matmul`.
+- **`kaio-ops/tests/matmul_int4_bench.rs`** — median-latency bench vs
+  cuBLAS sgemm across 512³/1024³/2048³/4096³. RTX 4090 sm_89
+  release-mode: **4096³ median ~57 TOPS, range 49–58 across 6 clean xtask-bench runs**
+  (80–101% of cuBLAS sgemm's 52–58 TFLOPS at the same shape). Variance
+  reported honestly per the Sprint 7.1 discipline. Apples-to-apples
+  disclaimer: KAIO moves 0.5 B per weight vs 4 B for sgemm — the
+  comparison is a regression reference, not a definitive TOPS ratio.
+- **12 `#[ignore]`d GPU round-trip tests** at
+  `kaio-ops/tests/matmul_int4_e2e.rs`, all passing bit-exact on RTX
+  4090 sm_89: smallest (16×8×128), sign-extend canaries, multi-group
+  (K=256 with differing per-group scales), larger shapes
+  (64/128/256³), M/N edges (17×8, 16×13), and 3 validation-error
+  paths. Max rel error across all shapes: **4.1e-6** (target was
+  1e-3).
+- **`kaio_ops::validate_dims_int4`** — host-side shape + alignment
+  gate invoked from `matmul_int4`. Rejects `group_size != 128`,
+  `K % 128 != 0`, zero-sized dims, and undersized buffers with clean
+  `KaioError::InvalidConfig` messages.
+
+#### Scope — exactly as planned
+
+- Symmetric INT4 only (no zero-points). Asymmetric GPTQ is a follow-up.
+- Group size fixed at 128. Other group sizes (32 / 64 / 256) deferred.
+- W4A16 only. W4A8 / W4A4 / W4A32 deferred.
+- GPTQ-style packing only. GGUF Q4_0 / Q4_K / Q4_K_M require separate
+  translation layers.
+- Sync-only (no `cp.async` for INT4 — matches INT8 posture).
+- No fused bias / activation epilogue.
+- No auto-tuning across tile sizes or warp counts.
+- `kaio-candle::matmul_int4` binding ships in Sprint 7.4.
+
+### Sprint 7.1.5 — Warp + block reductions in the DSL
+
+Expressiveness bridge sprint between quant milestones. Ships the warp-level
+reduction primitives that unlock softmax / layer-norm / RMS-norm / loss
+functions in pure DSL, plus the missing `min` variants at both warp and
+block level. No independent crates.io release — Phase 7 closes with an
+aggregate release when 7.1.5 → 7.4 are all complete.
+
+#### Added — Sprint 7.1.5
+- **`warp_reduce_sum(f32) -> f32`**, **`warp_reduce_max(f32) -> f32`**,
+  **`warp_reduce_min(f32) -> f32`** — per-warp reductions via 5-round
+  butterfly shuffle tree. Every lane in the warp gets the full reduction
+  result; no shared memory or bar.sync required. In blocks larger than
+  32 threads, each warp computes its own independent result (NOT
+  block-wide — use `block_reduce_*` for block-wide).
+- **`block_reduce_min(f32) -> f32`** — completes the `sum/max/min` trio
+  at block level; matches the existing `block_reduce_sum/max` pattern.
+- **Whole-warp-multiple compile-time guard** for `warp_reduce_*`: a
+  kernel declared with a block size whose total thread count (product
+  of all dimensions) is not a multiple of 32 fails to compile with a
+  diagnostic pointing at the call. Catches the partial-warp `shfl.sync`
+  UB statically — no runtime overhead, no silent misbehavior. Guards
+  1D (`block_size = 16`) and 2D (`block_size = (4, 4)`, `(8, 6)` = 48)
+  cases together.
+- **`emit_warp_tree_reduce` helper** in `kaio-macros/src/lower/builtins.rs`
+  — factored out of the existing `lower_block_reduce` path and
+  parameterized by shuffle variant (`Down` for block_reduce's existing
+  lane-0-only semantics, `Bfly` for warp_reduce's all-lanes semantics),
+  combine op, and PTX type. The type parameterization leaves the door
+  open for a clean follow-up sprint adding `warp_reduce_sum(i32)` /
+  `(f16)` / `(bf16)` without touching the helper.
+- **Pre-refactor TokenStream snapshot canary** at
+  `kaio-macros/tests/snapshots/block_reduce_sum_f32.tokens.txt` — locks
+  the pre-refactor block_reduce expansion structure. D2's helper
+  extraction was PTX-byte-identical; the canary proved it. Scoped as a
+  refactor canary (regenerate via `KAIO_UPDATE_SNAPSHOT=1` for
+  intentional future changes); not a forever byte-identity prison.
+- **GPU test coverage (12 new `#[ignore]`d tests in `kaio/tests/reduce_macro.rs`):**
+  warp_reduce sum / max / min at 32 threads across all-ones, ascending
+  lanes, single-hot, alternating-sign patterns; `block_reduce_min` at
+  block sizes 32 / 64 / 128 / 256 / 512; a 2D-block `(8, 4)` warp_reduce
+  test; and a **64-thread two-warp independence canary** (warp 0 and
+  warp 1 fed different patterns; asserts each warp gets its own
+  reduction and the lowering doesn't accidentally blend across warps).
+  All 18 tests in the reduce_macro harness pass bit-exact on RTX 4090 sm_89.
+- **4 new `trybuild` compile-fail fixtures:** block_size = 16,
+  `(4, 4)` (2D product 16), `(8, 6)` (2D product 48 — whole-warp-
+  multiple violation), and `i32` passed where `f32` is required
+  (type-boundary lock before any future type-generalization sprint).
+
+#### Changed — Sprint 7.1.5
+- `lower_block_reduce` extended to accept `mode = "min"` alongside
+  existing `"sum"` and `"max"`. Shared-memory layout and regression
+  canaries (both symbol-presence and the new TokenStream snapshot)
+  unchanged.
+- Dispatch match at `kaio-macros/src/lower/builtins.rs` lists four
+  new builtin names; `cf04_unknown_call.stderr` trybuild snapshot
+  updated to match.
+
+#### Rustdoc contract for warp_reduce_* (public stubs at `kaio/src/gpu_builtins.rs`)
+- Per-warp semantics spelled out explicitly ("reduces across the
+  calling thread's warp only; in blocks larger than 32 threads each
+  warp computes its own independent result").
+- Whole-warp-multiple block-size requirement with compile-time-check
+  note.
+- Convergent-control-flow requirement (data-dependent branches are UB
+  that the macro cannot detect at expansion time; identity-value
+  padding pattern documented for ragged boundaries — `0.0` for sum,
+  `f32::NEG_INFINITY` for max, `f32::INFINITY` for min).
+- NaN handling documented as implementation-defined per PTX ISA.
 
 ## [0.3.0] — 2026-04-15 — Sprint 7.1: INT8 dequantize-matmul (Phase 7 quant headline)
 

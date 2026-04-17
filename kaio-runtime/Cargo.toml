@@ -17,7 +17,23 @@ targets = [
     "x86_64-pc-windows-msvc",
 ]
 
+[features]
+# Default `dynamic-loading` preserves the "no CUDA toolkit required to build"
+# story for standalone KAIO users — driver resolved at runtime via nvcuda.dll
+# / libcuda.so. The kaio-candle bridge opts into `dynamic-linking` to
+# converge with candle-core's cudarc feature activation; see root Cargo.toml
+# comment for the feature-union-collision rationale.
+default = ["dynamic-loading"]
+dynamic-loading = ["cudarc/dynamic-loading"]
+dynamic-linking = ["cudarc/dynamic-linking"]
+
 [dependencies]
 cudarc = { workspace = true }
 thiserror = { workspace = true }
-kaio-core = { version = "0.3.0", path = "../kaio-core" }
+kaio-core = { version = "0.4.0", path = "../kaio-core" }
+
+[dev-dependencies]
+# Compile-time soundness asserts for GpuBuffer's #[repr(transparent)] contract
+# — see kaio-runtime/src/buffer.rs::repr_soundness.
+static_assertions = "1"
+half = { workspace = true }

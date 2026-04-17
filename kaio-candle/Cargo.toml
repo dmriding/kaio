@@ -1,0 +1,62 @@
+[package]
+name = "kaio-candle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Dave Riding <david@netviper.gr>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dmriding/kaio"
+description = "Candle bridge for KAIO — CustomOp bindings for 8 GPU ops (matmul_tc, matmul_tc_async, matmul_int4, matmul_int8, attention_tc, attention_tc_causal, qkv_project_int8, qkv_project_int4). matmul_tc and matmul_tc_async support backward (autograd). Build with `cargo build --features cuda`."
+readme = "README.md"
+keywords = ["gpu", "cuda", "candle", "ml", "bridge"]
+categories = ["hardware-support", "science"]
+include = [
+    "/src/**/*.rs",
+    "/examples/**/*.rs",
+    "/Cargo.toml",
+    "/README.md",
+]
+
+[package.metadata.docs.rs]
+# docs.rs needs the cuda feature to render the bridge surface. Windows target
+# added for parity with the rest of KAIO (Windows support is a distinguishing
+# story vs most CUDA-in-Rust crates).
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+features = ["cuda"]
+
+[dependencies]
+# All KAIO + candle deps are optional and activated by the `cuda` feature.
+# This lets `cargo build --no-default-features` succeed on a no-CUDA-toolkit
+# host — the crate becomes a compile-time error shell rather than a link
+# failure. See ship gate #10.
+#
+# kaio / kaio-ops opt into dynamic-linking to converge with candle-core's
+# cudarc feature set (cudarc panics if both loading strategies are
+# simultaneously active). The workspace-wide cudarc-loading-strategy
+# feature-gate refactor (prep commits b0213c2 + 320f12c) makes this work.
+kaio = { version = "0.4.0", path = "../kaio", default-features = false, features = ["dynamic-linking"], optional = true }
+kaio-ops = { version = "0.4.0", path = "../kaio-ops", default-features = false, features = ["dynamic-linking"], optional = true }
+candle-core = { version = "=0.10.2", default-features = false, features = ["cuda"], optional = true }
+# cudarc is the shared FFI layer — candle's CudaSlice<T> and KAIO's
+# GpuBuffer<T> both wrap it. Bridge needs direct access to CudaSlice for
+# the slice_ref_from_storage / storage_from_slice plumbing. Features match
+# kaio-candle's dynamic-linking choice (see root Cargo.toml comment).
+cudarc = { version = "0.19.4", default-features = false, features = ["driver", "std", "dynamic-linking", "cuda-version-from-build-system", "f16"], optional = true }
+half = "2"
+
+[dev-dependencies]
+# GPU integration tests (#[ignore]-gated per kaio-ops convention) need a direct
+# cudarc handle for the raw-call bit-exact cross-check side of the test.
+# Matches kaio-candle's dynamic-linking feature set so the feature graph stays
+# uniform between main build and dev build.
+cudarc = { version = "0.19.4", default-features = false, features = ["driver", "std", "dynamic-linking", "cuda-version-from-build-system", "f16"] }
+# Terse `anyhow::Result<()>` across candle / cudarc / kaio error types in tests.
+anyhow = "1"
+
+[features]
+default = []
+# Enables the full bridge surface. Pulls in candle-core + KAIO crates with
+# cudarc/dynamic-linking activated on all of them. Build requires the CUDA
+# toolkit (candle's cudarc feature links against real libcuda at compile time).
+# Downstream users already building candle with `cuda` see no new requirement.
+cuda = ["dep:kaio", "dep:kaio-ops", "dep:candle-core", "dep:cudarc"]

@@ -1,0 +1,101 @@
+# Weekly compatibility check for kaio-candle against candle-core git HEAD.
+#
+# kaio-candle pins candle-core = "=0.10.2" exactly. This workflow builds
+# the bridge against candle-core's latest `main` once per week so we find
+# out about upstream breakage early rather than at our next release bump.
+#
+# Hardening:
+#   - `continue-on-error: true` at the STEP level (not workflow level) so
+#     a red check doesn't mark the workflow as success via workflow-level
+#     continue-on-error, but also doesn't poison follow-on jobs.
+#   - Auto-issue on failure via peter-evans/create-issue-from-file@v5 —
+#     tagged `candle-head-regression` so triage surfaces it quickly.
+#   - If this job goes red for >2 consecutive weeks, either migrate
+#     kaio-candle to candle HEAD (bump the pin + adapt) or document the
+#     divergence in kaio-candle/README.md so consumers know the lag.
+
+name: candle-head-compat
+
+on:
+  schedule:
+    # Monday 06:00 UTC. Fires once per week; drifts earlier in summer vs
+    # winter relative to local time, which is fine.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-candle-head:
+    name: cargo check --features cuda (candle git HEAD)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA toolkit
+        # Matches the CUDA version cudarc's cuda-version-from-build-system
+        # feature expects on main (aligned with KAIO workspace cuda-12080).
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: "12.8.0"
+          method: "network"
+          sub-packages: '["nvcc", "cudart"]'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "kaio-candle -> target"
+
+      - run: rustup show
+
+      - name: Patch candle-core to git HEAD
+        # Append a [patch.crates-io] override to kaio-candle/Cargo.toml so
+        # the exact-pinned `=0.10.2` resolves against huggingface/candle's
+        # main branch instead of the crates.io release. Scoped to this
+        # runner's checkout; never committed back.
+        run: |
+          cat >> kaio-candle/Cargo.toml <<'EOF'
+
+          [patch.crates-io]
+          candle-core = { git = "https://github.com/huggingface/candle", branch = "main" }
+          EOF
+          echo "--- patched Cargo.toml tail ---"
+          tail -5 kaio-candle/Cargo.toml
+
+      - name: cargo check --features cuda
+        id: check
+        continue-on-error: true
+        working-directory: kaio-candle
+        run: cargo check --features cuda --all-targets
+
+      - name: Prepare issue body on failure
+        if: steps.check.outcome == 'failure'
+        run: |
+          mkdir -p .github/candle-head-issue
+          cat > .github/candle-head-issue/body.md <<EOF
+          The weekly candle-head compatibility workflow failed on ${{ github.sha }}.
+
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Next steps (see kaio-candle/README.md candle version policy):
+          - If this is a one-off hiccup (flaky network / CUDA action regression), re-run and confirm.
+          - If candle-core main has a real breaking change to the CustomOp2/CustomOp3 surface, either bump the pin and adapt kaio-candle or document the divergence.
+          - If this job goes red >2 consecutive weeks, escalate to the sprint plan.
+          EOF
+
+      - name: Open / update tracking issue on failure
+        if: steps.check.outcome == 'failure'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "candle-head regression on ${{ github.run_id }}"
+          content-filepath: .github/candle-head-issue/body.md
+          labels: |
+            candle-head-regression
+            ci
+
+      - name: Fail workflow if check failed
+        # Step-level continue-on-error on the check step lets us run the
+        # issue-creation steps even on red; this final gate then marks
+        # the overall workflow red so the badge stays accurate.
+        if: steps.check.outcome == 'failure'
+        run: exit 1

@@ -24,6 +24,34 @@ use parse::signature::parse_kernel_signature;
 
 /// Marks a function as a GPU kernel compiled to PTX.
 ///
+/// # DSL, not compiled Rust
+///
+/// The function body uses Rust syntax but is **not compiled by rustc**.
+/// The proc macro parses it into KAIO's own IR (`KernelStmt`) and emits
+/// PTX text directly. No LLVM, no MIR, no borrow checker runs on the
+/// kernel body.
+///
+/// This has an important consequence for `&mut [T]` parameters: in
+/// standard Rust, `&mut T` carries a `noalias` guarantee — the compiler
+/// assumes exclusive access. In a GPU kernel, thousands of threads
+/// execute the same function body concurrently, all accessing the same
+/// buffer. Because the body never reaches rustc's backend, no `noalias`
+/// attribute is emitted — ptxas sees a plain `.u64` param. There is no
+/// UB from the aliasing mismatch, but the `&mut` syntax is misleading:
+/// correctness depends on the kernel author writing disjoint access
+/// patterns (e.g. `if idx < n` bounds guards), not on compiler-enforced
+/// uniqueness.
+///
+/// A future release will accept `*mut [T]` / `*const [T]` as the
+/// primary kernel parameter syntax to better communicate this. See
+/// RFC-0001 in the repository for the design direction.
+///
+/// You cannot call Rust functions declared outside the kernel inside the
+/// kernel body. The supported syntax subset includes: arithmetic,
+/// comparisons, bitwise ops, short-circuit `&&`/`||`, compound
+/// assignment, `if`/`else`, `for`/`while` loops, `let` bindings, and
+/// KAIO GPU builtins (`thread_idx_x()`, `shared_mem!`, etc.).
+///
 /// # Attributes
 ///
 /// - `block_size = N` (required): Number of threads per block. Must be

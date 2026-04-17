@@ -107,6 +107,75 @@ mod tests {
         );
     }
 
+    /// Normalize the TokenStream `to_string()` output for snapshot comparison.
+    ///
+    /// `TokenStream::to_string` emits content with `proc_macro2`-internal
+    /// spacing rules — collapsing consecutive whitespace (not just leading /
+    /// trailing) lets the snapshot survive trivial formatting noise across
+    /// Rust / proc-macro2 versions while still catching structural changes
+    /// (register numbers, instruction ordering, allocation order).
+    fn normalize_tokens(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Read-or-write snapshot helper. If `KAIO_UPDATE_SNAPSHOT=1` is set or
+    /// the snapshot file does not yet exist, writes `actual` to the path and
+    /// returns it unchanged (so the test trivially passes on that run).
+    /// Otherwise reads the file and returns the expected-string for the
+    /// caller to compare against.
+    ///
+    /// Sprint 7.1.5 D2.0: used to lock the pre-refactor TokenStream
+    /// structure of `lower_block_reduce` before D2 factors out the warp-tree
+    /// helper. Scoped as a refactor canary — if it becomes noisy from
+    /// unrelated harmless drift in the future, relax into pattern
+    /// assertions rather than fighting it forever.
+    fn read_or_write_snapshot(path: &str, actual: &str) -> String {
+        use std::path::PathBuf;
+        let full_path: PathBuf = [env!("CARGO_MANIFEST_DIR"), path].iter().collect();
+        let should_update = std::env::var("KAIO_UPDATE_SNAPSHOT").is_ok() || !full_path.exists();
+        if should_update {
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent).expect("create snapshot dir");
+            }
+            std::fs::write(&full_path, actual).expect("write snapshot");
+            return actual.to_string();
+        }
+        std::fs::read_to_string(&full_path).expect("read snapshot")
+    }
+
+    #[test]
+    fn block_reduce_sum_f32_tokens_snapshot() {
+        // Sprint 7.1.5 D2.0: pre-refactor canary for the `lower_block_reduce`
+        // TokenStream. Captures the full generated `TokenStream` for a
+        // minimal `block_reduce_sum(f32) -> f32` kernel. D2's helper
+        // extraction must produce byte-identical output (after whitespace
+        // normalization) — register allocation order, instruction ordering,
+        // and shared-symbol naming all locked.
+        //
+        // If `KAIO_UPDATE_SNAPSHOT=1` is set, writes the snapshot instead of
+        // comparing — use this to regenerate after an intentional change.
+        let func = parse_kernel(quote! {
+            fn snapshot_reduce(out: &mut [f32], n: u32) {
+                let x = 1.0f32;
+                let s = block_reduce_sum(x);
+                out[0] = s;
+            }
+        });
+        let sig = parse_kernel_signature(&func, dummy_config(256)).expect("signature");
+        let body = parse_body(&func.block).expect("body");
+        let module = generate_kernel_module(&sig, &body).expect("codegen");
+        let actual = normalize_tokens(&module.to_string());
+        let expected = normalize_tokens(&read_or_write_snapshot(
+            "tests/snapshots/block_reduce_sum_f32.tokens.txt",
+            &actual,
+        ));
+        assert_eq!(
+            actual, expected,
+            "block_reduce_sum(f32) TokenStream drifted vs snapshot. \
+             If intentional, rerun with KAIO_UPDATE_SNAPSHOT=1 to regenerate."
+        );
+    }
+
     #[test]
     fn reduction_lowering_uses_named_symbol() {
         // Regression canary: if block_reduce_sum / block_reduce_max lowering

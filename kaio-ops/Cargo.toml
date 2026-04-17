@@ -23,13 +23,26 @@ targets = [
     "x86_64-pc-windows-msvc",
 ]
 
+[features]
+# Forwards the cudarc loading strategy to the kaio umbrella (which forwards
+# to kaio-runtime) AND activates it on this crate's own cudarc dep.
+# Default `dynamic-loading` preserves the no-CUDA-toolkit story for
+# standalone users. kaio-candle consumes this crate with
+# `default-features = false, features = ["dynamic-linking"]` to converge
+# with candle-core; see root Cargo.toml comment.
+default = ["dynamic-loading"]
+dynamic-loading = ["cudarc/dynamic-loading", "kaio/dynamic-loading"]
+dynamic-linking = ["cudarc/dynamic-linking", "kaio/dynamic-linking"]
+
 [dependencies]
-kaio = { version = "0.3.0", path = "../kaio" }
-kaio-core = { version = "0.3.0", path = "../kaio-core" }
+kaio = { version = "0.4.0", path = "../kaio", default-features = false }
+kaio-core = { version = "0.4.0", path = "../kaio-core" }
 cudarc = { workspace = true }
 half = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-cudarc = { version = "0.19", default-features = false, features = ["driver", "std", "dynamic-loading", "cuda-12080", "cublas"] }
+# Adds `cublas` for the benchmark harness; loading strategy comes from the
+# crate-level feature block above, unified via the workspace pin.
+cudarc = { workspace = true, features = ["cublas"] }

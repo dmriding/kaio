@@ -1,0 +1,17 @@
+[package]
+name = "quantized_attention"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Empty table: detaches this example from the enclosing KAIO workspace so
+# `cargo run --release` from this directory works against a local checkout.
+[workspace]
+
+[dependencies]
+# Path-dep form keeps this example buildable from a local KAIO checkout.
+# To copy this directory outside the repo, drop `path = ...` and cargo
+# resolves the crates via crates.io.
+kaio = { path = "../../kaio", version = "0.4.0" }
+kaio-ops = { path = "../../kaio-ops", version = "0.4.0" }
+half = "2"

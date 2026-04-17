@@ -32,7 +32,7 @@ re-plumbing the same code path twice in a later sprint.
   caches the faster one to the shared tuner cache file
   (`~/.cache/kaio/tune_cache.json`), returns the winning variant's
   string name.
-- **Narrow-contract docs** (per Codex review): rustdoc + README +
+- **Narrow-contract docs** (per review feedback): rustdoc + README +
   CHANGELOG announce f16-only, SM 8.0+ only, temporary
   M%16=N%8=K%16=0 constraint, and explicit framing that production
   performance lands in Sprint 6.7's multi-warp restructure — not in
@@ -84,15 +84,15 @@ re-plumbing the same code path twice in a later sprint.
 
 - 6 new host unit tests for module/validation behavior:
   `build_matmul_tc_module_produces_valid_structure` (refactored
-  from the old `_ptx` version, now instruction-centric per Codex
-  review), `build_matmul_tc_module_declares_requested_sm_target`,
+  from the old `_ptx` version, now instruction-centric per review
+  feedback), `build_matmul_tc_module_declares_requested_sm_target`,
   `matmul_tc_module_rejects_sm_70_via_validate`,
   `matmul_tc_module_validates_at_sm_80_and_above`, and the matching
   `_async` pair.
 - 3 new host unit tests in the tuner module:
   `matmul_tc_variant_as_str_from_str_roundtrip`,
   `tune_result_json_roundtrip_matmul_tc_variant`, and
-  `cache_matmul_and_matmul_tc_entries_coexist` (Codex review — the
+  `cache_matmul_and_matmul_tc_entries_coexist` (review feedback — the
   last one locks D6's shared-cache-file claim into a regression
   gate: scalar `matmul` and `matmul_tc` entries for the same
   `(sm_target, dims)` tuple coexist without colliding).
@@ -179,15 +179,15 @@ From the plan (all folded in as-shipped):
   disambiguates from scalar entries.
 - **D4 — Pre-dispatch eligibility gate** (SM 8.0+ + divisibility),
   with an error message naming both real fallback options per
-  Codex review. Conservative default comment at the fallback site
-  per Opus review.
+  review feedback. Conservative default comment at the fallback site
+  per review feedback.
 - **D5 — Phase 5 benchmark shape (3 warm-up + 10 timed iters,
   median)** unchanged.
 - **D6 — Shared cache file**, `kernel` field disambiguates —
   coexistence locked in by the new host regression test.
 - **D7 — `matmul_auto_tc` public, raw kernels hidden** — narrow-
   contract docs requirement folded into rustdoc + README +
-  CHANGELOG to address the "first TC API" positioning risk Codex
+  CHANGELOG to address the "first TC API" positioning risk review
   flagged.
 - **D8 — Host SM-validation regression tests** for both modules —
   prove *our* modules are shaped correctly for validation to catch
@@ -227,7 +227,7 @@ Updated `load_ptx(&str)` validation-bypass entry in `tech_debt.md`:
   `KAIO_SM_TARGET` with default `sm_70`, which is correct for
   scalar kernels that run on any SM 7.0+.
 
-New tech-debt entry queued by Codex review (6.4 fallout) on
+New tech-debt entry queued by review feedback (6.4 fallout) on
 `ptxas_verify` env-var mutation — no status change this sprint.
 
 ## Verification
@@ -249,7 +249,7 @@ All gates green before commit:
 |------|--------|
 | `kaio-ops/src/matmul_tc_kernel.rs` | `build_matmul_tc_ptx` → `build_matmul_tc_module(sm: &str) -> PtxModule`. Host API uses `device.load_module`. Ad-hoc SM check deleted. Structural test refactored to emit manually + stay instruction-centric. 4 new validation regression tests. |
 | `kaio-ops/src/matmul_tc_async_kernel.rs` | Same refactor pattern. 4 new validation regression tests. |
-| `kaio-ops/src/tuner.rs` | **+** `MatmulTcVariant` enum, `check_tc_eligibility` pre-check, `launch_matmul_tc`, `bench_matmul_tc_variant`, `tune_matmul_tc`, `matmul_auto_tc`, `resolve_matmul_tc_variant`. Conservative-default inline comment at the fallback site (Opus review). 3 new host tests including cache-coexistence (Codex review). |
+| `kaio-ops/src/tuner.rs` | **+** `MatmulTcVariant` enum, `check_tc_eligibility` pre-check, `launch_matmul_tc`, `bench_matmul_tc_variant`, `tune_matmul_tc`, `matmul_auto_tc`, `resolve_matmul_tc_variant`. Conservative-default inline comment at the fallback site (review feedback). 3 new host tests including cache-coexistence (review feedback). |
 | `kaio-ops/src/lib.rs` | `pub use tuner::{..., matmul_auto_tc, tune_matmul_tc, ...}`. Module rustdoc lists `matmul_auto_tc` under "Operations" with the narrow-contract framing. |
 | `kaio-ops/tests/common/mod.rs` | **NEW** — shared helpers extracted from three duplicate copies. |
 | `kaio-ops/tests/matmul_tc_api.rs` | Imports from `common`. |

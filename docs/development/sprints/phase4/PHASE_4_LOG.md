@@ -27,7 +27,7 @@ Master plan: [phase4_master_plan.md](phase4_master_plan.md)
   Phase 4 section — functional criteria, performance targets
 - **Phases roadmap:** [../../phases.md](../../phases.md) Phase 4 — deliverables
 - **Phase 3 reference:** [../phase3/PHASE_3_LOG.md](../phase3/PHASE_3_LOG.md)
-- **Codex readiness review:** [../review1/phase4_readiness_review_2026_04_11.md](../../development/review1/phase4_readiness_review_2026_04_11.md)
+- **Phase 4 readiness review:** internal review archive (not git-tracked)
 
 ## Dependency Graph
 

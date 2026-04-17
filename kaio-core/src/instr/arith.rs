@@ -407,10 +407,15 @@ impl Emit for ArithOp {
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
             }
             ArithOp::Mul { dst, lhs, rhs, ty } => {
-                // Integer multiply needs .lo (low N bits of 2N product).
-                // Float multiply has no mode suffix.
+                // Float multiply (including half-precision) has no `.lo`
+                // suffix — that modifier is integer-only. Half-precision
+                // defaults to `.rn` rounding per PTX ISA; bare `mul.f16`
+                // is equivalent to `mul.rn.f16`.
                 let mnemonic = match ty {
-                    PtxType::F32 | PtxType::F64 => format!("mul{}", ty.ptx_suffix()),
+                    PtxType::F16 | PtxType::BF16 | PtxType::F32 | PtxType::F64 => {
+                        format!("mul{}", ty.ptx_suffix())
+                    }
+                    // Integer multiply needs .lo (low N bits of 2N product).
                     _ => format!("mul.lo{}", ty.ptx_suffix()),
                 };
                 w.instruction(&mnemonic, &[dst as &dyn fmt::Display, lhs, rhs])
@@ -687,6 +692,22 @@ mod tests {
         };
         op.emit(&mut w).unwrap();
         assert_eq!(w.finish(), "    mul.f32 %f0, %f1, %f2;\n");
+    }
+
+    #[test]
+    fn emit_mul_f16() {
+        // Half-precision multiply: `mul.f16`, no `.lo` (integer-only).
+        // PTX defaults `mul.f16` to `.rn` rounding.
+        let mut w = PtxWriter::new();
+        w.indent();
+        let op = ArithOp::Mul {
+            dst: reg(RegKind::H, 0, PtxType::F16),
+            lhs: Operand::Reg(reg(RegKind::H, 1, PtxType::F16)),
+            rhs: Operand::Reg(reg(RegKind::H, 2, PtxType::F16)),
+            ty: PtxType::F16,
+        };
+        op.emit(&mut w).unwrap();
+        assert_eq!(w.finish(), "    mul.f16 %h0, %h1, %h2;\n");
     }
 
     #[test]

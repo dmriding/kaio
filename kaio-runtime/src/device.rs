@@ -86,16 +86,24 @@ impl KaioDevice {
         DeviceInfo::from_context(&self.ctx)
     }
 
+    /// CUDA device ordinal (0-indexed) this device wraps.
+    ///
+    /// Used by bridge crates (e.g. `kaio-candle`) to cross-check that a
+    /// host-framework device and a `KaioDevice` refer to the same GPU.
+    pub fn ordinal(&self) -> usize {
+        self.ctx.ordinal()
+    }
+
     /// Allocate device memory and copy data from a host slice.
     pub fn alloc_from<T: DeviceRepr>(&self, data: &[T]) -> Result<GpuBuffer<T>> {
         let slice = self.stream.clone_htod(data)?;
-        Ok(GpuBuffer::from_raw(slice))
+        Ok(GpuBuffer::from_cuda_slice(slice))
     }
 
     /// Allocate zero-initialized device memory.
     pub fn alloc_zeros<T: DeviceRepr + ValidAsZeroBits>(&self, len: usize) -> Result<GpuBuffer<T>> {
         let slice = self.stream.alloc_zeros::<T>(len)?;
-        Ok(GpuBuffer::from_raw(slice))
+        Ok(GpuBuffer::from_cuda_slice(slice))
     }
 
     /// Access the underlying CUDA stream for kernel launch operations.

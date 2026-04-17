@@ -17,7 +17,7 @@
 //! reference. Bit-exact — `i8 × i8` fits in `i16` and summing 32 of them
 //! fits in `i32` without overflow in any of the test patterns.
 //!
-//! ## Adversarial test matrix (per Codex + Gemini planning feedback)
+//! ## Adversarial test matrix
 //!
 //! Each pattern is designed to expose a specific class of layout bug:
 //!   - **identity-like** (A = i8-identity-ish, B = arbitrary) — catches
@@ -28,7 +28,7 @@
 //!     semantics
 //!   - **boundary values** (`i8::MIN`, `i8::MAX`, 0, ±1) at known
 //!     positions — catches sign extension
-//!   - **ascending byte sequence** (Gemini) — catches byte-within-u32
+//!   - **ascending byte sequence** — catches byte-within-u32
 //!     interleaving bugs that random-ish patterns both miss
 //!
 //! If any test fails, do not loosen the assertion. Debug thread-data
@@ -264,7 +264,7 @@ fn assert_bit_exact(pattern: &str, a_host: &[i8], b_host: &[i8]) {
 #[test]
 #[ignore] // requires NVIDIA GPU with SM 8.0+
 fn int8_mma_ascending_byte_pattern() {
-    // Gemini-flagged: catches byte-within-u32 interleaving bugs. If mma
+    // Ascending-byte pattern: catches byte-within-u32 interleaving bugs. If mma
     // interprets byte-0 of the first A register as K=8 instead of K=0,
     // the outputs will shift predictably. Ascending values make the shift
     // obvious at mismatch time.

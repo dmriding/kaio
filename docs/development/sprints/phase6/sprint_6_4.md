@@ -162,7 +162,7 @@ have surfaced here otherwise.
 No new entries. Existing queue items relevant to 6.4:
 
 - **`PtxModule::validate()` bypass via `load_ptx(&str)`** — escalated
-  urgency per Codex review. With 6.4 adding a second internal TC
+  urgency per review feedback. With 6.4 adding a second internal TC
   kernel, the surface area that bypasses SM validation has grown:
   mma.sync, cp.async, two internal kernel variants. Sprint 6.5's
   auto-tuner is the natural centralization point for load paths;

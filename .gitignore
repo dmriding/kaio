@@ -1,6 +1,10 @@
 # Build artifacts
 /target
 examples/*/target/
+kaio-candle/target/
+# kaio-candle is a standalone library crate (not a workspace member) —
+# libraries don't commit Cargo.lock per Rust convention.
+kaio-candle/Cargo.lock
 *.o
 *.ptx
 
