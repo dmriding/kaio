@@ -10,7 +10,7 @@ Master plan: [../../phases.md](../../phases.md) §Phase 8
 | Sprint | Scope | Status | Headline |
 |---|---|---|---|
 | [8.0](sprint_8_0.md) | Pointer syntax (RFC-0001) — `*mut [T]` / `*const [T]` in `#[gpu_kernel]` | ✅ Complete | Resolves #13 (rust-cuda DSL-soundness feedback); parser-only extension, zero IR/codegen/runtime change; v0.4.1 |
-| 8.0.5 | Bench coverage extension (attention + QKV + norm/activation) | 🚧 In progress | — |
+| [8.0.5](sprint_8_0_5.md) | Bench coverage extension — QKV + attention + norm/activation under `cargo xtask bench` | ✅ Complete | Seven bench harnesses covering the shipped public kernel families + showcase kernels; zero API / runtime change |
 | 8.1 | PyO3 scaffold, Python module, NumPy interop | 📝 Planned | — |
 | 8.2 | Expose core ops to Python (matmul f32 + INT8, attention, softmax, activations) | 📝 Planned | — |
 | 8.3 | Python-side benchmarking + cross-validation against PyTorch | 📝 Planned | — |
