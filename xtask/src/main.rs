@@ -259,6 +259,11 @@ const BENCHES: &[(&str, &str, &str)] = &[
         "attention_tc_bench",
         "Tensor-core attention (plain + causal) latency + seq/s + attn_scores/s",
     ),
+    (
+        "=== attention_flash benchmark (single-head self-attention, f32 Q/K/V -> f32 out) ===",
+        "attention_flash_bench",
+        "FlashAttention (plain + causal) latency + seq/s + attn_scores/s; long-seq complement to attention_tc",
+    ),
 ];
 
 /// `cargo xtask bench [<name>|--list]` entry point. Runs one or all
