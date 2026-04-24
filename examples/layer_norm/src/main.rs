@@ -28,7 +28,7 @@ const WARMUP_RUNS: usize = 5;
 const TIMED_RUNS: usize = 100;
 
 #[gpu_kernel(block_size = 256)]
-fn layer_norm(x: &[f32], gamma: &[f32], beta: &[f32], out: &mut [f32], n: u32, eps: f32) {
+fn layer_norm(x: *const [f32], gamma: *const [f32], beta: *const [f32], out: *mut [f32], n: u32, eps: f32) {
     let tid = thread_idx_x();
 
     // Single-block kernel: one block covers the entire vector. Threads

@@ -13,7 +13,7 @@ each other. It's the teaching moment for the kernel-variant workflow
 ```rust
 // Exact (tanh):  0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
 #[gpu_kernel(block_size = 256)]
-fn gelu_exact(x: &[f32], out: &mut [f32], n: u32) {
+fn gelu_exact(x: *const [f32], out: *mut [f32], n: u32) {
     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
     if idx < n {
         let xi = x[idx];
@@ -25,7 +25,7 @@ fn gelu_exact(x: &[f32], out: &mut [f32], n: u32) {
 
 // Fast (sigmoid):  x / (1 + exp(-1.702 * x))
 #[gpu_kernel(block_size = 256)]
-fn gelu_fast(x: &[f32], out: &mut [f32], n: u32) {
+fn gelu_fast(x: *const [f32], out: *mut [f32], n: u32) {
     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
     if idx < n {
         let xi = x[idx];

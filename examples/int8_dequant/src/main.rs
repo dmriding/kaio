@@ -34,7 +34,7 @@ const WARMUP_RUNS: usize = 5;
 const TIMED_RUNS: usize = 100;
 
 #[gpu_kernel(block_size = 256)]
-fn dequant_i8(packed: &[u32], out: &mut [f32], scale: f32, n_words: u32) {
+fn dequant_i8(packed: *const [u32], out: *mut [f32], scale: f32, n_words: u32) {
     let tid = thread_idx_x();
 
     if tid < n_words {
