@@ -17,7 +17,7 @@ one transaction. When they read scattered addresses, it can become
 
 ```rust
 #[gpu_kernel(block_size = (16, 16))]
-fn good_load(a: &[f32], out: &mut [f32], n: u32) {
+fn good_load(a: *const [f32], out: *mut [f32], n: u32) {
     let col = block_idx_x() * 16 + thread_idx_x();
     let row = block_idx_y() * 16 + thread_idx_y();
     // thread_idx_x() varies fastest → adjacent threads read
@@ -323,11 +323,12 @@ pipeline already saturates load bandwidth; its remaining bottleneck
 was shared-memory contention at fragment-read time, which is exactly
 what the padding fixes. Sync is still global-memory-latency-bound.
 
-### Path to >92.5% (future work)
+### Path to higher throughput (future work)
 
-The remaining ~7.5 pp of headroom at 4096² (vs cuBLAS sgemm) on async,
-and the wider sync gap, is bounded by structural choices this kernel
-hasn't yet made:
+Above the current worst-of-10 ceiling (115% async / 107% sync of
+cuBLAS sgemm at 4096² on RTX 4090), the remaining headroom — and the
+wider sync-vs-async gap at all sizes — is bounded by structural
+choices this kernel hasn't yet made:
 
 - **LDG.128 vectorized global loads (sync path).** The cooperative
   Tile B loader uses 8 × scalar `ld.global.f16` per thread. Switching
@@ -340,9 +341,11 @@ hasn't yet made:
   creep against 6.7b's D10 orthogonality requirement. A future
   sprint can design that primitive properly and then use the
   LDG.128 variant cleanly.
-- **bf16 TC matmul / larger mma shapes** (Phase 7).
-- **ldmatrix.sync.aligned** (Phase 7) — the real path to closing the
-  remaining gap on sync.
+- **bf16 TC matmul / larger mma shapes** — deferred from Phase 7;
+  tracked under Phase 9 kernel deepening.
+- **ldmatrix.sync.aligned** — deferred from Phase 7; tracked under
+  Phase 9 kernel deepening. The real path to closing the remaining
+  sync-path gap.
 
 ## Quantized Matmul Performance (Sprints 7.1 + 7.2)
 
