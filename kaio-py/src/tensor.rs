@@ -16,11 +16,11 @@ use std::sync::Arc;
 use half::f16;
 use kaio_rs::prelude::{GpuBuffer, KaioDevice};
 use numpy::{IntoPyArray, PyArrayMethods, PyReadonlyArrayDyn, PyUntypedArrayMethods};
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyType};
 
 use crate::device::Device;
+use crate::errors::{kaio_err, map_kaio_err};
 
 /// Storage variants for `kaio.Tensor`. Extend with new arms in 8.2 for
 /// INT8 + packed-INT4 support; the compiler will surface every site
@@ -70,7 +70,7 @@ impl Tensor {
         let flags = array.getattr("flags")?;
         let c_contig: bool = flags.getattr("c_contiguous")?.extract()?;
         if !c_contig {
-            return Err(PyRuntimeError::new_err(
+            return Err(kaio_err(
                 "from_numpy requires a C-contiguous array; use np.ascontiguousarray(x) on the Python side",
             ));
         }
@@ -83,9 +83,7 @@ impl Tensor {
                 let arr: PyReadonlyArrayDyn<'_, f16> = array.extract()?;
                 let shape: Vec<usize> = arr.shape().to_vec();
                 let slice = arr.as_slice()?;
-                let buffer = device_arc
-                    .alloc_from(slice)
-                    .map_err(|e| PyRuntimeError::new_err(format!("alloc_from failed: {e}")))?;
+                let buffer = device_arc.alloc_from(slice).map_err(map_kaio_err)?;
                 Ok(Self {
                     device: device_arc,
                     storage: TensorStorage::F16(buffer),
@@ -96,16 +94,14 @@ impl Tensor {
                 let arr: PyReadonlyArrayDyn<'_, f32> = array.extract()?;
                 let shape: Vec<usize> = arr.shape().to_vec();
                 let slice = arr.as_slice()?;
-                let buffer = device_arc
-                    .alloc_from(slice)
-                    .map_err(|e| PyRuntimeError::new_err(format!("alloc_from failed: {e}")))?;
+                let buffer = device_arc.alloc_from(slice).map_err(map_kaio_err)?;
                 Ok(Self {
                     device: device_arc,
                     storage: TensorStorage::F32(buffer),
                     shape,
                 })
             }
-            other => Err(PyRuntimeError::new_err(format!(
+            other => Err(kaio_err(format!(
                 "unsupported dtype: expected float16 or float32, got {other}"
             ))),
         }
@@ -115,17 +111,13 @@ impl Tensor {
     fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match &self.storage {
             TensorStorage::F16(buf) => {
-                let host: Vec<f16> = buf
-                    .to_host(&self.device)
-                    .map_err(|e| PyRuntimeError::new_err(format!("to_host failed: {e}")))?;
+                let host: Vec<f16> = buf.to_host(&self.device).map_err(map_kaio_err)?;
                 let arr = host.into_pyarray(py);
                 let reshaped = arr.reshape(self.shape.as_slice())?;
                 Ok(reshaped.into_any())
             }
             TensorStorage::F32(buf) => {
-                let host: Vec<f32> = buf
-                    .to_host(&self.device)
-                    .map_err(|e| PyRuntimeError::new_err(format!("to_host failed: {e}")))?;
+                let host: Vec<f32> = buf.to_host(&self.device).map_err(map_kaio_err)?;
                 let arr = host.into_pyarray(py);
                 let reshaped = arr.reshape(self.shape.as_slice())?;
                 Ok(reshaped.into_any())
@@ -155,7 +147,7 @@ impl Tensor {
         self.shape
             .first()
             .copied()
-            .ok_or_else(|| PyRuntimeError::new_err("0-dim tensor has no len()"))
+            .ok_or_else(|| kaio_err("0-dim tensor has no len()"))
     }
 
     fn __repr__(&self) -> String {

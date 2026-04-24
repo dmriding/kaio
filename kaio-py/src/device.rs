@@ -14,8 +14,9 @@
 use std::sync::Arc;
 
 use kaio_rs::prelude::KaioDevice;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+
+use crate::errors::map_kaio_err;
 
 /// Python handle to a CUDA device.
 ///
@@ -23,8 +24,6 @@ use pyo3::prelude::*;
 /// the first GPU) and fails with an exception if the driver is missing,
 /// no GPU is present, or the ordinal is out of range.
 ///
-/// Stub exception mapping uses `PyRuntimeError` until `kaio.KaioError`
-/// lands in C4; swap-over is a mechanical `.map_err(...)` rewrite.
 #[pyclass(module = "kaio", name = "Device")]
 pub struct Device {
     pub(crate) inner: Arc<KaioDevice>,
@@ -36,8 +35,7 @@ impl Device {
     #[new]
     #[pyo3(signature = (index = 0))]
     fn new(index: usize) -> PyResult<Self> {
-        let device = KaioDevice::new(index)
-            .map_err(|e| PyRuntimeError::new_err(format!("failed to open device {index}: {e}")))?;
+        let device = KaioDevice::new(index).map_err(map_kaio_err)?;
         Ok(Self {
             inner: Arc::new(device),
         })
@@ -46,10 +44,7 @@ impl Device {
     /// Human-readable GPU name (e.g. "NVIDIA GeForce RTX 4090").
     #[getter]
     fn name(&self) -> PyResult<String> {
-        let info = self
-            .inner
-            .info()
-            .map_err(|e| PyRuntimeError::new_err(format!("device info failed: {e}")))?;
+        let info = self.inner.info().map_err(map_kaio_err)?;
         Ok(info.name)
     }
 
@@ -57,18 +52,12 @@ impl Device {
     /// for SM 8.9.
     #[getter]
     fn compute_capability(&self) -> PyResult<(u32, u32)> {
-        let info = self
-            .inner
-            .info()
-            .map_err(|e| PyRuntimeError::new_err(format!("device info failed: {e}")))?;
+        let info = self.inner.info().map_err(map_kaio_err)?;
         Ok(info.compute_capability)
     }
 
     fn __repr__(&self) -> PyResult<String> {
-        let info = self
-            .inner
-            .info()
-            .map_err(|e| PyRuntimeError::new_err(format!("device info failed: {e}")))?;
+        let info = self.inner.info().map_err(map_kaio_err)?;
         Ok(format!(
             "Device(name={:?}, sm=sm_{}{})",
             info.name, info.compute_capability.0, info.compute_capability.1
