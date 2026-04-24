@@ -8,6 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
+## [Unreleased] — Sprint 8.0.5: Bench coverage extension
+
+### Added
+
+- `cargo xtask bench` now drives seven benchmark harnesses covering
+  the shipped high-level / public kernel families plus the showcase
+  kernels. Three new bench files — `attention_tc_bench`,
+  `attention_flash_bench`, and `norm_activation_bench` — join the
+  existing matmul family and the now-wired `qkv_project_bench`.
+- `docs/performance.md`: three new sections with worst-of-10 results
+  on RTX 4090 sm_89 — Fused QKV Projection Performance, Attention
+  Performance (short-seq TC + long-seq flash, split by kernel design
+  intent around the `seq_k ≤ 384` cap), and Norm + Activation Kernel
+  Performance (reductions as a launch-overhead reference, elementwise
+  sweep to 4M elements).
+- `docs/benchmarks.md`: bench-coverage section refreshed to list all
+  seven harnesses; methodology note clarifying that published numbers
+  are from the sprint in which they first landed (re-runs within
+  run-to-run variance).
+
+### Changed
+
+- `performance.md` §Bench coverage today + roadmap moved from "Sprint
+  8.0.5 will extend coverage" (pending) to listing the landed seven-bench
+  roster.
+- `xtask` bench boilerplate simplified — shape info is now printed by
+  each bench itself (shapes vary per kernel family) rather than a
+  hardcoded matmul-sized assumption.
+
+### Notes
+
+- No public API, runtime, or codegen changes. Additive measurement
+  coverage only; no version bump.
+- Copied kernel definitions in `norm_activation_bench.rs` preserve
+  `*const [T]` / `*mut [T]` pointer syntax from their example sources,
+  putting RFC-0001 (Sprint 8.0) in the published-performance measurement
+  path in addition to the existing correctness smoke test.
+
 ## [0.4.1] — 2026-04-24 — Sprint 8.0: Pointer Syntax
 
 ### Added
