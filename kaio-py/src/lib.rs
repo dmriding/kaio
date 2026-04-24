@@ -1,0 +1,47 @@
+//! KAIO Python bindings — PyO3 extension module.
+//!
+//! Exposes the KAIO GPU-kernel framework to Python code through a
+//! thin wrapper around the `kaio` and `kaio-ops` Rust crates. The
+//! Rust crate `kaio` is aliased to `kaio-rs` in `Cargo.toml` (the
+//! `package = "kaio"` key) so its identifier does not collide with
+//! this crate's `[lib] name = "kaio"`. All internal imports use
+//! `kaio_rs::...`.
+//!
+//! # Design principles (Phase 8 master plan)
+//!
+//! - **GIL released during kernel execution.** Every op wrapper
+//!   calls `Python::allow_threads(|py| ...)` around the
+//!   `kaio-ops` invocation so concurrent Python threads make
+//!   progress while the kernel runs.
+//! - **Reference-counted Device + Tensor.** `kaio.Device` wraps
+//!   `Arc<KaioDevice>`; every `kaio.Tensor` holds a clone of that
+//!   `Arc`. The Device cannot be dropped before the Tensors that
+//!   reference its CUDA context — Rust's type system enforces
+//!   this invariant without lifetime annotations.
+//! - **No raw pointers in Python code.** Python users see
+//!   `kaio.Device` / `kaio.Tensor` / exception types. Never a raw
+//!   CUDA handle.
+//! - **Thin wrapper.** 1:1 mapping to the `kaio-ops` host API;
+//!   this module does not re-design the surface. Ergonomic
+//!   expansion is a later sprint's job, driven by user feedback.
+
+use pyo3::prelude::*;
+
+mod device;
+mod errors;
+mod ops;
+mod tensor;
+
+/// Python module entry point.
+///
+/// Sprint 8.1 exposes a minimal public surface: `Device`, `Tensor`,
+/// `KaioError`, and the smoke kernel `matmul_tc`. Broader op coverage
+/// lands in Sprint 8.2.
+#[pymodule]
+fn kaio(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<device::Device>()?;
+    m.add_class::<tensor::Tensor>()?;
+    m.add("KaioError", py.get_type::<errors::KaioError>())?;
+    m.add_function(wrap_pyfunction!(ops::matmul_tc, m)?)?;
+    Ok(())
+}

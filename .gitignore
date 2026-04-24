@@ -2,11 +2,23 @@
 /target
 examples/*/target/
 kaio-candle/target/
-# kaio-candle is a standalone library crate (not a workspace member) —
-# libraries don't commit Cargo.lock per Rust convention.
+kaio-py/target/
+# Standalone crates (not workspace members) — libraries don't commit
+# Cargo.lock per Rust convention. Applies to both bridge crates:
 kaio-candle/Cargo.lock
+kaio-py/Cargo.lock
 *.o
 *.ptx
+
+# Python (kaio-py development artifacts)
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
 
 # IDE / editor
 .vscode/

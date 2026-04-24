@@ -1,12 +1,15 @@
 [workspace]
 resolver = "3"
 members = ["kaio-core", "kaio-runtime", "kaio-macros", "kaio", "kaio-ops", "xtask"]
-# `kaio-candle` is intentionally outside the main workspace — cudarc's
-# `dynamic-loading` (KAIO default) and `dynamic-linking` (candle-core) features
-# are mutually exclusive, and Cargo unions features across a workspace build.
-# The bridge crate lives standalone at `kaio-candle/` with its own Cargo.toml;
-# build with `cd kaio-candle && cargo build --features cuda`.
-exclude = ["examples/*", "kaio-candle"]
+# `kaio-candle` and `kaio-py` are intentionally outside the main workspace —
+# cudarc's `dynamic-loading` (KAIO default) and `dynamic-linking` (candle-core)
+# features are mutually exclusive, and Cargo unions features across a workspace
+# build. Standalone bridge crates avoid that collision:
+#   - kaio-candle/ — candle CustomOp bindings, build via
+#     `cd kaio-candle && cargo build --features cuda`
+#   - kaio-py/ — PyO3 Python bindings, build via
+#     `cd kaio-py && maturin develop` (Python >= 3.10)
+exclude = ["examples/*", "kaio-candle", "kaio-py"]
 
 [workspace.package]
 version = "0.4.1"

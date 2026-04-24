@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
+## [Unreleased] — Sprint 8.1: PyO3 scaffold
+
+### Added
+
+- New standalone `kaio-py` crate — PyO3 scaffold for the Python
+  bindings (Phase 8). Exposes `kaio.Device`, `kaio.Tensor` (NumPy
+  roundtrip for f16 / f32, with C-contiguity enforcement),
+  `kaio.KaioError` (single exception class — subclasses deferred to
+  Sprint 8.2), and `kaio.matmul_tc` as the end-to-end smoke kernel.
+  No wheel on PyPI yet (Sprint 8.4). `import kaio` works after
+  `maturin develop` from `kaio-py/`.
+- `kaio-py/examples/hello.py` — NumPy → Device → kernel → NumPy
+  demo with a NumPy f32 reference check; runs end-to-end on RTX 4090.
+- abi3-py310 wheel target — one wheel per architecture + platform
+  runs across Python 3.10 / 3.11 / 3.12+ unchanged.
+
+### Notes
+
+- No public API, runtime, or codegen changes on the existing Rust
+  crates. `kaio-py` is additive — like `kaio-candle`, it lives
+  outside the main workspace to avoid `cudarc` feature-union
+  collisions.
+- Device identity is by Python object, not GPU ordinal: two
+  separate `kaio.Device(0)` calls produce distinct devices, and
+  `kaio.matmul_tc` rejects tensors from different `Device` objects
+  with a clear `KaioError`. Reuse one `Device` per GPU at startup.
+- GIL released during kernel execution via `py.detach(|| ...)`
+  (PyO3 0.28's renamed `allow_threads`) so concurrent Python
+  threads make progress while the GPU runs.
+- **`kaio-py` is scaffold-complete and user-demand-gated from here.**
+  Further op exposure, PyTorch cross-validation, and PyPI publishing
+  are unscheduled sprints that activate on a filed
+  [python-binding request](https://github.com/dmriding/kaio/issues/new?template=python-binding-request.md).
+  The scaffold tracks the Rust API only as requests come in, not on
+  every Rust release. Rationale is documented in the Phase 8 master
+  plan.
+
 ## [Unreleased] — Sprint 8.0.5: Bench coverage extension
 
 ### Added
