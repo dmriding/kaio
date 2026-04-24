@@ -342,4 +342,163 @@ mod tests {
         let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
         assert!(err.to_string().contains("slice parameters"));
     }
+
+    // --- Pointer-form acceptance (RFC-0001) ---
+
+    #[test]
+    fn parse_ptr_const_slice() {
+        let func = parse_fn(quote! {
+            fn kernel(data: *const [f32]) {}
+        });
+        let sig = parse_kernel_signature(&func, dummy_config()).unwrap();
+        assert_eq!(
+            sig.params[0].ty,
+            KernelType::SliceRef(Box::new(KernelType::F32))
+        );
+    }
+
+    #[test]
+    fn parse_ptr_mut_slice() {
+        let func = parse_fn(quote! {
+            fn kernel(a: *mut [f32], b: *mut [f64]) {}
+        });
+        let sig = parse_kernel_signature(&func, dummy_config()).unwrap();
+        assert_eq!(
+            sig.params[0].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(
+            sig.params[1].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::F64))
+        );
+    }
+
+    #[test]
+    fn parse_mixed_ptr_and_ref() {
+        let func = parse_fn(quote! {
+            fn kernel(a: &[f32], b: *const [f32], c: &mut [f32], d: *mut [f32], n: u32) {}
+        });
+        let sig = parse_kernel_signature(&func, dummy_config()).unwrap();
+        assert_eq!(sig.params.len(), 5);
+        assert_eq!(
+            sig.params[0].ty,
+            KernelType::SliceRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(
+            sig.params[1].ty,
+            KernelType::SliceRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(
+            sig.params[2].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(
+            sig.params[3].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(sig.params[4].ty, KernelType::U32);
+    }
+
+    #[test]
+    fn parse_ptr_all_scalar_elem_types() {
+        let func = parse_fn(quote! {
+            fn kernel(
+                a: *const [f32],
+                b: *mut [f64],
+                c: *const [i32],
+                d: *mut [u32],
+                e: *const [i64],
+                f: *mut [u64],
+                g: *const [bool],
+            ) {}
+        });
+        let sig = parse_kernel_signature(&func, dummy_config()).unwrap();
+        assert_eq!(
+            sig.params[0].ty,
+            KernelType::SliceRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(
+            sig.params[1].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::F64))
+        );
+        assert_eq!(
+            sig.params[2].ty,
+            KernelType::SliceRef(Box::new(KernelType::I32))
+        );
+        assert_eq!(
+            sig.params[3].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::U32))
+        );
+        assert_eq!(
+            sig.params[4].ty,
+            KernelType::SliceRef(Box::new(KernelType::I64))
+        );
+        assert_eq!(
+            sig.params[5].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::U64))
+        );
+        assert_eq!(
+            sig.params[6].ty,
+            KernelType::SliceRef(Box::new(KernelType::Bool))
+        );
+    }
+
+    // --- Pointer-form error paths ---
+
+    #[test]
+    fn reject_ptr_non_slice() {
+        let func = parse_fn(quote! {
+            fn kernel(data: *mut f32) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("slice parameters"));
+    }
+
+    #[test]
+    fn reject_ptr_nested_slice() {
+        // A slice element whose element type is itself a reference is rejected
+        // by the inner scalar check.
+        let func = parse_fn(quote! {
+            fn kernel(data: *mut [&[f32]]) {}
+        });
+        let _ = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+    }
+
+    #[test]
+    fn reject_ptr_fixed_array() {
+        let func = parse_fn(quote! {
+            fn kernel(data: *mut [f32; 256]) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("fixed-size arrays"));
+    }
+
+    #[test]
+    fn reject_ptr_nested_pointer() {
+        let func = parse_fn(quote! {
+            fn kernel(data: *const *mut [f32]) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("nested references or pointers"));
+    }
+
+    // --- Reference-form diagnostic symmetry (D9) ---
+
+    #[test]
+    fn reject_ref_fixed_array() {
+        let func = parse_fn(quote! {
+            fn kernel(data: &mut [f32; 256]) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("fixed-size arrays"));
+    }
+
+    #[test]
+    fn reject_ref_nested_reference() {
+        let func = parse_fn(quote! {
+            fn kernel(data: &mut &[f32]) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("nested references or pointers"));
+    }
 }
