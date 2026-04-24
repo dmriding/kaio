@@ -27,6 +27,8 @@
 
 use pyo3::prelude::*;
 
+mod device;
+
 /// Python module entry point.
 ///
 /// Sprint 8.1 exposes a minimal surface — the scaffold + one smoke
@@ -34,6 +36,7 @@ use pyo3::prelude::*;
 /// respectively. This module registration is the foundation every
 /// later commit attaches to.
 #[pymodule]
-fn kaio(_py: Python<'_>, _m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn kaio(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<device::Device>()?;
     Ok(())
 }
