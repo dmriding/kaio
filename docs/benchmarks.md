@@ -99,10 +99,23 @@ disclaimer describing exactly what is being compared to what.
 
 ## Bench coverage
 
-As of Sprint 8.0, `cargo xtask bench` covers matmul variants only
-(f16 TC sync/async, INT8, INT4). Fused QKV projections, attention
-kernels, and the showcase-example kernels (rms_norm, layer_norm,
-softmax, fused_silu_gate, gelu) are correctness-tested but not yet
-under the unified bench harness. Sprint 8.0.5 extends bench
-coverage; see the "Bench coverage today + roadmap" section in
-`performance.md` for the current gap.
+As of Sprint 8.0.5, `cargo xtask bench` covers seven benchmark
+harnesses spanning the shipped high-level / public kernel families
+plus the showcase kernels:
+
+- `matmul_tc_bench` — f16 tensor-core matmul (sync + async) vs cuBLAS sgemm
+- `matmul_int8_bench` — W8A8 symmetric INT8 matmul
+- `matmul_int4_bench` — W4A16 GPTQ-style INT4 matmul
+- `qkv_project_bench` — fused INT4 vs 3× standalone `matmul_int4`; INT8 absolute TOPS
+- `attention_tc_bench` — `attention_tc` + `attention_tc_causal` (short-seq TC, `seq_k ≤ 384`)
+- `attention_flash_bench` — `attention_flash` + `attention_flash_causal` (long-seq online softmax)
+- `norm_activation_bench` — `rms_norm`, `layer_norm`, `softmax` (reductions) + `fused_silu_gate`, `gelu_exact`, `gelu_fast` (elementwise sweep)
+
+Result tables live in `performance.md`. Methodology (5 warmup + 20
+timed iterations per shape, worst-of-N framing across 10 consecutive
+`cargo xtask bench` invocations) applies uniformly across all seven.
+
+Internal `kaio-ops` primitives (fragment loaders, PTX-IR building
+blocks) and test-only macro kernels are intentionally outside bench
+coverage — they are correctness-tested via `cargo test --workspace`
+but not performance-gated.
