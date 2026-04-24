@@ -391,30 +391,214 @@ Use these columns for **sprint-over-sprint regression detection** on
 the KAIO column; treat the "vs sgemm" percentage as indicative, not
 definitive.
 
+## Fused QKV Projection Performance (Sprint 7.3)
+
+`qkv_project_int4` and `qkv_project_int8` fuse three QKV linear
+projections into a single kernel launch — one `x` read, three weight
+streams (or three scale streams for INT8), three f16 outputs. The
+INT4 variant can be measured against a baseline of three standalone
+`matmul_int4` calls for a direct fusion-speedup number; the INT8
+variant is W8A16 which has no apples-to-apples standalone op in
+`kaio-ops` (the public `matmul_int8` is W8A8), so it's reported as
+absolute TOPS only.
+
+Same 10-run worst-of-N protocol as the matmul tables above.
+
+**`qkv_project_int4` — fused tri-output vs 3× standalone `matmul_int4`:**
+
+| Shape | fused ms worst | fused ms median | 3× ms worst | 3× ms median | fused/3× ratio worst | fused/3× ratio median |
+|---|---:|---:|---:|---:|---:|---:|
+| `decode_m1` | 0.815 | 0.737 | 2.392 | 2.098 | 2.50× | 2.80× |
+| `decode_m64` | 0.505 | 0.491 | 2.216 | 2.017 | 3.96× | 4.14× |
+| `decode_m64_large` | 0.690 | 0.631 | 2.736 | 2.216 | 3.22× | 3.48× |
+| `prefill_m512` | 1.636 | 1.536 | 2.504 | 2.439 | 1.51× | 1.59× |
+| `prefill_m2048` | 5.764 | 4.710 | 5.159 | 4.560 | **0.86×** | **0.94×** |
+
+Decode regime (small M) shows the expected ~3–4× fusion win — one
+shared `x` read amortized across three weight streams is dramatic
+when activation bandwidth dominates. At `prefill_m2048` the ratio
+inverts: the fused kernel is narrower than the tuned standalone
+`matmul_int4` at long sequences. This matches the Sprint 7.3
+"ship-narrow at prefill" call and the S+½P investigation that
+retained Design-S for INT4.
+
+**`qkv_project_int8` — fused W8A16 absolute TOPS:**
+
+| Shape | fused ms worst | fused ms median | TOPS worst | TOPS median |
+|---|---:|---:|---:|---:|
+| `decode_m1` | 0.795 | 0.722 | 2.0 | 2.2 |
+| `decode_m64` | 0.816 | 0.722 | 2.0 | 2.2 |
+| `decode_m64_large` | 0.763 | 0.742 | 8.4 | 8.7 |
+| `prefill_m512` | 1.662 | 1.358 | 31.0 | 38.0 |
+| `prefill_m2048` | 5.069 | 4.280 | 40.7 | 48.3 |
+
+Absolute TOPS rather than a ratio because there is no public
+W8A16 standalone op to serve as a fair 3× baseline — `matmul_int8`
+(Sprint 7.1) is W8A8 and would be apples-to-oranges.
+
+## Attention Performance (Sprints 5.2 + 6.6 + Sprint 5.4)
+
+KAIO's public attention surface is **single-head self-attention**:
+`attention_tc` / `attention_tc_causal` (f16 Q/K/V → f32 out,
+tensor-core path) and `attention_flash` / `attention_flash_causal`
+(f32 Q/K/V → f32 out, online-softmax path). All four take either
+`(seq_q, seq_k, d_k, d_v)` or `(seq_len, d_k)` — there is no
+decode-style cross-attention kernel where `seq_q = 1, seq_k = N`;
+a decode-specific path would be a new kernel, not a shape
+difference.
+
+The two paths have **complementary design intents** and are
+deliberately benched at different shape ranges:
+
+- **`attention_tc` caps at `seq_k ≤ 384`** (shared-memory scores
+  buffer). It is a short-sequence fused-TC kernel by construction.
+- **`attention_flash` has no `seq_k` cap** — the online-softmax
+  formulation materializes no score matrix, so sequence length is
+  bounded only by Q/K/V tile storage. It is the long-sequence
+  complement.
+
+No cuBLAS / cuDNN baseline is reported. `cudarc` 0.19 does not
+expose `cudnnMultiHeadAttnForward` cleanly; a future sprint could
+add a raw-FFI reference, but this bench reports absolute latency
+and derived throughput only. Columns:
+
+- `median ms` — median-of-20 per run, worst/median/best across 10 runs
+- `seq/s = seq_len / median_s`
+- `attn_scores/s = seq_len² / median_s` (single-head, self-attention)
+
+**`attention_tc` (f16 Q/K/V → f32 out), `d_k = d_v = 128`:**
+
+| Shape | Variant | median ms worst | median ms median | attn_scores/s worst | attn_scores/s median |
+|---|---|---:|---:|---:|---:|
+| `n64` | plain | 0.347 | 0.332 | 1.18e7 | 1.24e7 |
+| `n64` | causal | 0.367 | 0.339 | 1.11e7 | 1.20e7 |
+| `n128` | plain | 0.389 | 0.358 | 4.21e7 | 4.58e7 |
+| `n128` | causal | 0.374 | 0.361 | 4.38e7 | 4.54e7 |
+| `n256` | plain | 0.427 | 0.408 | 1.54e8 | 1.61e8 |
+| `n256` | causal | 0.432 | 0.416 | 1.52e8 | 1.58e8 |
+| `n384` | plain | 0.478 | 0.459 | 3.09e8 | 3.21e8 |
+| `n384` | causal | 0.482 | 0.472 | 3.06e8 | 3.12e8 |
+
+**`attention_flash` (f32 Q/K/V → f32 out), `d_k = 128`:**
+
+| Shape | Variant | median ms worst | median ms median | attn_scores/s worst | attn_scores/s median |
+|---|---|---:|---:|---:|---:|
+| `n128` | plain | 0.289 | 0.270 | 5.66e7 | 6.08e7 |
+| `n128` | causal | 0.285 | 0.273 | 5.75e7 | 6.02e7 |
+| `n512` | plain | 0.414 | 0.398 | 6.33e8 | 6.58e8 |
+| `n512` | causal | 0.384 | 0.369 | 6.82e8 | 7.10e8 |
+| `n1024` | plain | 1.011 | 0.984 | 1.04e9 | 1.06e9 |
+| `n1024` | causal | 0.670 | 0.643 | 1.56e9 | 1.63e9 |
+| `n2048` | plain | 3.238 | 2.474 | 1.30e9 | 1.70e9 |
+| `n2048` | causal | 1.704 | 1.547 | 2.46e9 | 2.71e9 |
+
+At large `seq`, the causal variant is ~1.5–1.9× faster than plain
+— half the score-matrix work is skipped. This is the expected
+asymmetry between causal and plain attention under FlashAttention's
+tiled-softmax pipeline.
+
+### Apples-to-apples framing between the two attention tables
+
+KAIO TC uses f16 Q/K/V; flash uses f32 Q/K/V. Within each table
+comparisons are apples-to-apples. Across the two tables, prefer
+wall-clock at matched `seq_len` as the primary axis — dtypes
+differ, so TOPS-style throughput would mislead.
+
+## Norm + Activation Kernel Performance (Sprint 3 + Sprint 6.8)
+
+Six showcase-example kernels benched under a unified harness with
+the same 5-warmup + 20-timed methodology as the rest of the tables
+above. The kernels split into two groups by how they use the block:
+
+- **Reductions** (`rms_norm`, `layer_norm`, `softmax`): single-block
+  by construction (use block-scope `block_reduce_*` primitives),
+  capped at `block_size = 256`. Multi-block versions are a future
+  Ops Track item; the row here reports launch overhead + the
+  reduction's cost at `n = 256` only.
+- **Elementwise** (`fused_silu_gate`, `gelu_exact`, `gelu_fast`):
+  fully multi-block. Swept across `{256K, 1M, 4M}` elements for a
+  bandwidth-saturation curve.
+
+The kernels in this bench use `*mut [T]` / `*const [T]` pointer
+syntax (RFC-0001) — the numbers below are produced by kernels
+written in the form that Sprint 8.0 landed.
+
+**Effective GB/s framing.** The bandwidth column is model-level:
+bytes the kernel logically reads + writes, divided by wall-clock.
+It is **not** a claim about achieved HBM bandwidth — the driver's
+L2 / shared-memory reuse can lower real HBM traffic below the model
+number, and reductions traverse shared memory multiple times
+during the reduction tree. Use it as a per-kernel regression
+indicator across sprints, not as hardware-saturation evidence.
+Per-kernel byte accounting:
+
+| Kernel | Bytes per invocation |
+|---|---|
+| `rms_norm` | 12N  (x + weight + out, f32) |
+| `layer_norm` | 16N  (x + gamma + beta + out, f32) |
+| `softmax` | 8N  (input + output, f32) |
+| `fused_silu_gate` | 12N  (x + gate + out, f32) |
+| `gelu_exact` | 8N  (x + out, f32) |
+| `gelu_fast` | 8N  (x + out, f32) |
+
+**Reductions, single-block at `n = 256`:**
+
+| Kernel | median µs worst | median µs median | eff GB/s worst | eff GB/s median |
+|---|---:|---:|---:|---:|
+| `rms_norm` | 211.8 | 191.1 | 0.01 | 0.02 |
+| `layer_norm` | 228.4 | 211.0 | 0.02 | 0.02 |
+| `softmax` | 221.8 | 208.7 | 0.01 | 0.01 |
+
+At `n = 256` the rows above are dominated by launch overhead (driver
+kernel dispatch) rather than reduction work — expected for single-block
+kernels at this size. Ship these numbers as a regression floor for
+launch-overhead on the 4090 + Windows-WDDM pair, not as a statement
+about the reduction kernels' peak achievable performance.
+
+**Elementwise, sweep:**
+
+| Kernel | N | median µs worst | median µs median | Gelems/s worst | Gelems/s median | eff GB/s worst | eff GB/s median |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `fused_silu_gate` | 262 144 | 182.0 | 171.5 | 1.44 | 1.53 | 17.3 | 18.4 |
+| `fused_silu_gate` | 1 048 576 | 190.4 | 175.2 | 5.51 | 5.99 | 66.1 | 71.9 |
+| `fused_silu_gate` | 4 194 304 | 198.2 | 182.1 | 21.2 | 23.0 | 253.9 | 276.4 |
+| `gelu_exact` | 262 144 | 186.1 | 174.2 | 1.41 | 1.51 | 11.3 | 12.0 |
+| `gelu_exact` | 1 048 576 | 188.7 | 177.6 | 5.56 | 5.91 | 44.5 | 47.2 |
+| `gelu_exact` | 4 194 304 | 202.6 | 182.7 | 20.7 | 23.0 | 165.6 | 183.7 |
+| `gelu_fast` | 262 144 | 183.0 | 170.0 | 1.43 | 1.54 | 11.5 | 12.3 |
+| `gelu_fast` | 1 048 576 | 176.9 | 171.2 | 5.93 | 6.13 | 47.4 | 49.0 |
+| `gelu_fast` | 4 194 304 | 190.0 | 182.2 | 22.1 | 23.0 | 176.6 | 184.2 |
+
+At 4M elements the fused SiLU-gate approaches ~254 GB/s effective
+— approximately 25% of the 4090's 1 TB/s HBM peak, reasonable for
+kernels this simple where launch overhead is still a measurable
+tax at sub-200-µs end-to-end time. The two GELU variants report
+lower effective GB/s at matched element count because each has
+one fewer input stream (no gate) — the model-level byte count
+scales with the number of operands, not just N.
+
 ## Bench coverage today + roadmap
 
-`cargo xtask bench` today runs three benchmark harnesses:
-`matmul_tc_bench` (f16 TC sync + async), `matmul_int8_bench`, and
-`matmul_int4_bench`. These are the kernels with direct-measurable
-cuBLAS references for apples-to-oranges regression detection.
+`cargo xtask bench` covers seven benchmark harnesses as of Sprint 8.0.5:
 
-**Not yet in `xtask bench`** (Sprint 8.0.5 will extend coverage):
+- `matmul_tc_bench` — f16 tensor-core matmul (sync + async) vs cuBLAS sgemm
+- `matmul_int8_bench` — W8A8 symmetric INT8 matmul
+- `matmul_int4_bench` — W4A16 GPTQ-style INT4 matmul
+- `qkv_project_bench` — fused INT4 vs 3× `matmul_int4`; INT8 absolute TOPS
+- `attention_tc_bench` — `attention_tc` + `attention_tc_causal` (short-seq TC)
+- `attention_flash_bench` — `attention_flash` + `attention_flash_causal` (long-seq)
+- `norm_activation_bench` — rms_norm / layer_norm / softmax (reductions) +
+  fused_silu_gate / gelu_exact / gelu_fast (elementwise sweep)
 
-- `qkv_project_int8` / `qkv_project_int4` — fused tri-output QKV
-  projections. Needs a "3× standalone `matmul_int{8,4}`" baseline to
-  show the fusion advantage (~3× at decode shapes per internal
-  benches).
-- `attention_tc` / `attention_tc_causal` — FlashAttention-style
-  tensor-core attention. Natural reference is cuDNN MHA; needs a plan
-  doc to lock methodology.
-- `attention_flash` — IR-API FlashAttention (online softmax).
-- Showcase-example kernels (`rms_norm`, `layer_norm`, `softmax`,
-  `fused_silu_gate`, `gelu_exact`/`gelu_fast`) — each self-times
-  inside its own example binary today; Sprint 8.0.5 will promote
-  those to the unified bench harness with consistent warmup +
-  worst-of-N framing.
+Coverage scope is the **shipped high-level / public kernel families
+plus the showcase kernels**. Internal `kaio-ops` primitives (fragment
+loaders, PTX-IR building blocks) and test-only macro kernels are
+intentionally out of scope.
 
-Until 8.0.5 lands, the "KAIO benches every kernel it ships" claim is
-incomplete. Current benched coverage: matmul family (4 variants).
-Unbenched kernels are correctness-tested but not performance-gated in
-CI.
+**Future bench additions (not scheduled):**
+
+- cuDNN MHA reference for attention benches — tracked tech debt;
+  requires raw FFI wrapping beyond `cudarc` 0.19's exposure.
+- Multi-block reduction variants of `rms_norm` / `layer_norm` /
+  `softmax` — Ops Track item when those kernels ship.
+- bf16 TC matmul / Hopper `wgmma` — Phase 9 kernel deepening.
