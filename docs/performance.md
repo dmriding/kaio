@@ -249,18 +249,38 @@ bytes per col) plus a D10 fragment-loader hoist
 changes alone delivered a 7.4pp uplift on the async path, pushing it
 past the 90% stretch target from Sprint 6.7.
 
-### Measured on RTX 4090 (sm_89), median of 20 timed iterations after 5 warmups
+### Measured on RTX 4090 (sm_89), 10 consecutive `cargo xtask bench` runs (warm GPU)
 
-| Size       | TC sync TFLOPS | TC async TFLOPS | cuBLAS sgemm TFLOPS | sync vs cuBLAS | async vs cuBLAS |
-|------------|---------------:|----------------:|--------------------:|---------------:|----------------:|
-| 256³       | 0.05           | 0.05            | 1.77                | 2.9%           | 2.6%            |
-| 512³       | 0.37           | 0.34            | 11.09               | 3.3%           | 3.1%            |
-| 1024³      | 2.87           | 2.62            | 37.35               | 7.7%           | 7.0%            |
-| 2048³      | 17.34          | 16.74           | 52.91               | 32.8%          | 31.6%           |
-| **4096³**  | **40.93**      | **45.96**       | **49.72**           | **82.3%**      | **92.5%**       |
+Each run is median of 20 timed iterations after 5 warmups; the table
+below reports **worst / median / best observed across 10 runs**. Lead
+with worst-case ("KAIO does at least X even in the worst run we
+measured") — under-promise framing.
 
-6.7 → 6.7b delta at 4096²: sync 79.9% → 82.3% (+2.4pp), async 85.1% →
-**92.5%** (+7.4pp — past the 90% stretch on padding + hoist alone).
+**Tensor-core matmul sync (`matmul_tc`, fp16 × fp16 → f32):**
+
+| Size       | KAIO worst | KAIO median | KAIO best | cuBLAS worst | cuBLAS median | worst / worst | median / median |
+|------------|-----------:|------------:|----------:|-------------:|--------------:|--------------:|----------------:|
+| 256³       | 0.09 TF    | 0.10 TF     | 0.10 TF   | 1.71 TF      | 1.89 TF       | 5.3%          | 5.3%            |
+| 512³       | 0.72 TF    | 0.74 TF     | 0.76 TF   | 10.74 TF     | 12.01 TF      | 6.7%          | 6.2%            |
+| 1024³      | 5.14 TF    | 5.50 TF     | 5.56 TF   | 31.86 TF     | 32.34 TF      | 16.1%         | 17.0%           |
+| 2048³      | 27.11 TF   | 28.81 TF    | 29.55 TF  | 43.12 TF     | 43.48 TF      | 62.9%         | 66.3%           |
+| **4096³**  | **54.63 TF** | **60.27 TF** | **61.04 TF** | **51.05 TF** | **58.38 TF** | **107.0%**    | **103.2%**      |
+
+**Tensor-core matmul async (`matmul_tc_async`, fp16 × fp16 → f32):**
+
+| Size       | KAIO worst | KAIO median | KAIO best | cuBLAS worst | cuBLAS median | worst / worst | median / median |
+|------------|-----------:|------------:|----------:|-------------:|--------------:|--------------:|----------------:|
+| 256³       | 0.09 TF    | 0.09 TF     | 0.09 TF   | 1.71 TF      | 1.89 TF       | 5.3%          | 4.8%            |
+| 512³       | 0.53 TF    | 0.69 TF     | 0.71 TF   | 10.74 TF     | 12.01 TF      | 4.9%          | 5.7%            |
+| 1024³      | 4.98 TF    | 5.17 TF     | 5.31 TF   | 31.86 TF     | 32.34 TF      | 15.6%         | 16.0%           |
+| 2048³      | 27.90 TF   | 29.35 TF    | 30.21 TF  | 43.12 TF     | 43.48 TF      | 64.7%         | 67.5%           |
+| **4096³**  | **58.74 TF** | **65.12 TF** | **65.56 TF** | **51.05 TF** | **58.38 TF** | **115.1%**    | **111.5%**      |
+
+At 4096³, KAIO TC async meets-or-beats cuBLAS sgemm in every single
+run of the 10 measured. Floor: 115% of cuBLAS worst. Typical: 112% of
+cuBLAS median. The 2026-04-14 v0.2.1 headline was "92.5%" (median of
+one run); subsequent warm/thermal steady-state across multiple runs
+shows KAIO is consistently at or above the reference.
 
 ### Apples-to-apples disclaimer
 
@@ -323,3 +343,73 @@ hasn't yet made:
 - **bf16 TC matmul / larger mma shapes** (Phase 7).
 - **ldmatrix.sync.aligned** (Phase 7) — the real path to closing the
   remaining gap on sync.
+
+## Quantized Matmul Performance (Sprints 7.1 + 7.2)
+
+Same bench harness as TC matmul (5 warmups + 20 timed iterations per
+run, `cargo xtask bench`), 10 consecutive runs on RTX 4090 sm_89,
+release build. Worst / median / best distribution across runs.
+
+**`matmul_int8` — W8A8 symmetric (i8 × i8 → s32 → scale → f32):**
+
+| Size       | KAIO worst | KAIO median | KAIO best | cuBLAS sgemm worst | cuBLAS sgemm median |
+|------------|-----------:|------------:|----------:|-------------------:|--------------------:|
+| 256³       | 0.09 TOPS  | 0.09 TOPS   | 0.09 TOPS | 1.56 TF            | 1.88 TF             |
+| 512³       | 0.66 TOPS  | 0.70 TOPS   | 0.72 TOPS | 11.33 TF           | 12.04 TF            |
+| 1024³      | 5.11 TOPS  | 5.38 TOPS   | 5.49 TOPS | 31.86 TF           | 32.49 TF            |
+| 2048³      | 32.23 TOPS | 32.77 TOPS  | 33.95 TOPS| 43.41 TF           | 43.47 TF            |
+| **4096³**  | **84.07 TOPS** | **92.58 TOPS** | **93.38 TOPS** | **49.90 TF** | **56.00 TF** |
+
+**`matmul_int4` — W4A16 GPTQ-style (packed s4 × f16 → f32 via dequant):**
+
+| Size       | KAIO worst | KAIO median | KAIO best | cuBLAS sgemm worst | cuBLAS sgemm median |
+|------------|-----------:|------------:|----------:|-------------------:|--------------------:|
+| 512³       | 0.46 TOPS  | 0.47 TOPS   | 0.48 TOPS | 11.83 TF           | 11.96 TF            |
+| 1024³      | 3.52 TOPS  | 3.66 TOPS   | 3.74 TOPS | 32.34 TF           | 32.54 TF            |
+| 2048³      | 21.71 TOPS | 22.27 TOPS  | 22.67 TOPS| 43.38 TF           | 43.50 TF            |
+| **4096³**  | **52.02 TOPS** | **57.52 TOPS** | **58.04 TOPS** | **45.55 TF** | **49.00 TF** |
+
+### Apples-to-apples disclaimer for INT columns
+
+The "cuBLAS sgemm" column is a **project-local compute-density
+reference**, not a precision-matched comparison:
+
+- `matmul_int8` is W8A8 (i8 in, s32 accumulate, scale to f32 on store).
+  True apples-to-apples would be `cublasGemmEx` with `CUDA_R_8I` — that
+  interface is not cleanly exposed by `cudarc` 0.19 at the time of
+  writing (tracked as tech debt).
+- `matmul_int4` is W4A16 with dequant-to-f16 + `mma.m16n8k16.f16.f16.f32`.
+  Weight bandwidth alone is 0.5 B/weight vs 4 B for sgemm — an 8×
+  memory-bandwidth advantage that dominates the ratio.
+
+Use these columns for **sprint-over-sprint regression detection** on
+the KAIO column; treat the "vs sgemm" percentage as indicative, not
+definitive.
+
+## Bench coverage today + roadmap
+
+`cargo xtask bench` today runs three benchmark harnesses:
+`matmul_tc_bench` (f16 TC sync + async), `matmul_int8_bench`, and
+`matmul_int4_bench`. These are the kernels with direct-measurable
+cuBLAS references for apples-to-oranges regression detection.
+
+**Not yet in `xtask bench`** (Sprint 8.0.5 will extend coverage):
+
+- `qkv_project_int8` / `qkv_project_int4` — fused tri-output QKV
+  projections. Needs a "3× standalone `matmul_int{8,4}`" baseline to
+  show the fusion advantage (~3× at decode shapes per internal
+  benches).
+- `attention_tc` / `attention_tc_causal` — FlashAttention-style
+  tensor-core attention. Natural reference is cuDNN MHA; needs a plan
+  doc to lock methodology.
+- `attention_flash` — IR-API FlashAttention (online softmax).
+- Showcase-example kernels (`rms_norm`, `layer_norm`, `softmax`,
+  `fused_silu_gate`, `gelu_exact`/`gelu_fast`) — each self-times
+  inside its own example binary today; Sprint 8.0.5 will promote
+  those to the unified bench harness with consistent warmup +
+  worst-of-N framing.
+
+Until 8.0.5 lands, the "KAIO benches every kernel it ships" claim is
+incomplete. Current benched coverage: matmul family (4 variants).
+Unbenched kernels are correctness-tested but not performance-gated in
+CI.
