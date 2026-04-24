@@ -45,7 +45,7 @@ cd kaio
 cargo xtask showcase
 ```
 
-You'll see `fused_silu_gate`, `gelu_comparison`, `rms_norm`, `layer_norm`, `softmax`, `int8_dequant`, and `int8_matmul` compile, launch, verify correctness against a CPU reference, and report median latency. The seven examples span activations, normalizations, reductions, and the quantize → matmul pipeline: the canonical transformer-primitive arc plus the W8A8 headline op.
+You'll see `fused_silu_gate`, `gelu_comparison`, `rms_norm`, `layer_norm`, `softmax`, `int8_dequant`, `int8_matmul`, `int4_matmul`, and `quantized_attention` compile, launch, verify correctness against a CPU reference, and report median latency. The nine examples span activations, normalizations, reductions, the quantize → matmul pipeline, and end-to-end quantized attention — the canonical transformer-primitive arc plus the W8A8 / W4A16 / fused-QKV headline ops.
 
 Want the performance pitch instead? `cargo xtask bench` runs the tensor-core matmul benchmark against cuBLAS sgemm across five sizes. Or `cargo xtask all` for both. `cargo xtask --help` for the full tooling surface.
 
@@ -125,18 +125,21 @@ Correctness:       PASS  (max_abs_err = 1.49e-8)
 Median latency:    188.8 μs  (of 100 timed runs, 5 warm-ups skipped)
 ```
 
-Or run all six showcases in sequence with `cargo xtask showcase`:
+Or run all nine showcases in sequence with `cargo xtask showcase`:
 [fused SiLU-gate](examples/fused_silu_gate/),
 [exact vs fast GELU](examples/gelu_comparison/),
 [single-block RMSNorm](examples/rms_norm/),
 [single-block LayerNorm](examples/layer_norm/),
 [single-block softmax](examples/softmax/),
-[INT8 dequantization](examples/int8_dequant/). Each is a complete
-standalone project with correctness + timing (with its own `Cargo.toml`
-so you can copy the directory out of the repo as a reference for your
-own kernel); the GELU comparison's README explains why kernel fusion
-matters more than arithmetic optimization for ML workloads (the
-bandwidth-bound teaching moment).
+[INT8 dequantization](examples/int8_dequant/),
+[INT8 matmul](examples/int8_matmul/),
+[INT4 matmul](examples/int4_matmul/),
+[quantized attention](examples/quantized_attention/). Each is a
+complete standalone project with correctness + timing (with its own
+`Cargo.toml` so you can copy the directory out of the repo as a
+reference for your own kernel); the GELU comparison's README explains
+why kernel fusion matters more than arithmetic optimization for ML
+workloads (the bandwidth-bound teaching moment).
 
 ## When to use KAIO
 
