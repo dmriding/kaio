@@ -8,7 +8,7 @@
 //! cargo xtask showcase          # runs all showcase examples in sequence
 //! cargo xtask showcase silu     # runs just fused_silu_gate
 //! cargo xtask showcase --list   # prints the available showcases
-//! cargo xtask bench             # runs the matmul TC benchmark
+//! cargo xtask bench             # runs all registered benchmarks
 //! cargo xtask all               # showcase then bench
 //! cargo xtask --help            # this message
 //! ```
@@ -254,6 +254,11 @@ const BENCHES: &[(&str, &str, &str)] = &[
         "qkv_project_bench",
         "Fused tri-output QKV projection; INT4 ratio vs 3x matmul_int4, INT8 absolute TOPS",
     ),
+    (
+        "=== attention_tc benchmark (single-head self-attention, f16 Q/K/V -> f32 out) ===",
+        "attention_tc_bench",
+        "Tensor-core attention (plain + causal) latency + seq/s + attn_scores/s",
+    ),
 ];
 
 /// `cargo xtask bench [<name>|--list]` entry point. Runs one or all
@@ -302,8 +307,9 @@ fn run_bench(args: &[&str]) -> ExitCode {
         println!("{header}");
         println!();
         println!("  Hardware: uses the first CUDA device visible to the driver.");
-        println!("  Sizes: 256, 512, 1024, 2048, 4096 (square).");
-        println!("  Methodology: 5 warmup + 20 timed iterations per size.");
+        println!(
+            "  Methodology: 5 warmup + 20 timed iterations per shape (bench-specific shape table printed below)."
+        );
         println!();
 
         let t0 = Instant::now();
