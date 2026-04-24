@@ -541,21 +541,34 @@ Per-kernel byte accounting:
 | `gelu_exact` | 8N  (x + out, f32) |
 | `gelu_fast` | 8N  (x + out, f32) |
 
-**Reductions, single-block at `n = 256`:**
+**Reduction kernels — launch-overhead reference (not throughput):**
 
-| Kernel | median µs worst | median µs median | eff GB/s worst | eff GB/s median |
-|---|---:|---:|---:|---:|
-| `rms_norm` | 211.8 | 191.1 | 0.01 | 0.02 |
-| `layer_norm` | 228.4 | 211.0 | 0.02 | 0.02 |
-| `softmax` | 221.8 | 208.7 | 0.01 | 0.01 |
+At the single-block cap of `n = 256`, the reduction kernels do
+microseconds of actual work inside hundreds of microseconds of
+driver kernel-dispatch overhead. Reporting effective GB/s at this
+size would be meaningless (everything dominated by dispatch, not
+compute or bandwidth), so only median latency is shown — interpret
+the numbers as a regression floor for **launch overhead on the
+RTX 4090 + Windows (WDDM) pair**, not as a claim about the
+reductions' peak throughput. Multi-block reduction variants are a
+future Ops Track item that would surface real kernel throughput
+across production hidden-dim sizes.
 
-At `n = 256` the rows above are dominated by launch overhead (driver
-kernel dispatch) rather than reduction work — expected for single-block
-kernels at this size. Ship these numbers as a regression floor for
-launch-overhead on the 4090 + Windows-WDDM pair, not as a statement
-about the reduction kernels' peak achievable performance.
+| Kernel | median µs worst | median µs median |
+|---|---:|---:|
+| `rms_norm` | 211.8 | 191.1 |
+| `layer_norm` | 228.4 | 211.0 |
+| `softmax` | 221.8 | 208.7 |
 
-**Elementwise, sweep:**
+**Elementwise kernels — bandwidth-bound sweep:**
+
+The three elementwise kernels are fully multi-block and
+bandwidth-bound. At small N (262K / 1M) the per-launch dispatch
+overhead still dominates; only at 4M does the work pull effective
+bandwidth into a regime that reflects actual compute + HBM
+traffic. Throughput scales roughly linearly with N across this
+sweep because the kernels are memory-bound and launch overhead is
+constant per invocation.
 
 | Kernel | N | median µs worst | median µs median | Gelems/s worst | Gelems/s median | eff GB/s worst | eff GB/s median |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -575,7 +588,10 @@ kernels this simple where launch overhead is still a measurable
 tax at sub-200-µs end-to-end time. The two GELU variants report
 lower effective GB/s at matched element count because each has
 one fewer input stream (no gate) — the model-level byte count
-scales with the number of operands, not just N.
+scales with the number of operands, not just N. For throughput
+ceilings, the 4M-row numbers are the ones to watch sprint-over-sprint;
+the 262K and 1M rows are bounded by dispatch overhead, not the
+kernel itself.
 
 ## Bench coverage today + roadmap
 
