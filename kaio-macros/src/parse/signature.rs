@@ -42,7 +42,7 @@ fn parse_type(ty: &Type) -> syn::Result<KernelType> {
             }
         }
 
-        // Reference: &[T] or &mut [T]
+        // Reference: &[T] or &mut [T] — sugar form.
         Type::Reference(type_ref) => {
             if type_ref.lifetime.is_some() {
                 return Err(syn::Error::new_spanned(
@@ -50,26 +50,11 @@ fn parse_type(ty: &Type) -> syn::Result<KernelType> {
                     "lifetime parameters are not supported in GPU kernels",
                 ));
             }
-
-            match type_ref.elem.as_ref() {
-                Type::Slice(type_slice) => {
-                    let elem_ty = parse_type(&type_slice.elem)?;
-                    if !elem_ty.is_scalar() {
-                        return Err(syn::Error::new_spanned(
-                            &type_slice.elem,
-                            "nested slices are not supported in GPU kernels",
-                        ));
-                    }
-                    if type_ref.mutability.is_some() {
-                        Ok(KernelType::SliceMutRef(Box::new(elem_ty)))
-                    } else {
-                        Ok(KernelType::SliceRef(Box::new(elem_ty)))
-                    }
-                }
-                _ => Err(syn::Error::new_spanned(
-                    ty,
-                    "only slice references (&[T] / &mut [T]) are supported in GPU kernels",
-                )),
+            let elem_ty = parse_slice_elem_type(&type_ref.elem, ty)?;
+            if type_ref.mutability.is_some() {
+                Ok(KernelType::SliceMutRef(Box::new(elem_ty)))
+            } else {
+                Ok(KernelType::SliceRef(Box::new(elem_ty)))
             }
         }
 
@@ -78,7 +63,7 @@ fn parse_type(ty: &Type) -> syn::Result<KernelType> {
         // pointer syntax signals "device pointer, no aliasing contract" which
         // matches the on-device reality.
         Type::Ptr(type_ptr) => {
-            let elem_ty = parse_ptr_slice_elem(&type_ptr.elem, ty)?;
+            let elem_ty = parse_slice_elem_type(&type_ptr.elem, ty)?;
             if type_ptr.mutability.is_some() {
                 Ok(KernelType::SliceMutRef(Box::new(elem_ty)))
             } else {
@@ -95,10 +80,11 @@ fn parse_type(ty: &Type) -> syn::Result<KernelType> {
     }
 }
 
-/// Parse the inner (pointee) type of a raw-pointer kernel parameter.
-/// Accepts `[T]` (slice) and returns the element `KernelType`; emits dedicated
-/// diagnostics for common mistakes a user might write.
-fn parse_ptr_slice_elem(inner: &Type, outer_ty: &Type) -> syn::Result<KernelType> {
+/// Parse the inner (pointee or referent) type of a slice-parameter syntax —
+/// `&[T]`, `&mut [T]`, `*const [T]`, `*mut [T]`. Returns the slice element's
+/// `KernelType`; the caller wraps it in `SliceRef` / `SliceMutRef` based on
+/// the outer mutability. Emits dedicated diagnostics for common mistakes.
+fn parse_slice_elem_type(inner: &Type, outer_ty: &Type) -> syn::Result<KernelType> {
     match inner {
         Type::Slice(type_slice) => {
             let elem_ty = parse_type(&type_slice.elem)?;
@@ -113,16 +99,16 @@ fn parse_ptr_slice_elem(inner: &Type, outer_ty: &Type) -> syn::Result<KernelType
         Type::Array(_) => Err(syn::Error::new_spanned(
             inner,
             "fixed-size arrays are not supported in GPU kernel parameters \
-             — use `*const [T]` or `*mut [T]` for device slices",
+             — use `&[T]`, `&mut [T]`, `*const [T]`, or `*mut [T]` for device slices",
         )),
-        Type::Ptr(_) => Err(syn::Error::new_spanned(
+        Type::Ptr(_) | Type::Reference(_) => Err(syn::Error::new_spanned(
             inner,
-            "nested pointers are not supported in GPU kernels",
+            "nested references or pointers are not supported in GPU kernels",
         )),
         _ => Err(syn::Error::new_spanned(
             outer_ty,
-            "pointer-to-scalar is not supported in GPU kernels \
-             — kernels take pointers to slices: `*const [T]` or `*mut [T]`",
+            "only slice parameters are supported in GPU kernels \
+             (&[T], &mut [T], *const [T], *mut [T])",
         )),
     }
 }
@@ -354,6 +340,6 @@ mod tests {
             fn kernel(data: &f32) {}
         });
         let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
-        assert!(err.to_string().contains("slice references"));
+        assert!(err.to_string().contains("slice parameters"));
     }
 }
