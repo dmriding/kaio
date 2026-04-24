@@ -60,7 +60,7 @@ cargo add kaio
 use kaio::prelude::*;
 
 #[gpu_kernel(block_size = 256)]
-fn saxpy(x: &[f32], y: &mut [f32], alpha: f32, n: u32) {
+fn saxpy(x: *const [f32], y: *mut [f32], alpha: f32, n: u32) {
     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
     if idx < n {
         y[idx] = alpha * x[idx] + y[idx];
@@ -99,7 +99,7 @@ use kaio::prelude::*;
 // CUDA for it. With KAIO it's 7 lines of Rust, lowered to a PTX IR
 // module at compile time and JIT-loaded at launch.
 #[gpu_kernel(block_size = 256)]
-fn fused_silu_gate(x: &[f32], gate: &[f32], out: &mut [f32], n: u32) {
+fn fused_silu_gate(x: *const [f32], gate: *const [f32], out: *mut [f32], n: u32) {
     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
     if idx < n {
         let xi = x[idx];
@@ -215,7 +215,7 @@ Copy these skeletons, fill in your logic.
 
 ```rust
 #[gpu_kernel(block_size = 256)]
-fn my_kernel(input: &[f32], output: &mut [f32], n: u32) {
+fn my_kernel(input: *const [f32], output: *mut [f32], n: u32) {
     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
     if idx < n {
         output[idx] = input[idx] * 2.0; // your logic here
@@ -227,7 +227,7 @@ fn my_kernel(input: &[f32], output: &mut [f32], n: u32) {
 
 ```rust
 #[gpu_kernel(block_size = 256)]
-fn tiled(data: &[f32], out: &mut [f32], n: u32) {
+fn tiled(data: *const [f32], out: *mut [f32], n: u32) {
     let tid = thread_idx_x();
     let idx = tid + block_idx_x() * block_dim_x();
     let tile = shared_mem![f32; 256];
@@ -289,18 +289,19 @@ KAIO is pre-1.0 software. Current engineering constraints:
 - **DSL is a Rust subset, not compiled Rust.** `#[gpu_kernel]` function
   bodies use Rust syntax but are parsed into KAIO's own IR and lowered
   directly to PTX. The kernel body **never reaches rustc's backend** —
-  no LLVM, no MIR, no borrow checker. This means `&mut [T]` in a kernel
-  signature does not carry Rust's aliasing guarantees: thousands of GPU
-  threads access the same buffer concurrently, and correctness depends on
-  the kernel author writing disjoint access patterns (e.g. `if idx < n`
-  guards), not on compiler-enforced uniqueness. You cannot call Rust
-  functions declared outside the kernel inside the kernel body. No
-  closures, traits, generics, method calls, or string operations.
-  Arithmetic, comparisons, bitwise operators (`&` `|` `^` `<<` `>>`
-  `!`), short-circuit `&&` / `||`, and compound assignment (including
-  bitwise `&=` / `|=` / `<<=` / etc.) all supported. A pointer-syntax
-  alternative (`*mut [T]`) that more honestly reflects the GPU memory
-  model is planned — see [RFC-0001](docs/development/rfcs/rfc-0001-pointer-syntax.md).
+  no LLVM, no MIR, no borrow checker. Kernel parameters are written as
+  `*const [T]` / `*mut [T]` (primary, per
+  [RFC-0001](docs/development/rfcs/rfc-0001-pointer-syntax.md)) to
+  signal the on-device reality: thousands of GPU threads access the same
+  buffer concurrently, and correctness depends on disjoint access
+  patterns (e.g. `if idx < n` guards), not on compiler-enforced
+  uniqueness. `&[T]` / `&mut [T]` are accepted as permanent sugar and
+  lower identically. You cannot call Rust functions declared outside the
+  kernel inside the kernel body. No closures, traits, generics, method
+  calls, or string operations. Arithmetic, comparisons, bitwise
+  operators (`&` `|` `^` `<<` `>>` `!`), short-circuit `&&` / `||`, and
+  compound assignment (including bitwise `&=` / `|=` / `<<=` / etc.)
+  all supported.
 - **FlashAttention d_k limit.** `attention_flash()` requires
   d_k ≤ 256 (one thread per output dimension).
 - **Single-device.** No multi-GPU support.

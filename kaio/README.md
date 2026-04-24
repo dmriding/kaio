@@ -11,7 +11,7 @@ No CUDA C++, no Python, no CUDA toolkit required. Windows + Linux.
 use kaio::prelude::*;
 
 #[gpu_kernel(block_size = 256)]
-fn saxpy(x: &[f32], y: &mut [f32], alpha: f32, n: u32) {
+fn saxpy(x: *const [f32], y: *mut [f32], alpha: f32, n: u32) {
     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
     if idx < n {
         y[idx] = alpha * x[idx] + y[idx];
