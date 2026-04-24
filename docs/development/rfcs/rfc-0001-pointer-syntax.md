@@ -125,8 +125,8 @@ KAIO kernels use routinely. Not viable as the primary API design.
 
 ## Implementation notes (Sprint 8.0)
 
-The landing matched the design with two small refinements surfaced in
-the multi-reviewer planning rounds:
+The landing matched the design with two small refinements added during
+implementation:
 
 1. **Shared helper for slice-parameter diagnostics.** A private helper
    `parse_slice_elem_type(inner, outer_ty)` in
