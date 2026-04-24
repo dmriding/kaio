@@ -9,7 +9,7 @@ use crate::kernel_ir::{KernelConfig, KernelParam, KernelSignature, KernelType};
 ///
 /// Supported types:
 /// - Scalars: `f32`, `f64`, `i32`, `u32`, `i64`, `u64`, `bool`
-/// - Slices: `&[T]`, `&mut [T]` where T is a supported scalar
+/// - Slices: `&[T]`, `&mut [T]`, `*const [T]`, `*mut [T]` where T is a supported scalar
 fn parse_type(ty: &Type) -> syn::Result<KernelType> {
     match ty {
         // Scalar: path type like `f32`, `u32`, etc.
@@ -18,7 +18,8 @@ fn parse_type(ty: &Type) -> syn::Result<KernelType> {
                 return Err(syn::Error::new_spanned(
                     ty,
                     "unsupported type in GPU kernel parameter. \
-                     Supported: f32, f64, i32, u32, i64, u64, bool, &[T], &mut [T]",
+                     Supported: f32, f64, i32, u32, i64, u64, bool, \
+                     &[T], &mut [T], *const [T], *mut [T]",
                 ));
             }
             let ident = &type_path.path.segments[0].ident;
@@ -34,7 +35,8 @@ fn parse_type(ty: &Type) -> syn::Result<KernelType> {
                     ty,
                     format!(
                         "unsupported type `{other}` in GPU kernel parameter. \
-                         Supported: f32, f64, i32, u32, i64, u64, bool, &[T], &mut [T]"
+                         Supported: f32, f64, i32, u32, i64, u64, bool, \
+                         &[T], &mut [T], *const [T], *mut [T]"
                     ),
                 )),
             }
@@ -71,10 +73,56 @@ fn parse_type(ty: &Type) -> syn::Result<KernelType> {
             }
         }
 
+        // Raw pointer: *const [T] or *mut [T] — primary form per RFC-0001.
+        // Semantically identical to the reference forms (same PTX lowering); the
+        // pointer syntax signals "device pointer, no aliasing contract" which
+        // matches the on-device reality.
+        Type::Ptr(type_ptr) => {
+            let elem_ty = parse_ptr_slice_elem(&type_ptr.elem, ty)?;
+            if type_ptr.mutability.is_some() {
+                Ok(KernelType::SliceMutRef(Box::new(elem_ty)))
+            } else {
+                Ok(KernelType::SliceRef(Box::new(elem_ty)))
+            }
+        }
+
         _ => Err(syn::Error::new_spanned(
             ty,
             "unsupported type in GPU kernel parameter. \
-             Supported: f32, f64, i32, u32, i64, u64, bool, &[T], &mut [T]",
+             Supported: f32, f64, i32, u32, i64, u64, bool, \
+             &[T], &mut [T], *const [T], *mut [T]",
+        )),
+    }
+}
+
+/// Parse the inner (pointee) type of a raw-pointer kernel parameter.
+/// Accepts `[T]` (slice) and returns the element `KernelType`; emits dedicated
+/// diagnostics for common mistakes a user might write.
+fn parse_ptr_slice_elem(inner: &Type, outer_ty: &Type) -> syn::Result<KernelType> {
+    match inner {
+        Type::Slice(type_slice) => {
+            let elem_ty = parse_type(&type_slice.elem)?;
+            if !elem_ty.is_scalar() {
+                return Err(syn::Error::new_spanned(
+                    &type_slice.elem,
+                    "nested slices are not supported in GPU kernels",
+                ));
+            }
+            Ok(elem_ty)
+        }
+        Type::Array(_) => Err(syn::Error::new_spanned(
+            inner,
+            "fixed-size arrays are not supported in GPU kernel parameters \
+             — use `*const [T]` or `*mut [T]` for device slices",
+        )),
+        Type::Ptr(_) => Err(syn::Error::new_spanned(
+            inner,
+            "nested pointers are not supported in GPU kernels",
+        )),
+        _ => Err(syn::Error::new_spanned(
+            outer_ty,
+            "pointer-to-scalar is not supported in GPU kernels \
+             — kernels take pointers to slices: `*const [T]` or `*mut [T]`",
         )),
     }
 }
