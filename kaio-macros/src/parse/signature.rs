@@ -105,6 +105,11 @@ fn parse_slice_elem_type(inner: &Type, outer_ty: &Type) -> syn::Result<KernelTyp
             inner,
             "nested references or pointers are not supported in GPU kernels",
         )),
+        Type::Path(_) => Err(syn::Error::new_spanned(
+            outer_ty,
+            "pointer/reference-to-scalar is not supported in GPU kernel parameters \
+             — kernels take slices: `&[T]`, `&mut [T]`, `*const [T]`, or `*mut [T]`",
+        )),
         _ => Err(syn::Error::new_spanned(
             outer_ty,
             "only slice parameters are supported in GPU kernels \
@@ -340,7 +345,7 @@ mod tests {
             fn kernel(data: &f32) {}
         });
         let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
-        assert!(err.to_string().contains("slice parameters"));
+        assert!(err.to_string().contains("pointer/reference-to-scalar"));
     }
 
     // --- Pointer-form acceptance (RFC-0001) ---
@@ -451,7 +456,7 @@ mod tests {
             fn kernel(data: *mut f32) {}
         });
         let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
-        assert!(err.to_string().contains("slice parameters"));
+        assert!(err.to_string().contains("pointer/reference-to-scalar"));
     }
 
     #[test]
@@ -461,7 +466,8 @@ mod tests {
         let func = parse_fn(quote! {
             fn kernel(data: *mut [&[f32]]) {}
         });
-        let _ = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("nested slices"));
     }
 
     #[test]
