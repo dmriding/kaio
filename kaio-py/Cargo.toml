@@ -1,0 +1,39 @@
+[package]
+name = "kaio-py"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+authors = ["KAIO contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dmriding/kaio"
+description = "Python bindings for KAIO — Rust-native GPU kernel authoring framework. Exposes the kaio-ops public API (tensor-core matmul, attention, quantized kernels) to Python via PyO3."
+keywords = ["gpu", "cuda", "python", "pyo3", "kernel"]
+categories = ["hardware-support", "api-bindings"]
+
+# Not a workspace member: Phase 7 learned the hard way that workspace
+# feature union merges cudarc's dynamic-loading + dynamic-linking and
+# panics at runtime. kaio-py pulls kaio + kaio-ops as path deps with
+# explicit default-features = false + dynamic-loading, matching the
+# kaio-candle standalone pattern.
+
+[lib]
+name = "kaio"
+crate-type = ["cdylib"]
+
+[dependencies]
+# No `extension-module` feature — deprecated by PyO3 for use with
+# maturin >= 1.9.4; maturin handles the linker flag itself.
+pyo3 = { version = "0.28", features = ["abi3-py310"] }
+
+# `half` feature mandatory: numpy::Element for half::f16 is gated
+# behind it. Without this feature, PyReadonlyArrayDyn<f16> won't
+# compile. numpy major version matches pyo3.
+numpy = { version = "0.28", features = ["half"] }
+
+# Renamed via `package =` key: the Rust crate name `kaio` would
+# collide with [lib] name = "kaio" on this crate. Internal imports
+# use `kaio_rs::...`.
+kaio-rs = { package = "kaio", path = "../kaio", default-features = false, features = ["dynamic-loading"] }
+kaio-ops = { path = "../kaio-ops", default-features = false, features = ["dynamic-loading"] }
+
+half = "2"
