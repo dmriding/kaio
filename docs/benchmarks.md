@@ -37,6 +37,13 @@ median-of-medians and best-of-medians are reported alongside for
 distribution context. See `docs/performance.md` for the current
 distribution tables.
 
+Published numbers represent the sprint in which they first landed
+— numbers in `performance.md` are not re-measured every subsequent
+sprint. Re-runs on the same hardware in later sprints have been
+within run-to-run variance (confirmed in Sprint 8.0.5 against the
+Sprint 8.0 matmul tables); the published worst-of-10 is therefore
+a stable floor rather than a rolling most-recent-run measurement.
+
 ## Input data
 
 Deterministic pseudo-random f32 in `[-1, 1]`, fixed seeds (42 for A,

@@ -582,16 +582,12 @@ constant per invocation.
 | `gelu_fast` | 1 048 576 | 176.9 | 171.2 | 5.93 | 6.13 | 47.4 | 49.0 |
 | `gelu_fast` | 4 194 304 | 190.0 | 182.2 | 22.1 | 23.0 | 176.6 | 184.2 |
 
-At 4M elements the fused SiLU-gate approaches ~254 GB/s effective
-— approximately 25% of the 4090's 1 TB/s HBM peak, reasonable for
-kernels this simple where launch overhead is still a measurable
-tax at sub-200-µs end-to-end time. The two GELU variants report
-lower effective GB/s at matched element count because each has
-one fewer input stream (no gate) — the model-level byte count
-scales with the number of operands, not just N. For throughput
-ceilings, the 4M-row numbers are the ones to watch sprint-over-sprint;
-the 262K and 1M rows are bounded by dispatch overhead, not the
-kernel itself.
+At 4M elements the fused SiLU-gate reaches ~254 GB/s effective.
+The two GELU variants report lower effective GB/s at matched N
+because each has one fewer input stream (no gate) — model-level
+byte count scales with the number of operands, not just N. For
+sprint-over-sprint regression tracking, the 4M row is the one to
+watch; the 262K and 1M rows are dispatch-overhead-bound.
 
 ## Bench coverage today + roadmap
 
