@@ -254,9 +254,9 @@ past the 90% stretch target from Sprint 6.7.
 ### Measured on RTX 4090 (sm_89), 10 consecutive `cargo xtask bench` runs (warm GPU)
 
 Each run is median of 20 timed iterations after 5 warmups; the table
-below reports **worst / median / best observed across 10 runs**. Lead
-with worst-case ("KAIO does at least X even in the worst run we
-measured") — under-promise framing.
+below reports **worst / median / best observed across 10 runs**.
+Headline numbers use the worst observed value — "KAIO does at least X
+even in the worst run we measured."
 
 **Tensor-core matmul sync (`matmul_tc`, fp16 × fp16 → f32):**
 

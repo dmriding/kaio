@@ -34,9 +34,8 @@ For publication-quality numbers, the bench harness is run 10
 consecutive times. The **worst observed median** across those 10
 runs is reported as the floor (e.g., "at least X TFLOPS"); the
 median-of-medians and best-of-medians are reported alongside for
-distribution context. This under-promise framing is the repo
-standard — see `docs/performance.md` for the current distribution
-tables.
+distribution context. See `docs/performance.md` for the current
+distribution tables.
 
 ## Input data
 

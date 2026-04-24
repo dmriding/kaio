@@ -22,9 +22,10 @@ CUDA C++ because their framework doesn't support them.
   and Triton.
 - **Meets or beats cuBLAS sgemm at 4096²** — on RTX 4090 across 10
   consecutive benchmark runs, KAIO tensor-core matmul (async, fp16
-  inputs with fp32 accumulation) hits **58.74 TFLOPS at worst** /
-  65.12 TFLOPS median — 115% / 112% of cuBLAS sgemm under the same
-  conditions. Worst-case framing: these are the floors, not the peaks.
+  inputs with fp32 accumulation) reached **58.74 TFLOPS worst
+  observed** and **65.12 TFLOPS median**. Against the corresponding
+  cuBLAS sgemm baseline, the worst observed ratio was **115% of
+  cuBLAS**. These are floors, not peaks.
   [Full distribution →](docs/performance.md)
 - **Windows and Linux native.** No WSL2, no Triton's Linux-only
   runtime, no Python. `cargo build` works everywhere.
@@ -91,6 +92,11 @@ fn main() -> Result<()> {
 $ cargo run
 result: [4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5]
 ```
+
+Kernel buffer parameters use `*const [T]` / `*mut [T]` to reflect
+device-pointer semantics (thousands of threads, no aliasing contract);
+`&[T]` / `&mut [T]` are accepted as ergonomic sugar and lower
+identically — see [RFC-0001](docs/development/rfcs/rfc-0001-pointer-syntax.md).
 
 ## The real pitch — fused ML kernels
 
@@ -199,7 +205,9 @@ cuBLAS — see the apples-to-apples notes below.
 Numbers below are **worst observed** across 10 consecutive
 `cargo xtask bench` runs on RTX 4090 sm_89, release build, warm GPU
 (median of 20 timed iterations per run, then minimum across runs).
-Under-promise framing: every run will do at least this well.
+These are the conservative local numbers used for README claims.
+Thermally throttled or non-steady-state cards may see lower; the
+methodology is in [docs/benchmarks.md](docs/benchmarks.md).
 
 **Tensor-core matmul (f16 × f16 → f32):**
 
@@ -298,7 +306,7 @@ fn reduce(input: *const [f32], out: *mut [f32], n: u32) {
 | Fused attention + FlashAttention         | `kaio_ops::attention`, `attention_flash` (O(d_k) memory). Any SM.          |
 | Tensor-core matmul                       | `kaio_ops::matmul_tc` / `matmul_tc_async` / `matmul_auto_tc` — f16 → f32, SM 8.0+, **worst-of-10 at 4096³ on RTX 4090: sync 107% / async 115% of cuBLAS sgemm**. |
 | INT8 dequantize-matmul (W8A8)            | `kaio_ops::matmul_int8` — symmetric i8 × i8 → f32 with single-scalar scale, SM 8.0+, K%32==0. **Worst-of-10 at 4096³: 84.07 TOPS (median 92.58, best 93.38).** |
-| INT4 dequantize-matmul (W4A16, GPTQ-style) | `kaio_ops::matmul_int4` — packed signed-INT4 weights × f16 activations → f32, f16 group scales (group_size=128), DEQUANT-F16 via `mma.sync.m16n8k16`, SM 8.0+, K%128==0. **Worst-of-10 at 4096³: 52.02 TOPS (median 57.52, best 58.04; 114% of cuBLAS sgemm worst).** |
+| INT4 dequantize-matmul (W4A16, GPTQ-style) | `kaio_ops::matmul_int4` — packed signed-INT4 weights × f16 activations → f32, f16 group scales (group_size=128), DEQUANT-F16 via `mma.sync.m16n8k16`, SM 8.0+, K%128==0. **Worst-of-10 at 4096³: 52.02 TOPS (median 57.52, best 58.04).** |
 | Fused tri-output QKV projection (INT8, W8A16) | `kaio_ops::qkv_project_int8` — f16 activations × i8 weights × per-projection scalar scales → three f16 outputs (Q, K, V). Decode tier ~3× faster than three standalone matmuls; prefill performance varies by shape. SM 8.0+, K%16==0, N%2==0. |
 | Fused tri-output QKV projection (INT4, W4A16) | `kaio_ops::qkv_project_int4` — packed INT4 weights × f16 activations × f16 group scales → three f16 outputs. Decode tier ~3× faster than three standalone calls; for prefill-heavy workloads at M≥2048, three separate `matmul_int4` calls may be faster. SM 8.0+, K%128==0, group_size=128. |
 | Auto-tuner + cache                       | `tune_matmul`, `matmul_auto`, `matmul_auto_tc` with JSON cache.            |
