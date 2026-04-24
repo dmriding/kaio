@@ -351,6 +351,20 @@ for additional TC headroom).
 
 ---
 
+## Candidate — CUDA Graph Capture
+
+**Goal:** Capture + replay kernel-launch graphs in `kaio-candle` to
+amortize launch overhead across repeated execution patterns (e.g.,
+per-step inference loops over many small kernels).
+
+**Status:** Candidate, not scheduled. Runtime prerequisites
+(stream-sync + events) landed in Sprint 7.4c. Remaining work: public
+capture/replay API, node-param patching for pointer/shape updates on
+replay, and bucketed graphs for variable shapes. Will be written
+eventually.
+
+---
+
 ## Unscoped — Community-Driven
 
 - **Multi-GPU:** Kernel launch across multiple devices. Requires
