@@ -264,6 +264,11 @@ const BENCHES: &[(&str, &str, &str)] = &[
         "attention_flash_bench",
         "FlashAttention (plain + causal) latency + seq/s + attn_scores/s; long-seq complement to attention_tc",
     ),
+    (
+        "=== norm + activation benchmark (rms_norm, layer_norm, softmax, fused_silu_gate, gelu_exact/fast) ===",
+        "norm_activation_bench",
+        "Unified showcase-kernel harness: latency + effective bandwidth",
+    ),
 ];
 
 /// `cargo xtask bench [<name>|--list]` entry point. Runs one or all
