@@ -32,7 +32,7 @@ pub enum TensorStorage {
 
 impl TensorStorage {
     /// Dtype name matching NumPy's convention (`"float16"`, `"float32"`).
-    fn dtype_name(&self) -> &'static str {
+    pub(crate) fn dtype_name(&self) -> &'static str {
         match self {
             TensorStorage::F16(_) => "float16",
             TensorStorage::F32(_) => "float32",

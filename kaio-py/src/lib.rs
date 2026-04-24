@@ -29,16 +29,19 @@ use pyo3::prelude::*;
 
 mod device;
 mod errors;
+mod ops;
 mod tensor;
 
 /// Python module entry point.
 ///
-/// Sprint 8.1 exposes a minimal surface — the scaffold + one smoke
-/// kernel. `matmul_tc` lands in C5.
+/// Sprint 8.1 exposes a minimal public surface: `Device`, `Tensor`,
+/// `KaioError`, and the smoke kernel `matmul_tc`. Broader op coverage
+/// lands in Sprint 8.2.
 #[pymodule]
 fn kaio(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<device::Device>()?;
     m.add_class::<tensor::Tensor>()?;
     m.add("KaioError", py.get_type::<errors::KaioError>())?;
+    m.add_function(wrap_pyfunction!(ops::matmul_tc, m)?)?;
     Ok(())
 }
