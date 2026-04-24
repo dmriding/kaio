@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/kaio.svg)](https://crates.io/crates/kaio)
 [![Documentation](https://docs.rs/kaio/badge.svg)](https://docs.rs/kaio)
 [![Build Status](https://github.com/dmriding/kaio/actions/workflows/ci.yml/badge.svg)](https://github.com/dmriding/kaio/actions)
-[![Coverage](https://img.shields.io/badge/coverage-93.65%25-brightgreen)](#test-coverage)
+[![Coverage](https://img.shields.io/badge/coverage-88.39%25-green)](#test-coverage)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](https://github.com/dmriding/kaio)
 [![Rust](https://img.shields.io/badge/rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 
@@ -433,13 +433,13 @@ for "did it compile → launch → produce right output?"
 
 ## Test coverage
 
-**93.65% line coverage** across the 20,156-line workspace (1,280 lines
+**88.39% line coverage** across the 21,569-line workspace (2,504 lines
 uncovered, mostly host-side parser error paths, the `xtask` repo-tooling
 binary, and the unreachable-by-design host stubs for GPU builtins in
-`kaio/src/gpu_builtins.rs`). Shipped kernel crates are well above the
-workspace average — `kaio-ops/src/matmul_int8_kernel.rs` at 97.77%,
-`matmul_tc_kernel.rs` at 97.74%, `matmul_tc_async_kernel.rs` at 99.40%,
-`attention_tc_kernel.rs` at 98.82%. Measured on RTX 4090 sm_89 via
+`kaio/src/gpu_builtins.rs`). Shipped kernel crates remain well above
+the workspace average — `kaio-ops/src/matmul_int8_kernel.rs` at 97.18%,
+`matmul_tc_kernel.rs` at 97.94%, `matmul_tc_async_kernel.rs` at 99.87%,
+`attention_tc_kernel.rs` at 97.70%. Measured on RTX 4090 sm_89 via
 `cargo llvm-cov` with the host test suite and the full GPU-only
 `--ignored` test suite merged:
 
