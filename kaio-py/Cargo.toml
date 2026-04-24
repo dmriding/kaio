@@ -1,14 +1,22 @@
 [package]
 name = "kaio-py"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.94"
 authors = ["KAIO contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dmriding/kaio"
+readme = "README.md"
 description = "Python bindings for KAIO — Rust-native GPU kernel authoring framework. Exposes the kaio-ops public API (tensor-core matmul, attention, quantized kernels) to Python via PyO3."
 keywords = ["gpu", "cuda", "python", "pyo3", "kernel"]
 categories = ["hardware-support", "api-bindings"]
+include = [
+    "/src/**/*.rs",
+    "/examples/**/*.py",
+    "/Cargo.toml",
+    "/pyproject.toml",
+    "/README.md",
+]
 
 # Not a workspace member: Phase 7 learned the hard way that workspace
 # feature union merges cudarc's dynamic-loading + dynamic-linking and
@@ -19,6 +27,12 @@ categories = ["hardware-support", "api-bindings"]
 [lib]
 name = "kaio"
 crate-type = ["cdylib"]
+
+# docs.rs rendering for the crates.io publish — match the rest of the
+# KAIO crates' target matrix. The Python extension module doesn't need
+# feature flags; deps pick up default features.
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 
 [dependencies]
 # No `extension-module` feature — deprecated by PyO3 for use with
@@ -32,8 +46,10 @@ numpy = { version = "0.28", features = ["half"] }
 
 # Renamed via `package =` key: the Rust crate name `kaio` would
 # collide with [lib] name = "kaio" on this crate. Internal imports
-# use `kaio_rs::...`.
-kaio-rs = { package = "kaio", path = "../kaio", default-features = false, features = ["dynamic-loading"] }
-kaio-ops = { path = "../kaio-ops", default-features = false, features = ["dynamic-loading"] }
+# use `kaio_rs::...`. Both path + version specified so cargo uses
+# path locally and version when publishing to crates.io (same pattern
+# as kaio-candle).
+kaio-rs = { package = "kaio", version = "0.4.1", path = "../kaio", default-features = false, features = ["dynamic-loading"] }
+kaio-ops = { version = "0.4.1", path = "../kaio-ops", default-features = false, features = ["dynamic-loading"] }
 
 half = "2"

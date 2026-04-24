@@ -7,29 +7,34 @@ Linux, no CUDA toolkit install required.
 
 ## Status
 
-**Sprint 8.1 scaffold complete. Further op exposure is user-demand-gated.**
+> **Not in active development. User-request-driven from here.**
+>
+> `kaio-py` is published as a Sprint 8.1 scaffold: proof that the
+> PyO3 path works end-to-end with KAIO kernels. It is **not** on a
+> release cadence tracking the Rust core. It will not grow new ops
+> automatically as `kaio-ops` grows.
+>
+> **If you want anything beyond `kaio.matmul_tc`,
+> [file a python-binding request](https://github.com/dmriding/kaio/issues/new?template=python-binding-request.md).**
+> A concrete user request is the trigger for a narrow sprint that
+> exposes the specific op(s) you need — and for the PyPI wheel
+> publish, if that hasn't happened yet.
+>
+> Without a request, this crate sits as-is indefinitely. That's
+> intentional: KAIO is a solo-maintainer project and Rust-side work
+> moves faster than Python wrapping work could keep up with. Better
+> to ship a small working scaffold than to half-maintain a wider
+> surface.
 
-`import kaio` works after `maturin develop`. The scaffold proves
-the PyO3 path works end-to-end — Python users can call
-`kaio.matmul_tc` today with NumPy f16 inputs and get correct f32
-output back.
+### What works today
 
-Broader op exposure (INT8 / INT4 matmul, attention, fused QKV
-projections), cross-validation tests against PyTorch, and PyPI
-wheel publishing are all **unscheduled**. If you want any of those,
-[file a python-binding request](https://github.com/dmriding/kaio/issues/new?template=python-binding-request.md).
-Each request is a discrete sprint with its own scope — not a
-commitment to lockstep with Rust releases.
+`import kaio` works after `maturin develop`. The scaffold exposes:
 
-Why: KAIO's a solo-maintainer project, and the Rust core moves
-fast. Maintaining a Python surface in lockstep against zero concrete
-Python users would slow the Rust work without a matching return.
-The scaffold is the signal that says "it can be done, and we will
-when someone wants it."
-
-Shipped in 8.1:
-- `kaio.Device`, `kaio.Tensor` (NumPy roundtrip for `float16` /
-  `float32`), `kaio.KaioError`, `kaio.matmul_tc`.
+- `kaio.Device` — thin wrapper around a CUDA device handle
+- `kaio.Tensor` — NumPy roundtrip for `float16` / `float32`
+- `kaio.KaioError` — single exception class (subclasses would land
+  on user request alongside broader ops)
+- `kaio.matmul_tc(a, b)` — the one end-to-end smoke kernel
 
 ## Requirements
 
