@@ -217,7 +217,9 @@ lowering issues and understanding performance characteristics.
 
 ## Benchmarking
 
-See [benchmarks.md](benchmarks.md) for methodology and results.
+See [benchmarks.md](benchmarks.md) for the measurement methodology
+(warmup / iteration counts, timing technique, input-data generation,
+cuBLAS reference setup). Current numbers live below in this file.
 
 ### Quick reference
 
