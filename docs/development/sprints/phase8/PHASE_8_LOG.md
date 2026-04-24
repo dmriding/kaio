@@ -3,7 +3,7 @@
 Quick-reference index for Phase 8 sprints. Each sprint gets a dedicated
 doc in this directory with a post-delivery outline of what shipped.
 
-Master plan: [../../phases.md](../../phases.md) §Phase 8
+Master plan: [phase8_master_plan.md](phase8_master_plan.md)
 
 ## Sprint Status
 
@@ -28,6 +28,7 @@ PyO3 work will open its own branch when scoping begins.
 
 ## Key References
 
+- **Master plan:** [phase8_master_plan.md](phase8_master_plan.md)
 - **Phases roadmap:** [../../phases.md](../../phases.md) §Phase 8
 - **RFC-0001 Pointer Syntax:** [../../rfcs/rfc-0001-pointer-syntax.md](../../rfcs/rfc-0001-pointer-syntax.md) — accepted + implemented in Sprint 8.0
 - **Issue #13:** <https://github.com/dmriding/kaio/issues/13> — closed 2026-04-24 with the 0.4.1 release comment
