@@ -2,7 +2,7 @@
 
 ## Overview
 
-KAIO is developed in five phases, each producing a shippable milestone. Phases are designed to be sprint-friendly: decomposable into independent sprints with clear inputs, outputs, and testable boundaries.
+KAIO is developed in phases, each producing a shippable milestone. Phases are designed to be sprint-friendly: decomposable into independent sprints with clear inputs, outputs, and testable boundaries.
 
 Each phase builds on the previous. No phase is started until the prior phase meets its success criteria (see `success-criteria.md`).
 
@@ -262,64 +262,119 @@ reasoning traces in [docs/development/sprints/phase6/](development/sprints/phase
 
 ---
 
-## Phase 7: Quantized Kernels & Training Integration
+## Phase 7: Quantized Kernels & Candle Bridge ✅
 
-**Goal:** INT8 / INT4 dequantize-matmul for efficient inference — the
-operation every local LLM runner currently reaches for through CUDA C++
-(GGUF / GPTQ / AWQ). Training integration via a `kaio-candle` bridge
-crate layered on top of the forward kernels.
+**Goal:** INT8 / INT4 dequantize-matmul for efficient inference, fused
+QKV projections for transformer decode, and a candle bridge crate
+(`kaio-candle`) for Rust ML framework integration.
 
-**Status:** In progress (7.0 DSL completeness complete, v0.2.1; 7.0.5
-ergonomics fast-track complete, v0.2.2; **7.1 INT8 dequantize-matmul
-complete, v0.3.0** — 4096³ at 80–94 TOPS i8 ops (median ~89) on RTX 4090
-sm_89, bit-exact vs CPU reference across the adversarial test matrix;
-**7.1.5 DSL reductions complete** on `phase7-rest` — `warp_reduce_sum/max/min`
-and `block_reduce_min` added with a whole-warp-multiple compile-time
-guard; no independent release, ships in the Phase 7 aggregate release
-after 7.3 / 7.4; **7.2 INT4 matmul complete** on the same branch —
-`kaio_ops::matmul_int4` W4A16 GPTQ-style, `mma.sync.m16n8k16.f16.f16.f32`
-via DEQUANT-F16 chain; 4096³ median ~57 TOPS (range 49–58 across 6
-xtask-bench runs, 95–116% of cuBLAS sgemm) on RTX 4090 sm_89; 12/12
-GPU round-trip tests pass bit-exact incl. sign-extend canaries; no
-regressions in `matmul_tc` or `matmul_int8` across the same runs)
+**Status:** Complete (v0.4.0, 2026-04-18)
 
-**Depends on:** Phase 6 complete (v0.2.1, 2026-04-14).
+**Deliverables:**
 
-**On sequencing (adoption-friction framing):** the headline Phase 7
-feature is quantized matmul. But the users who would be attracted by
-INT4 kernels don't exist in the KAIO ecosystem yet; the users who
-would be *repelled* by rough ergonomics are exactly the ones Phase 7
-is trying to attract. Phase 7 interleaves small ergonomics sprints
-(7.0.5) with the quant milestones (7.1, 7.2) rather than delivering
-quant into an ecosystem where the first-run experience is rough. See
-the adoption-ergonomics sequencing section of
-[phase7_master_plan.md](development/sprints/phase7/phase7_master_plan.md)
-for which ergonomics items land where, and why.
+- `kaio_ops::matmul_int8` — W8A8 symmetric i8 × i8 → f32, 80–94 TOPS
+  at 4096³ on RTX 4090 sm_89
+- `kaio_ops::matmul_int4` — W4A16 GPTQ-style packed INT4, 49–58 TOPS
+  at 4096³ (95–116% of cuBLAS sgemm)
+- `kaio_ops::qkv_project_int8` / `qkv_project_int4` — fused tri-output
+  QKV projections, ~3× decode over standalone calls
+- `kaio-candle` bridge crate — 8 forward ops + 2 backward
+  (matmul_tc, matmul_tc_async), event-based stream sync (CUDA Graph
+  compatible), 41 GPU tests
+- DSL completeness: bitwise operators, short-circuit `&&`/`||`,
+  compound bitwise assignment, warp/block reductions
+- DSL-vs-compiled-Rust documentation clarification (issue #13),
+  RFC-0001 pointer-syntax draft published
 
-See [docs/development/sprints/phase7/phase7_master_plan.md](development/sprints/phase7/phase7_master_plan.md)
-for the detailed sprint breakdown, architectural decisions, and risks.
-
-**Sprint outline (subject to refinement as each sprint is scoped):**
+**Sprint Breakdown (actual):**
 
 | Sprint | Scope | Status |
 |--------|-------|--------|
-| 7.0 | DSL completeness (bitops + short-circuit `&&` / `\|\|` + compound bitwise assign) + Phase 6 closeout + Phase 7 scaffold | Complete (v0.2.1, combined with Sprint 6.10) |
-| 7.0.5 | Pre-7.1 ergonomics fast-track — debug-build performance note, proc-macro error-span audit, consolidated debugging guide | Complete (v0.2.2) |
-| 7.1 | INT8 dequantize-matmul (forward) — `kaio_ops::matmul_int8`, W8A8 symmetric, single-scalar scale, `K%32==0`, sync-only. Path FAST (direct `mma.sync.m16n8k32.s8.s8.s32`). 80–94 TOPS i8 ops at 4096³ on RTX 4090 sm_89 (median ~89 across 6 runs). | **Complete (v0.3.0)** |
-| 7.1.5 | Warp + block reductions in DSL — `warp_reduce_sum/max/min` + `block_reduce_min` as `#[gpu_kernel]` builtins, with a whole-warp-multiple compile-time guard. | **Complete (ships in Phase 7 aggregate)** |
-| 7.2 | INT4 dequantize-matmul (GPTQ-style packed 4-bit) | **Complete (ships in Phase 7 aggregate)** |
-| 7.3 | Quant + attention integration | Planned |
-| 7.4 | `kaio-candle` bridge crate (forward + backward kernels via `CustomOp`) | Planned |
+| 7.0 | DSL completeness (bitops + short-circuit + compound bitwise assign) | Complete (v0.2.1) |
+| 7.0.5 | Pre-7.1 ergonomics fast-track — debug-build note, error-span audit, debugging guide | Complete (v0.2.2) |
+| 7.1 | INT8 dequantize-matmul — `matmul_int8`, W8A8 symmetric, 80–94 TOPS at 4096³ | Complete (v0.3.0) |
+| 7.1.5 | Warp + block reductions — `warp_reduce_sum/max/min`, `block_reduce_min` | Complete |
+| 7.2 | INT4 dequantize-matmul — `matmul_int4`, W4A16 GPTQ-style, 49–58 TOPS at 4096³ | Complete |
+| 7.3 | Fused tri-output QKV projection — `qkv_project_int8` + `qkv_project_int4` | Complete |
+| 7.3.5 | Design S+½P optimization — INT8 K-loop ping-pong, barriers 7→4 | Complete |
+| 7.4a | `kaio-candle` bridge — 5 forward `CustomOp` bindings, 15 GPU tests | Complete |
+| 7.4b | `kaio-candle` — `matmul_int8` binding + direct-call pattern for QKV ops | Complete |
+| 7.4c | `kaio-candle` — event-based stream sync (replaces `cuCtxSynchronize`) | Complete |
+| 7.4d | `kaio-candle` — matmul_tc + matmul_tc_async backward (autograd) | Complete |
+
+**Key Decisions:** Sprint logs with full reasoning traces in
+[docs/development/sprints/phase7/](development/sprints/phase7/).
 
 ---
 
-## Phase 8 — PyO3 Bindings (future)
+## Phase 8: PyO3 Bindings
 
-Thin Python wrapper around `kaio-ops` functions. If KAIO has
-tensor-core matmul, fused attention, and quantized matmul that work
-on Windows, Python users gain access to GPU kernels without Triton's
-Linux-only constraint. Low implementation effort (PyO3 is
-straightforward), high reach.
+**Goal:** Thin Python wrapper around `kaio-ops` functions. Python users
+gain access to tensor-core matmul, fused attention, and quantized
+matmul on Windows without Triton's Linux-only constraint.
+
+**Status:** Planned
+
+**Depends on:** Phase 7 complete (v0.4.0, 2026-04-18).
+
+---
+
+## Phase 8.5 (absorbed): Pointer Syntax (RFC-0001) — delivered as Sprint 8.0 ✅
+
+Originally scheduled as a standalone Phase 8.5 after Phase 8's PyO3
+work. Pulled forward to **Sprint 8.0** (2026-04-24) as a Phase 8
+prelude so the pointer-syntax story lands before PyO3 widens the
+public-facing surface.
+
+**Goal:** Accept `*mut [T]` / `*const [T]` in `#[gpu_kernel]`
+signatures as the primary parameter syntax. `&mut [T]` / `&[T]`
+retained as permanent ergonomic sugar.
+
+Resolves the DSL-vs-compiled-Rust communication gap raised in
+issue #13: `*mut [T]` signals "device pointer, no aliasing contract"
+using standard Rust syntax. Parser change in `parse_kernel_signature`
+(new `Type::Ptr` arm alongside `Type::Reference`) with a shared
+`parse_slice_elem_type` helper that harmonized diagnostics across both
+forms.
+
+See [RFC-0001](development/rfcs/rfc-0001-pointer-syntax.md) for the
+full design.
+
+**Status:** Complete as Sprint 8.0. Resolves
+[#13](https://github.com/dmriding/kaio/issues/13). Phase 8.5 as a
+separate future phase no longer exists — its content is now part of
+the Phase 8 timeline.
+
+---
+
+## Phase 9: Attention Backward & Kernel Deepening
+
+**Goal:** FlashAttention backward pass (new PTX kernels — softmax
+recomputation, tiled Q/K/V backward, causal mask in reverse) and
+further kernel improvements (bf16 TC matmul variant, `ldmatrix.sync`
+for additional TC headroom).
+
+**Status:** Planned
+
+**Depends on:** Phase 8 complete (pointer-syntax prelude landed as
+Sprint 8.0; Phase 9 kernel work can proceed in parallel with Phase 8
+PyO3 binding work since they touch non-overlapping surfaces).
+
+---
+
+## Candidate — CUDA Graph Capture
+
+**Goal:** Capture + replay kernel-launch graphs in `kaio-candle` to
+amortize launch overhead across repeated execution patterns (e.g.,
+per-step inference loops over many small kernels).
+
+**Status:** Candidate, not scheduled. Runtime prerequisites
+(stream-sync + events) landed in Sprint 7.4c. Remaining work: public
+capture/replay API, node-param patching for pointer/shape updates on
+replay, and bucketed graphs for variable shapes. Will be written
+eventually.
+
+---
 
 ## Unscoped — Community-Driven
 

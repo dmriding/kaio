@@ -6,7 +6,7 @@ training stability. LLaMA / Mistral / Qwen / Gemma / Yi all ship it.
 
 ```rust
 #[gpu_kernel(block_size = 256)]
-fn rms_norm(x: &[f32], weight: &[f32], out: &mut [f32], n: u32, eps: f32) {
+fn rms_norm(x: *const [f32], weight: *const [f32], out: *mut [f32], n: u32, eps: f32) {
     let tid = thread_idx_x();
     let mut val = 0.0f32;
     if tid < n {

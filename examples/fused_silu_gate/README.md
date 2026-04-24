@@ -7,7 +7,7 @@ macro lowers it to PTX at compile time.
 
 ```rust
 #[gpu_kernel(block_size = 256)]
-fn fused_silu_gate(x: &[f32], gate: &[f32], out: &mut [f32], n: u32) {
+fn fused_silu_gate(x: *const [f32], gate: *const [f32], out: *mut [f32], n: u32) {
     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
     if idx < n {
         let xi = x[idx];

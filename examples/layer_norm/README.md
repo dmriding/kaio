@@ -6,7 +6,7 @@ mean and applies both a learned scale (`gamma`) and bias (`beta`).
 
 ```rust
 #[gpu_kernel(block_size = 256)]
-fn layer_norm(x: &[f32], gamma: &[f32], beta: &[f32], out: &mut [f32], n: u32, eps: f32) {
+fn layer_norm(x: *const [f32], gamma: *const [f32], beta: *const [f32], out: *mut [f32], n: u32, eps: f32) {
     let tid = thread_idx_x();
 
     let mut val = 0.0f32;

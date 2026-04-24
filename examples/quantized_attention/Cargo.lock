@@ -64,7 +64,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kaio"
-version = "0.3.0"
+version = "0.4.1"
 dependencies = [
  "kaio-core",
  "kaio-macros",
@@ -73,14 +73,14 @@ dependencies = [
 
 [[package]]
 name = "kaio-core"
-version = "0.3.0"
+version = "0.4.1"
 dependencies = [
  "half",
 ]
 
 [[package]]
 name = "kaio-macros"
-version = "0.3.0"
+version = "0.4.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "kaio-ops"
-version = "0.3.0"
+version = "0.4.1"
 dependencies = [
  "cudarc",
  "half",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "kaio-runtime"
-version = "0.3.0"
+version = "0.4.1"
 dependencies = [
  "cudarc",
  "kaio-core",

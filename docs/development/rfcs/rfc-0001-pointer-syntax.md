@@ -1,7 +1,7 @@
 # RFC-0001: Raw pointer syntax for kernel parameters
 
-**Status:** Draft
-**Date:** 2026-04-18
+**Status:** Implemented (Sprint 8.0, phase8 branch)
+**Date:** 2026-04-18 (draft) · 2026-04-24 (implemented)
 **Motivation:** [Issue #13](https://github.com/dmriding/kaio/issues/13) (juntyr)
 
 ## Summary
@@ -54,16 +54,19 @@ The PTX output is identical regardless of which form is used. The
 distinction is entirely at the Rust syntax level — a documentation and
 intent signal, not a codegen difference.
 
-### Migration path
+### Implementation timeline
 
-1. **v0.4.0 (this release):** Document the DSL-vs-compiled-Rust
-   distinction in README, `#[gpu_kernel]` rustdoc, and this RFC.
-   No syntax changes.
+1. **v0.4.0 (2026-04-18):** Documentation-only predecessor. README and
+   `#[gpu_kernel]` rustdoc clarified the DSL-vs-compiled-Rust
+   distinction; this RFC was published as a draft describing the
+   direction. No syntax changes in the parser.
 
-2. **Future minor release:** Accept `*mut [T]` / `*const [T]` in
-   kernel signatures. Update all examples and docs to use pointer
-   syntax as the primary form. `&mut` / `&` continue to work — no
-   deprecation, permanent sugar.
+2. **Sprint 8.0 (2026-04-24, `phase8` branch):** Parser accepts
+   `*mut [T]` / `*const [T]` in kernel signatures. All public examples,
+   README, `kaio/README.md`, prelude doctest, and the `#[gpu_kernel]`
+   rustdoc migrated to pointer syntax as the primary form.
+   `&mut [T]` / `&[T]` remain accepted as permanent sugar — no
+   deprecation.
 
 ### Host-side launch wrapper
 
@@ -119,6 +122,31 @@ KAIO kernels use routinely. Not viable as the primary API design.
 3. **Doc-alias for `*mut [T]`:** Not needed. `*mut [T]` is standard
    Rust syntax that every developer who has written `unsafe` code
    understands. The `#[gpu_kernel]` rustdoc explains the DSL context.
+
+## Implementation notes (Sprint 8.0)
+
+The landing matched the design with two small refinements added during
+implementation:
+
+1. **Shared helper for slice-parameter diagnostics.** A private helper
+   `parse_slice_elem_type(inner, outer_ty)` in
+   `kaio-macros/src/parse/signature.rs` handles the inner-type dispatch
+   for both the `Type::Reference` arm and the new `Type::Ptr` arm.
+   Both arms emit identical, dedicated error messages for common
+   mistakes (`[T; N]` fixed arrays, nested references/pointers,
+   pointer/reference-to-scalar). This harmonized the pre-existing
+   silent fall-through on `&mut [f32; 256]` with the new pointer
+   diagnostics — no behavior change for valid inputs, only better
+   errors for invalid ones.
+2. **Zero change below the parser.** As predicted in the design,
+   pointer-form parameters map to the same `KernelType::SliceRef` /
+   `KernelType::SliceMutRef` variants as reference-form, so PTX
+   lowering (`kaio-macros/src/lower/`, `kaio-macros/src/codegen/`) and
+   the generated launch-wrapper type (`&GpuBuffer<T>` /
+   `&mut GpuBuffer<T>`) are untouched. A macro-level smoke test at
+   `kaio/tests/macro_pointer_smoke.rs` exercises all four syntax forms
+   in one kernel and confirms the launch wrapper binds them
+   symmetrically on-GPU.
 
 ## References
 

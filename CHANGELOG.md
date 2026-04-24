@@ -8,6 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
+## [0.4.1] — 2026-04-24 — Sprint 8.0: Pointer Syntax
+
+### Added
+
+- `#[gpu_kernel]` now accepts `*const [T]` and `*mut [T]` kernel
+  parameter syntax as the recommended primary form, per
+  [RFC-0001](docs/development/rfcs/rfc-0001-pointer-syntax.md).
+  Pointer syntax better communicates the on-device reality (thousands
+  of threads, no aliasing contract) than reference syntax does.
+  Resolves [#13](https://github.com/dmriding/kaio/issues/13). `&[T]` /
+  `&mut [T]` continue to work as permanent ergonomic sugar with
+  identical PTX lowering; no deprecation planned.
+- Macro-level smoke test (`kaio/tests/macro_pointer_smoke.rs`)
+  exercising all four surface forms (`&[T]`, `*const [T]`, `&mut [T]`,
+  `*mut [T]`) in a single kernel signature, confirming the generated
+  launch wrapper binds them symmetrically on-GPU.
+
+### Changed
+
+- Signature parser diagnostics are now dedicated and symmetric across
+  reference and pointer forms. Fixed-size arrays (`[T; N]`), nested
+  references/pointers, and pointer/reference-to-scalar cases each
+  produce their own specific error messages rather than falling
+  through to a generic "unsupported type" catch-all.
+- All public example crates and the `#[gpu_kernel]` rustdoc, `kaio`
+  prelude doctest, root `README.md` tutorial snippets, and per-example
+  `README.md` kernel blocks migrated to pointer-form as the primary
+  syntax (reference forms retained as sugar in user code where they
+  already existed).
+- `docs/performance.md` benchmark tables refreshed to worst-of-10
+  framing across 10 consecutive `cargo xtask bench` runs on RTX 4090
+  sm_89. At 4096³ the tensor-core async path now shows a worst-case
+  floor of 115% of cuBLAS sgemm worst (was "92.5%" as a single-run
+  median headline in v0.2.1). Quantized-kernel (INT8, INT4) tables
+  added with the same worst/median/best distribution.
+- `docs/benchmarks.md` narrowed to pure measurement methodology
+  (warmup / iteration counts, timing technique, input-data
+  generation, cuBLAS reference setup, reproduction via
+  `cargo xtask bench`). Result tables moved to `docs/performance.md`
+  as the single source of truth.
+- `README.md` positioning tightened: sharpened opening line, elevated
+  "no CUDA toolkit required" as a first-class differentiator, added
+  Triton to the comparison table, added a "What this is not" section,
+  added large-ML-workload framing above the performance section.
+- `docs/development/rfcs/rfc-0001-pointer-syntax.md` status promoted
+  from `Draft` to `Implemented`; "Migration path" section rewritten
+  as "Implementation timeline" reflecting actual delivery in Sprint
+  8.0.
+- `docs/phases.md` Phase 8.5 (pointer syntax) marked as absorbed into
+  Sprint 8.0. Phase 9 dependency updated accordingly.
+
+### Fixed
+
+- Example-crate `Cargo.lock` files refreshed to the workspace 0.4.0
+  versions (they had drifted behind during the v0.4.0 release).
+
+## [0.4.0] — 2026-04-18 — Phase 7: Quantization, Attention, Candle Bridge
+
 ## [0.4.0] — 2026-04-18 — Phase 7: Quantization, Attention, Candle Bridge
 
 ### Sprint 7.4d — matmul_tc + matmul_tc_async backward

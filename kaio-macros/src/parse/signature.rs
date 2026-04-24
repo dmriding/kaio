@@ -9,7 +9,7 @@ use crate::kernel_ir::{KernelConfig, KernelParam, KernelSignature, KernelType};
 ///
 /// Supported types:
 /// - Scalars: `f32`, `f64`, `i32`, `u32`, `i64`, `u64`, `bool`
-/// - Slices: `&[T]`, `&mut [T]` where T is a supported scalar
+/// - Slices: `&[T]`, `&mut [T]`, `*const [T]`, `*mut [T]` where T is a supported scalar
 fn parse_type(ty: &Type) -> syn::Result<KernelType> {
     match ty {
         // Scalar: path type like `f32`, `u32`, etc.
@@ -18,7 +18,8 @@ fn parse_type(ty: &Type) -> syn::Result<KernelType> {
                 return Err(syn::Error::new_spanned(
                     ty,
                     "unsupported type in GPU kernel parameter. \
-                     Supported: f32, f64, i32, u32, i64, u64, bool, &[T], &mut [T]",
+                     Supported: f32, f64, i32, u32, i64, u64, bool, \
+                     &[T], &mut [T], *const [T], *mut [T]",
                 ));
             }
             let ident = &type_path.path.segments[0].ident;
@@ -34,13 +35,14 @@ fn parse_type(ty: &Type) -> syn::Result<KernelType> {
                     ty,
                     format!(
                         "unsupported type `{other}` in GPU kernel parameter. \
-                         Supported: f32, f64, i32, u32, i64, u64, bool, &[T], &mut [T]"
+                         Supported: f32, f64, i32, u32, i64, u64, bool, \
+                         &[T], &mut [T], *const [T], *mut [T]"
                     ),
                 )),
             }
         }
 
-        // Reference: &[T] or &mut [T]
+        // Reference: &[T] or &mut [T] — sugar form.
         Type::Reference(type_ref) => {
             if type_ref.lifetime.is_some() {
                 return Err(syn::Error::new_spanned(
@@ -48,33 +50,70 @@ fn parse_type(ty: &Type) -> syn::Result<KernelType> {
                     "lifetime parameters are not supported in GPU kernels",
                 ));
             }
+            let elem_ty = parse_slice_elem_type(&type_ref.elem, ty)?;
+            if type_ref.mutability.is_some() {
+                Ok(KernelType::SliceMutRef(Box::new(elem_ty)))
+            } else {
+                Ok(KernelType::SliceRef(Box::new(elem_ty)))
+            }
+        }
 
-            match type_ref.elem.as_ref() {
-                Type::Slice(type_slice) => {
-                    let elem_ty = parse_type(&type_slice.elem)?;
-                    if !elem_ty.is_scalar() {
-                        return Err(syn::Error::new_spanned(
-                            &type_slice.elem,
-                            "nested slices are not supported in GPU kernels",
-                        ));
-                    }
-                    if type_ref.mutability.is_some() {
-                        Ok(KernelType::SliceMutRef(Box::new(elem_ty)))
-                    } else {
-                        Ok(KernelType::SliceRef(Box::new(elem_ty)))
-                    }
-                }
-                _ => Err(syn::Error::new_spanned(
-                    ty,
-                    "only slice references (&[T] / &mut [T]) are supported in GPU kernels",
-                )),
+        // Raw pointer: *const [T] or *mut [T] — primary form per RFC-0001.
+        // Semantically identical to the reference forms (same PTX lowering); the
+        // pointer syntax signals "device pointer, no aliasing contract" which
+        // matches the on-device reality.
+        Type::Ptr(type_ptr) => {
+            let elem_ty = parse_slice_elem_type(&type_ptr.elem, ty)?;
+            if type_ptr.mutability.is_some() {
+                Ok(KernelType::SliceMutRef(Box::new(elem_ty)))
+            } else {
+                Ok(KernelType::SliceRef(Box::new(elem_ty)))
             }
         }
 
         _ => Err(syn::Error::new_spanned(
             ty,
             "unsupported type in GPU kernel parameter. \
-             Supported: f32, f64, i32, u32, i64, u64, bool, &[T], &mut [T]",
+             Supported: f32, f64, i32, u32, i64, u64, bool, \
+             &[T], &mut [T], *const [T], *mut [T]",
+        )),
+    }
+}
+
+/// Parse the inner (pointee or referent) type of a slice-parameter syntax —
+/// `&[T]`, `&mut [T]`, `*const [T]`, `*mut [T]`. Returns the slice element's
+/// `KernelType`; the caller wraps it in `SliceRef` / `SliceMutRef` based on
+/// the outer mutability. Emits dedicated diagnostics for common mistakes.
+fn parse_slice_elem_type(inner: &Type, outer_ty: &Type) -> syn::Result<KernelType> {
+    match inner {
+        Type::Slice(type_slice) => {
+            let elem_ty = parse_type(&type_slice.elem)?;
+            if !elem_ty.is_scalar() {
+                return Err(syn::Error::new_spanned(
+                    &type_slice.elem,
+                    "nested slices are not supported in GPU kernels",
+                ));
+            }
+            Ok(elem_ty)
+        }
+        Type::Array(_) => Err(syn::Error::new_spanned(
+            inner,
+            "fixed-size arrays are not supported in GPU kernel parameters \
+             — use `&[T]`, `&mut [T]`, `*const [T]`, or `*mut [T]` for device slices",
+        )),
+        Type::Ptr(_) | Type::Reference(_) => Err(syn::Error::new_spanned(
+            inner,
+            "nested references or pointers are not supported in GPU kernels",
+        )),
+        Type::Path(_) => Err(syn::Error::new_spanned(
+            outer_ty,
+            "pointer/reference-to-scalar is not supported in GPU kernel parameters \
+             — kernels take slices: `&[T]`, `&mut [T]`, `*const [T]`, or `*mut [T]`",
+        )),
+        _ => Err(syn::Error::new_spanned(
+            outer_ty,
+            "only slice parameters are supported in GPU kernels \
+             (&[T], &mut [T], *const [T], *mut [T])",
         )),
     }
 }
@@ -306,6 +345,166 @@ mod tests {
             fn kernel(data: &f32) {}
         });
         let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
-        assert!(err.to_string().contains("slice references"));
+        assert!(err.to_string().contains("pointer/reference-to-scalar"));
+    }
+
+    // --- Pointer-form acceptance (RFC-0001) ---
+
+    #[test]
+    fn parse_ptr_const_slice() {
+        let func = parse_fn(quote! {
+            fn kernel(data: *const [f32]) {}
+        });
+        let sig = parse_kernel_signature(&func, dummy_config()).unwrap();
+        assert_eq!(
+            sig.params[0].ty,
+            KernelType::SliceRef(Box::new(KernelType::F32))
+        );
+    }
+
+    #[test]
+    fn parse_ptr_mut_slice() {
+        let func = parse_fn(quote! {
+            fn kernel(a: *mut [f32], b: *mut [f64]) {}
+        });
+        let sig = parse_kernel_signature(&func, dummy_config()).unwrap();
+        assert_eq!(
+            sig.params[0].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(
+            sig.params[1].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::F64))
+        );
+    }
+
+    #[test]
+    fn parse_mixed_ptr_and_ref() {
+        let func = parse_fn(quote! {
+            fn kernel(a: &[f32], b: *const [f32], c: &mut [f32], d: *mut [f32], n: u32) {}
+        });
+        let sig = parse_kernel_signature(&func, dummy_config()).unwrap();
+        assert_eq!(sig.params.len(), 5);
+        assert_eq!(
+            sig.params[0].ty,
+            KernelType::SliceRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(
+            sig.params[1].ty,
+            KernelType::SliceRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(
+            sig.params[2].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(
+            sig.params[3].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(sig.params[4].ty, KernelType::U32);
+    }
+
+    #[test]
+    fn parse_ptr_all_scalar_elem_types() {
+        let func = parse_fn(quote! {
+            fn kernel(
+                a: *const [f32],
+                b: *mut [f64],
+                c: *const [i32],
+                d: *mut [u32],
+                e: *const [i64],
+                f: *mut [u64],
+                g: *const [bool],
+            ) {}
+        });
+        let sig = parse_kernel_signature(&func, dummy_config()).unwrap();
+        assert_eq!(
+            sig.params[0].ty,
+            KernelType::SliceRef(Box::new(KernelType::F32))
+        );
+        assert_eq!(
+            sig.params[1].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::F64))
+        );
+        assert_eq!(
+            sig.params[2].ty,
+            KernelType::SliceRef(Box::new(KernelType::I32))
+        );
+        assert_eq!(
+            sig.params[3].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::U32))
+        );
+        assert_eq!(
+            sig.params[4].ty,
+            KernelType::SliceRef(Box::new(KernelType::I64))
+        );
+        assert_eq!(
+            sig.params[5].ty,
+            KernelType::SliceMutRef(Box::new(KernelType::U64))
+        );
+        assert_eq!(
+            sig.params[6].ty,
+            KernelType::SliceRef(Box::new(KernelType::Bool))
+        );
+    }
+
+    // --- Pointer-form error paths ---
+
+    #[test]
+    fn reject_ptr_non_slice() {
+        let func = parse_fn(quote! {
+            fn kernel(data: *mut f32) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("pointer/reference-to-scalar"));
+    }
+
+    #[test]
+    fn reject_ptr_nested_slice() {
+        // A slice element whose element type is itself a reference is rejected
+        // by the inner scalar check.
+        let func = parse_fn(quote! {
+            fn kernel(data: *mut [&[f32]]) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("nested slices"));
+    }
+
+    #[test]
+    fn reject_ptr_fixed_array() {
+        let func = parse_fn(quote! {
+            fn kernel(data: *mut [f32; 256]) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("fixed-size arrays"));
+    }
+
+    #[test]
+    fn reject_ptr_nested_pointer() {
+        let func = parse_fn(quote! {
+            fn kernel(data: *const *mut [f32]) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("nested references or pointers"));
+    }
+
+    // --- Reference-form diagnostic symmetry (D9) ---
+
+    #[test]
+    fn reject_ref_fixed_array() {
+        let func = parse_fn(quote! {
+            fn kernel(data: &mut [f32; 256]) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("fixed-size arrays"));
+    }
+
+    #[test]
+    fn reject_ref_nested_reference() {
+        let func = parse_fn(quote! {
+            fn kernel(data: &mut &[f32]) {}
+        });
+        let err = parse_kernel_signature(&func, dummy_config()).unwrap_err();
+        assert!(err.to_string().contains("nested references or pointers"));
     }
 }

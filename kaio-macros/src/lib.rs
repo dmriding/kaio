@@ -24,30 +24,34 @@ use parse::signature::parse_kernel_signature;
 
 /// Marks a function as a GPU kernel compiled to PTX.
 ///
+/// # Parameter syntax
+///
+/// Kernel parameters are written as `*const [T]` (primary) or `&[T]`
+/// (sugar) for read-only slices, and `*mut [T]` (primary) or `&mut [T]`
+/// (sugar) for read-write slices. Both forms lower to identical PTX.
+/// The pointer form is recommended because it accurately signals
+/// "device pointer, no aliasing contract" — see RFC-0001. The
+/// reference form is accepted as permanent ergonomic sugar; it will
+/// not be deprecated.
+///
+/// Scalar types (`f32`, `f64`, `i32`, `u32`, `i64`, `u64`, `bool`) are
+/// passed by value.
+///
 /// # DSL, not compiled Rust
 ///
 /// The function body uses Rust syntax but is **not compiled by rustc**.
 /// The proc macro parses it into KAIO's own IR (`KernelStmt`) and emits
 /// PTX text directly. No LLVM, no MIR, no borrow checker runs on the
-/// kernel body.
+/// kernel body. ptxas sees a plain `.u64` param for every slice
+/// parameter regardless of which surface syntax you wrote.
 ///
-/// This has an important consequence for `&mut [T]` parameters: in
-/// standard Rust, `&mut T` carries a `noalias` guarantee — the compiler
-/// assumes exclusive access. In a GPU kernel, thousands of threads
-/// execute the same function body concurrently, all accessing the same
-/// buffer. Because the body never reaches rustc's backend, no `noalias`
-/// attribute is emitted — ptxas sees a plain `.u64` param. There is no
-/// UB from the aliasing mismatch, but the `&mut` syntax is misleading:
-/// correctness depends on the kernel author writing disjoint access
-/// patterns (e.g. `if idx < n` bounds guards), not on compiler-enforced
-/// uniqueness.
+/// Thousands of threads execute the kernel body concurrently, all
+/// accessing the same device buffers. Correctness depends on writing
+/// disjoint access patterns (e.g. `if idx < n` bounds guards), not on
+/// compiler-enforced uniqueness.
 ///
-/// A future release will accept `*mut [T]` / `*const [T]` as the
-/// primary kernel parameter syntax to better communicate this. See
-/// RFC-0001 in the repository for the design direction.
-///
-/// You cannot call Rust functions declared outside the kernel inside the
-/// kernel body. The supported syntax subset includes: arithmetic,
+/// You cannot call Rust functions declared outside the kernel inside
+/// the kernel body. The supported syntax subset includes: arithmetic,
 /// comparisons, bitwise ops, short-circuit `&&`/`||`, compound
 /// assignment, `if`/`else`, `for`/`while` loops, `let` bindings, and
 /// KAIO GPU builtins (`thread_idx_x()`, `shared_mem!`, etc.).
@@ -63,7 +67,7 @@ use parse::signature::parse_kernel_signature;
 /// use kaio::prelude::*;
 ///
 /// #[gpu_kernel(block_size = 256)]
-/// fn vector_add(a: &[f32], b: &[f32], out: &mut [f32], n: u32) {
+/// fn vector_add(a: *const [f32], b: *const [f32], out: *mut [f32], n: u32) {
 ///     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
 ///     if idx < n {
 ///         out[idx] = a[idx] + b[idx];

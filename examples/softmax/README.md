@@ -6,7 +6,7 @@ normalizing.
 
 ```rust
 #[gpu_kernel(block_size = 256)]
-fn softmax(input: &[f32], output: &mut [f32], n: u32) {
+fn softmax(input: *const [f32], output: *mut [f32], n: u32) {
     let tid = thread_idx_x();
 
     let mut local_max = -3.402823e38f32;

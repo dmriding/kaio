@@ -25,7 +25,7 @@ const HIDDEN_DIM: u32 = 256;
 const EPS: f32 = 1e-6;
 
 #[gpu_kernel(block_size = 256)]
-fn rms_norm(x: &[f32], weight: &[f32], out: &mut [f32], n: u32, eps: f32) {
+fn rms_norm(x: *const [f32], weight: *const [f32], out: *mut [f32], n: u32, eps: f32) {
     let tid = thread_idx_x();
     // Single-block kernel: one block covers the entire hidden dim.
     // Each thread handles exactly one element.

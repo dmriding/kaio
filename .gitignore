@@ -15,6 +15,7 @@ kaio-candle/Cargo.lock
 *.swo
 *~
 .codex
+.claude
 
 # OS
 Thumbs.db
@@ -23,9 +24,4 @@ Thumbs.db
 # Project-specific
 synapse.toml
 docs/development/internal
-docs/development/sprints/phase3/reviews
-docs/development/sprints/phase4/reviews
-docs/development/sprints/phase5/reviews
-docs/development/sprints/phase6/reviews
-docs/development/sprints/phase7/reviews
 PUBLISH_ORDER.md
