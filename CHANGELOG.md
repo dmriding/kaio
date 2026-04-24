@@ -37,6 +37,13 @@ Updated at phase completion. Per-sprint detail lives in
 - GIL released during kernel execution via `py.detach(|| ...)`
   (PyO3 0.28's renamed `allow_threads`) so concurrent Python
   threads make progress while the GPU runs.
+- **`kaio-py` is scaffold-complete and user-demand-gated from here.**
+  Further op exposure, PyTorch cross-validation, and PyPI publishing
+  are unscheduled sprints that activate on a filed
+  [python-binding request](https://github.com/dmriding/kaio/issues/new?template=python-binding-request.md).
+  The scaffold tracks the Rust API only as requests come in, not on
+  every Rust release. Rationale is documented in the Phase 8 master
+  plan.
 
 ## [Unreleased] — Sprint 8.0.5: Bench coverage extension
 

@@ -7,17 +7,29 @@ Linux, no CUDA toolkit install required.
 
 ## Status
 
-**Sprint 8.1 scaffold.** The Python package is under active
-development. `import kaio` works after `maturin develop`; the public
-API is minimal while the plumbing stabilizes.
+**Sprint 8.1 scaffold complete. Further op exposure is user-demand-gated.**
 
-- Shipped in 8.1: `kaio.Device`, `kaio.Tensor` (NumPy roundtrip for
-  `float16` / `float32`), `kaio.KaioError`, `kaio.matmul_tc`.
-- Next sprint (8.2): matmul_tc_async, matmul_int8, matmul_int4,
-  fused QKV projections, attention_tc + flash variants. Error-class
-  subclasses (`KaioValidationError`, `KaioDeviceError`, etc.).
-- Later sprints: cross-validation against PyTorch (8.3), `pip
-  install kaio` from PyPI with wheel packaging and CI (8.4).
+`import kaio` works after `maturin develop`. The scaffold proves
+the PyO3 path works end-to-end — Python users can call
+`kaio.matmul_tc` today with NumPy f16 inputs and get correct f32
+output back.
+
+Broader op exposure (INT8 / INT4 matmul, attention, fused QKV
+projections), cross-validation tests against PyTorch, and PyPI
+wheel publishing are all **unscheduled**. If you want any of those,
+[file a python-binding request](https://github.com/dmriding/kaio/issues/new?template=python-binding-request.md).
+Each request is a discrete sprint with its own scope — not a
+commitment to lockstep with Rust releases.
+
+Why: KAIO's a solo-maintainer project, and the Rust core moves
+fast. Maintaining a Python surface in lockstep against zero concrete
+Python users would slow the Rust work without a matching return.
+The scaffold is the signal that says "it can be done, and we will
+when someone wants it."
+
+Shipped in 8.1:
+- `kaio.Device`, `kaio.Tensor` (NumPy roundtrip for `float16` /
+  `float32`), `kaio.KaioError`, `kaio.matmul_tc`.
 
 ## Requirements
 
@@ -110,11 +122,13 @@ enough to justify them.
   `Device(0)` objects into the same op raises `KaioError`.
 - **Single kernel exposed.** Only `matmul_tc` in Sprint 8.1. Wider
   op coverage is 8.2.
-- **No wheel on PyPI yet.** `pip install kaio` does not work;
-  development install via `maturin develop` is the only path until
-  Sprint 8.4 ships the wheel-packaging + CI story.
+- **No wheel on PyPI yet.** `pip install kaio` does not work.
+  Install today via `pip install git+https://github.com/dmriding/kaio.git#subdirectory=kaio-py`
+  (requires Rust toolchain + maturin; builds from source). PyPI
+  publish triggers on the first user request.
 - **No autograd.** Python wraps KAIO's forward ops. Autograd
-  integration via PyTorch `torch.autograd.Function` is post-Phase-8.
+  integration via PyTorch `torch.autograd.Function` is on the
+  user-demand queue.
 
 ## Project layout
 

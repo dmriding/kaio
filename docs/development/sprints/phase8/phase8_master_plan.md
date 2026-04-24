@@ -1,8 +1,14 @@
 # Phase 8 Master Plan — Python Bindings + Pointer Syntax
 
-**Status:** In progress. 8.0 pointer syntax (RFC-0001) and 8.0.5 bench
-coverage extension complete on `main`. 8.1 PyO3 scaffold is the next
-sprint; 8.2 / 8.3 / 8.4 follow to finish the phase.
+**Status:** Scaffold complete; further Python work user-demand-gated.
+8.0 pointer syntax, 8.0.5 bench coverage, and 8.1 PyO3 scaffold all
+landed on `main`. 8.2 (broader op exposure), 8.3 (PyTorch
+cross-validation), and 8.4 (PyPI + CI matrix) are deliberately
+**unscheduled** — the scaffold proves the path works; the ongoing
+maintenance cost of keeping a Python surface in lockstep with a
+fast-moving Rust API, with zero concrete Python users at time of
+writing, would slow the Rust core without a return. See "Scope
+decision" below.
 **Depends on:** Phase 7 complete (v0.4.0, 2026-04-18)
 **Per-sprint logs:** see the `sprint_8_*.md` files in this directory
 and the per-sprint status row in [`PHASE_8_LOG.md`](PHASE_8_LOG.md)
@@ -124,137 +130,108 @@ Additive measurement coverage, no version bump. Closes the "KAIO
 benches every kernel it ships" credibility gap flagged in
 `performance.md` roadmap section.
 
-### 3. PyO3 scaffold (Sprint 8.1 — planned)
+### 3. PyO3 scaffold (Sprint 8.1 — complete)
 
-New standalone crate: `kaio-py` (separate directory, not a workspace
-member, parallel to `kaio-candle`). Python module name: `kaio`.
-Build via `maturin develop` for local iteration + `maturin build
---release` for wheels.
+Standalone `kaio-py/` crate at repo root (not a workspace member,
+same rationale as `kaio-candle`). PyO3 0.28 + rust-numpy 0.28 +
+maturin ≥ 1.12 + abi3-py310. Exposes `kaio.Device`,
+`kaio.Tensor` (NumPy roundtrip for f16 / f32 with C-contiguity
+enforcement), `kaio.KaioError` (single exception class; subclasses
+deferred), and `kaio.matmul_tc` as the end-to-end smoke kernel.
+`examples/hello.py` runs `Device → Tensor → kernel → NumPy` on a
+fresh Python install, validating correctness against a NumPy f32
+reference.
 
-Minimum viable scaffold:
-- `pyproject.toml` with `maturin` as build backend, abi3-py310 pinned
-- `Cargo.toml` pulling `kaio` + `kaio-ops` as path deps with
-  `default-features = false, features = ["dynamic-loading"]` (matches
-  kaio-candle's convergence pattern for future expandability)
-- `src/lib.rs` exposing a single `#[pymodule] fn kaio()` plus:
-  - `kaio.Device` — thin wrapper around `KaioDevice`
-  - `kaio.Tensor` — `Arc<GpuBuffer<T>>` + shape + dtype, with
-    `.from_numpy()` / `.to_numpy()` / `__repr__`
-  - `kaio.matmul_tc(a, b) -> Tensor` — smoke-kernel call proving the
-    full plumbing (Device → Tensor → kernel launch → NumPy roundtrip)
-- One `examples/hello.py` exercising the path end-to-end
-- `README.md` explaining the `pip install` + `python hello.py` flow
+See [`sprint_8_1.md`](sprint_8_1.md) for the full post-delivery
+outline.
 
-Scope discipline: **one kernel exposed, not the whole `kaio-ops`
-surface**. Wider exposure is 8.2's job — shipping the scaffold with
-a working end-to-end demo is the 8.1 deliverable, not a list of
-ops. See the Sprint 8.1 plan doc when it lands for the full
-decision set (dtype coverage, error propagation, GIL release
-pattern, wheel-target matrix).
+### 4. Scope decision (post-8.1): further Python work is user-demand-gated
 
-### 4. Core ops exposure (Sprint 8.2 — planned)
+After shipping the 8.1 scaffold, the decision was made not to
+proceed with 8.2 → 8.4 on a scheduled cadence. Rationale:
 
-Building on the 8.1 scaffold, the exposed Python op surface is:
+- **No concrete Python user at time of writing.** The long-term
+  roadmap's priority hierarchy puts "user-reported pain" at the
+  top; no pain has been reported from Python yet. 8.2+ would be
+  speculative build-out rather than demand-response.
+- **Maintenance multiplier on a solo-maintainer project.** Every
+  Rust op added after Phase 9+ would need wrapping, dtype
+  handling, NumPy interop verification, error-path tests, README
+  updates, and a wheel republish. For a fast-moving Rust core
+  with no Python audience yet, that tax compounds against the
+  more important Rust work.
+- **The scaffold is the signal.** The 8.1 scaffold is proof that
+  KAIO's bindings path works end-to-end — Python users evaluating
+  KAIO now see a working `kaio.matmul_tc` demo. That's sufficient
+  to communicate intent and possibility without committing to an
+  open-ended ongoing deliverable.
+
+The unscheduled sections that remain documented below describe
+**what 8.2 / 8.3 / 8.4 would look like** if a user request
+triggers them. Treat these as shovel-ready specs, not commitments.
+
+### 5. Unscheduled — core ops exposure (nominal "Sprint 8.2")
+
+If a user request triggers broader op exposure, the intended
+surface is:
 
 - `kaio.matmul_tc` + `kaio.matmul_tc_async` (f16 Q × f16 K → f32 out)
 - `kaio.matmul_int8` (W8A8)
 - `kaio.matmul_int4` (W4A16 GPTQ)
 - `kaio.qkv_project_int4` + `kaio.qkv_project_int8` (fused tri-output)
-- `kaio.attention_tc` + `kaio.attention_tc_causal` (short-seq TC; `seq_k ≤ 384` enforced with a clear error message, flash documented as the long-seq companion)
+- `kaio.attention_tc` + `kaio.attention_tc_causal` (short-seq TC; `seq_k ≤ 384`)
 - `kaio.attention_flash` + `kaio.attention_flash_causal` (online softmax, `d_k ≤ 256`)
 
-**Not exposed in 8.2** — `kaio_ops::softmax` is single-block
-(`n ≤ 256`) and shipping a Python `kaio.softmax(x)` that silently
-fails or loudly errors on production hidden-state sizes (`n = 4096`
-etc.) is a worse user experience than not shipping it at all.
-Same logic for `rms_norm` / `layer_norm` (not in `kaio-ops` as
-publics today; only live as showcase-example kernels). These wait
-for the multi-block versions on the Ops Track; the Python API
-waits with them.
+Intentionally not exposed: `kaio_ops::softmax` (single-block
+`n ≤ 256` trap for Python users), and `rms_norm` / `layer_norm`
+which aren't in `kaio_ops` as publics yet — those wait for
+multi-block Ops Track versions.
 
-Tensor dtypes covered: f32 (native NumPy), f16 (via NumPy's
-`np.float16`), i8 (INT8 matmul), packed u32 (INT4 matmul — same
-storage model as the Rust API).
+Tensor dtypes that would extend: i8 (INT8 matmul), packed u32
+(INT4 matmul). Error taxonomy would split: `KaioError` as base,
+`KaioValidationError` / `KaioDeviceError` / `KaioPtxError`
+subclasses.
 
-Error propagation: `KaioError` → Python exception hierarchy
-(`KaioError` as base, `KaioValidationError`, `KaioDeviceError`,
-`KaioPtxError` as subclasses). Rust `Result` becomes Python exception
-at the FFI boundary; no `Result` type bleed into Python code.
+Op chaining without CPU round-trip already works from the 8.1
+scaffold — `Tensor → kernel → Tensor` stays on device. Further
+ops inherit that pattern.
 
-**Op chaining without CPU round-trip** is supported from day one:
-`kaio.Tensor` holds a GPU buffer, and every op that takes a
-`Tensor` accepts another op's output `Tensor` directly. Two ops
-back-to-back (`y = kaio.matmul_tc(a, b); z = kaio.attention_tc(y,
-k, v)`) stay on device — no `.to_numpy()` / `.from_numpy()` round
-trip between them. The out-of-scope §"GPU-to-GPU Python ops"
-item below is specifically about explicit **async streaming /
-stream-ordering across ops without synchronize()**, not about
-avoiding the CPU bounce.
+### 6. Unscheduled — cross-validation + Python benchmarks (nominal "Sprint 8.3")
 
-### 5. Cross-validation + Python benchmarks (Sprint 8.3 — planned)
+Would add `tests/` with PyTorch-reference comparison per op,
+gated behind `@pytest.mark.gpu_torch` (CI-skipped, maintainer-run
+locally — same pattern as the coverage badge and `cargo xtask
+bench` numbers). Plus a `bench/` directory measuring FFI dispatch
+overhead separately from kernel time. Committed output artifact
+(markdown table or JSON) as the regression signal, not a CI gate.
 
-Python-side test / bench infrastructure. **CI-ignored, run
-locally, posted manually** — same model as the coverage badge and
-the `cargo xtask bench` worst-of-N numbers. KAIO does not run
-GPU-plus-PyTorch CI on hosted runners; maintainers run these
-locally and post the outputs as repo artifacts when they change
-materially:
+### 7. Unscheduled — PyPI + CI (nominal "Sprint 8.4")
 
-- `tests/` directory with PyTorch-equivalent cross-validation.
-  Every exposed op gets a PyTorch-reference comparison at 2–3
-  shapes + dtypes, checked within documented numerical tolerance.
-  Gated behind a pytest marker (e.g., `@pytest.mark.gpu_torch`)
-  that CI skips; maintainers run `pytest -m gpu_torch` locally.
-  Results live in the repo as committed output artifacts (a
-  markdown table or JSON) that anyone can review without re-running.
-- `bench/` directory with `pytest-benchmark`-or-equivalent
-  harnesses measuring Python-dispatch overhead (the cost of the
-  FFI round-trip itself) separately from kernel time. Goal: less
-  than ~10 µs FFI overhead per op, dispatch-cost-dominated only
-  at the smallest shapes. Same CI-skipped / local-only pattern.
-- A `compare_to_pytorch.py` script that runs the full matrix
-  and outputs a comparison table committed to the repo. Re-run
-  whenever the Python surface changes; the table is the artifact.
+Would add `pip install kaio` via PyPI publish (`maturin upload`),
+a GitHub Actions `{windows, ubuntu} × {3.10, 3.11, 3.12}`
+CPU-only smoke matrix (wheel build + `import kaio; version` +
+type-surface assertion), and a publish runbook.
 
-CI's role is limited to the wheel-build + one-matmul smoke test
-described in 8.4. GPU + PyTorch infrastructure is explicitly out
-of the hosted-runner matrix — neither hardware nor the packaging
-bill fit the project's operational footprint.
+**Publication stance as of 8.1 landing:** the scaffold lives in
+`kaio-py/`, builds cleanly, and is installable today via:
 
-### 6. Packaging + CI (Sprint 8.4 — planned)
+```sh
+pip install git+https://github.com/dmriding/kaio.git#subdirectory=kaio-py
+```
 
-- `pip install kaio` on Windows + Linux works, pulls abi3 wheels.
-- GitHub Actions matrix: `{windows-latest, ubuntu-latest} ×
-  {python 3.10, 3.11, 3.12}` — 6 cells. Each builds a wheel,
-  imports the module, and runs a **no-GPU smoke check**:
-  `import kaio; kaio.__version__` and a type-surface assertion
-  (classes exist, functions have expected signatures). GPU +
-  PyTorch cross-validation is not in CI by design — see §5.
-  Hosted runners don't have GPUs, and renting them for every PR
-  is not an operational fit for this project.
-- `pyproject.toml` classifiers + description + project URLs for
-  PyPI display.
-- `README.md` at `kaio-py/` covers: install, device discovery,
-  first kernel call, error taxonomy, pointer to Rust docs.
-- `kaio-py` crate publishes to PyPI via `maturin upload` — not
-  crates.io. (The wheel contains a compiled `.so`/`.pyd`; it is
-  not a Rust library other Rust crates would consume.)
-
-No auto-deploy from CI initially; publish is a manual step driven
-from a maintainer's local machine with the proper credentials.
-Phase 8.4+ could automate that once the trust boundary is
-established.
+No PyPI wheel. The first user request that justifies the ops
+expansion also justifies the PyPI publish.
 
 ## Sprint Breakdown
 
-| Sprint | Scope | Key Deliverable |
-|--------|-------|-----------------|
-| [8.0](sprint_8_0.md) ✅ | Pointer syntax (RFC-0001) — `*mut [T]` / `*const [T]` in `#[gpu_kernel]` | Parser-only extension, zero IR / runtime change; `&[T]` / `&mut [T]` retained as permanent sugar; v0.4.1 |
-| [8.0.5](sprint_8_0_5.md) ✅ | Bench coverage extension | Seven bench harnesses under `cargo xtask bench`; new `performance.md` sections for QKV / attention / norm-activation; no API / runtime change |
-| 8.1 | PyO3 scaffold | New standalone `kaio-py` crate, Python module with `Device` + `Tensor` + one smoke kernel (`matmul_tc`); abi3-py310 wheel target; NumPy roundtrip working end-to-end |
-| 8.2 | Core ops exposure | Matmul family (TC + INT8 + INT4), attention (TC + flash + causal variants), fused QKV projections, softmax; NumPy f32/f16 + i8 + packed u32 dtypes; Rust `Result` → Python exception hierarchy |
-| 8.3 | Cross-validation + Python bench | PyTorch-equivalent tests in `tests/`, FFI-overhead bench in `bench/`, documented numerical tolerance per op |
-| 8.4 | Packaging + CI | Windows + Linux wheels on PyPI; GitHub Actions `{Win,Linux} × {3.10, 3.11, 3.12}` smoke matrix; `pip install kaio` works |
+| Sprint | Scope | Status | Key Deliverable |
+|--------|-------|--------|-----------------|
+| [8.0](sprint_8_0.md) | Pointer syntax (RFC-0001) — `*mut [T]` / `*const [T]` in `#[gpu_kernel]` | ✅ Complete | Parser-only extension, zero IR / runtime change; `&[T]` / `&mut [T]` retained as permanent sugar; v0.4.1 |
+| [8.0.5](sprint_8_0_5.md) | Bench coverage extension | ✅ Complete | Seven bench harnesses under `cargo xtask bench`; new `performance.md` sections for QKV / attention / norm-activation; no API / runtime change |
+| [8.1](sprint_8_1.md) | PyO3 scaffold | ✅ Complete | New standalone `kaio-py` crate; `Device` + `Tensor` + `KaioError` + `matmul_tc` smoke kernel; abi3-py310 wheel target; NumPy roundtrip end-to-end |
+| 8.2 | Core ops exposure | ⏸️ Unscheduled | Triggered by user request — see §5 for spec |
+| 8.3 | Cross-validation + Python bench | ⏸️ Unscheduled | Triggered by user request — see §6 for spec |
+| 8.4 | PyPI + CI | ⏸️ Unscheduled | Triggered by user request — see §7 for spec |
 
 ## Dependency Graph
 
@@ -271,16 +248,16 @@ established.
                                                   8.4 (packaging + CI)
 ```
 
-8.0 and 8.0.5 are complete. 8.1 → 8.4 run sequentially; each sprint
-builds on the previous one. 8.2 depends on 8.1's `Tensor` and error-
-taxonomy decisions; 8.3 depends on 8.2's op surface for comparison
-targets; 8.4 depends on 8.3's confidence signals before publishing.
+8.0, 8.0.5, and 8.1 are complete. 8.2 → 8.4 are unscheduled —
+triggered by a user request (tracked via the
+`python-binding-request` issue template), not by sprint cadence.
+If triggered, they'd still run sequentially as originally specified.
 
 Phase 9 (FlashAttention backward + kernel deepening) is a separate
-phase tracked in [`phases.md`](../../../phases.md). It does not
-block Phase 8 — the two can proceed in parallel since they touch
-non-overlapping surfaces. Phase 9 adds PTX kernels; Phase 8 adds
-Python bindings over whatever kernels currently ship.
+phase tracked in [`phases.md`](../../../phases.md) and is the next
+sprint boundary the Rust core picks up. Phase 9 adds PTX kernels
+over whatever Python surface exists; since the Python surface is
+scaffold-only, Phase 9 work has no cross-phase ripple.
 
 ## Out of Scope for Phase 8
 
