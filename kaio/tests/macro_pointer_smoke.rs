@@ -26,11 +26,7 @@ fn mixed_forms_correctness() {
     let a_host: Vec<f32> = (0..n).map(|i| i as f32).collect();
     let b_host: Vec<f32> = (0..n).map(|i| (i * 3) as f32).collect();
     let expected_c: Vec<f32> = a_host.iter().map(|x| x * 2.0).collect();
-    let expected_d: Vec<f32> = a_host
-        .iter()
-        .zip(&b_host)
-        .map(|(x, y)| x + y)
-        .collect();
+    let expected_d: Vec<f32> = a_host.iter().zip(&b_host).map(|(x, y)| x + y).collect();
 
     let a = device.alloc_from(&a_host).expect("alloc a");
     let b = device.alloc_from(&b_host).expect("alloc b");
@@ -41,6 +37,12 @@ fn mixed_forms_correctness() {
 
     let c_result = c.to_host(&device).expect("to_host c");
     let d_result = d.to_host(&device).expect("to_host d");
-    assert_eq!(c_result, expected_c, "c (ref-mut form) produced wrong results");
-    assert_eq!(d_result, expected_d, "d (ptr-mut form) produced wrong results");
+    assert_eq!(
+        c_result, expected_c,
+        "c (ref-mut form) produced wrong results"
+    );
+    assert_eq!(
+        d_result, expected_d,
+        "d (ptr-mut form) produced wrong results"
+    );
 }

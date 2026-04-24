@@ -319,7 +319,7 @@ matmul on Windows without Triton's Linux-only constraint.
 
 ---
 
-## Phase 8.5: Pointer Syntax (RFC-0001)
+## Phase 8.5: Pointer Syntax (RFC-0001) ✅
 
 **Goal:** Accept `*mut [T]` / `*const [T]` in `#[gpu_kernel]`
 signatures as the primary parameter syntax. `&mut [T]` / `&[T]`
@@ -327,14 +327,16 @@ retained as permanent ergonomic sugar.
 
 Resolves the DSL-vs-compiled-Rust communication gap raised in
 issue #13: `*mut [T]` signals "device pointer, no aliasing contract"
-using standard Rust syntax. ~20-line parser change in
-`parse_kernel_signature` (`Type::Ptr` arm alongside `Type::Reference`).
+using standard Rust syntax. Parser change in `parse_kernel_signature`
+(new `Type::Ptr` arm alongside `Type::Reference`) with a shared
+`parse_slice_elem_type` helper that harmonized diagnostics across both
+forms.
 
-See [RFC-0001](rfcs/rfc-0001-pointer-syntax.md) for the full design.
+See [RFC-0001](development/rfcs/rfc-0001-pointer-syntax.md) for the
+full design.
 
-**Status:** Planned (RFC drafted, docs clarification shipped in v0.4.0)
-
-**Depends on:** Phase 8 complete.
+**Status:** Complete (Sprint 8.0, pulled forward ahead of Phase 8.1
+PyO3 scaffolding). Resolves [#13](https://github.com/dmriding/kaio/issues/13).
 
 ---
 

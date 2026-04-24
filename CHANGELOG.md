@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
+## [Unreleased]
+
+### Added
+
+- `#[gpu_kernel]` now accepts `*const [T]` and `*mut [T]` kernel
+  parameter syntax as the recommended primary form, per
+  [RFC-0001](docs/development/rfcs/rfc-0001-pointer-syntax.md).
+  Pointer syntax better communicates the on-device reality (thousands
+  of threads, no aliasing contract) than reference syntax does.
+  Resolves [#13](https://github.com/dmriding/kaio/issues/13). `&[T]` /
+  `&mut [T]` continue to work as permanent ergonomic sugar with
+  identical PTX lowering; no deprecation planned.
+
+### Changed
+
+- Signature parser diagnostics are now dedicated and symmetric across
+  reference and pointer forms. Fixed-size arrays (`[T; N]`), nested
+  references/pointers, and scalar element types each produce their own
+  specific error messages rather than falling through to a generic
+  "unsupported type" catch-all.
+
 ## [0.4.0] — 2026-04-18 — Phase 7: Quantization, Attention, Candle Bridge
 
 ### Sprint 7.4d — matmul_tc + matmul_tc_async backward

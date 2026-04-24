@@ -1,4 +1,4 @@
-error: unsupported type `String` in GPU kernel parameter. Supported: f32, f64, i32, u32, i64, u64, bool, &[T], &mut [T]
+error: unsupported type `String` in GPU kernel parameter. Supported: f32, f64, i32, u32, i64, u64, bool, &[T], &mut [T], *const [T], *mut [T]
  --> tests/compile_fail/cf01_string_param.rs:5:17
   |
 5 | fn kernel(name: String) {}
