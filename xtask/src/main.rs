@@ -105,7 +105,7 @@ fn print_help() {
 
 Usage:
   cargo xtask showcase [<name>|--list]   Run one or all showcase examples.
-  cargo xtask bench [<name>|--list]      Run one or all benchmarks (matmul_tc_bench, matmul_int8_bench, matmul_int4_bench).
+  cargo xtask bench [<name>|--list]      Run one or all benchmarks. Use --list to enumerate.
   cargo xtask all                        Run showcase + bench in sequence.
   cargo xtask --help                     Show this message.
 
@@ -248,6 +248,11 @@ const BENCHES: &[(&str, &str, &str)] = &[
         "=== matmul_int4 benchmark (KAIO s4 × f16 → f32 vs cuBLAS sgemm, rough reference) ===",
         "matmul_int4_bench",
         "W4A16 GPTQ-style INT4 matmul; cuBLAS sgemm column is apples-to-oranges",
+    ),
+    (
+        "=== QKV projection benchmark (INT4 fused vs 3x matmul_int4; INT8 absolute TOPS) ===",
+        "qkv_project_bench",
+        "Fused tri-output QKV projection; INT4 ratio vs 3x matmul_int4, INT8 absolute TOPS",
     ),
 ];
 
