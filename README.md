@@ -276,7 +276,7 @@ fn tiled(data: *const [f32], out: *mut [f32], n: u32) {
 
 ```rust
 #[gpu_kernel(block_size = 256)]
-fn reduce(input: &[f32], out: &mut [f32], n: u32) {
+fn reduce(input: *const [f32], out: *mut [f32], n: u32) {
     let idx = thread_idx_x() + block_idx_x() * block_dim_x();
     let val = if idx < n { input[idx] } else { 0.0f32 };
     let sum = block_reduce_sum(val);

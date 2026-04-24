@@ -54,16 +54,19 @@ The PTX output is identical regardless of which form is used. The
 distinction is entirely at the Rust syntax level — a documentation and
 intent signal, not a codegen difference.
 
-### Migration path
+### Implementation timeline
 
-1. **v0.4.0 (this release):** Document the DSL-vs-compiled-Rust
-   distinction in README, `#[gpu_kernel]` rustdoc, and this RFC.
-   No syntax changes.
+1. **v0.4.0 (2026-04-18):** Documentation-only predecessor. README and
+   `#[gpu_kernel]` rustdoc clarified the DSL-vs-compiled-Rust
+   distinction; this RFC was published as a draft describing the
+   direction. No syntax changes in the parser.
 
-2. **Future minor release:** Accept `*mut [T]` / `*const [T]` in
-   kernel signatures. Update all examples and docs to use pointer
-   syntax as the primary form. `&mut` / `&` continue to work — no
-   deprecation, permanent sugar.
+2. **Sprint 8.0 (2026-04-24, `phase8` branch):** Parser accepts
+   `*mut [T]` / `*const [T]` in kernel signatures. All public examples,
+   README, `kaio/README.md`, prelude doctest, and the `#[gpu_kernel]`
+   rustdoc migrated to pointer syntax as the primary form.
+   `&mut [T]` / `&[T]` remain accepted as permanent sugar — no
+   deprecation.
 
 ### Host-side launch wrapper
 

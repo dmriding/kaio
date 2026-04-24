@@ -319,7 +319,12 @@ matmul on Windows without Triton's Linux-only constraint.
 
 ---
 
-## Phase 8.5: Pointer Syntax (RFC-0001) ✅
+## Phase 8.5 (absorbed): Pointer Syntax (RFC-0001) — delivered as Sprint 8.0 ✅
+
+Originally scheduled as a standalone Phase 8.5 after Phase 8's PyO3
+work. Pulled forward to **Sprint 8.0** (2026-04-24) as a Phase 8
+prelude so the pointer-syntax story lands before PyO3 widens the
+public-facing surface.
 
 **Goal:** Accept `*mut [T]` / `*const [T]` in `#[gpu_kernel]`
 signatures as the primary parameter syntax. `&mut [T]` / `&[T]`
@@ -335,8 +340,10 @@ forms.
 See [RFC-0001](development/rfcs/rfc-0001-pointer-syntax.md) for the
 full design.
 
-**Status:** Complete (Sprint 8.0, pulled forward ahead of Phase 8.1
-PyO3 scaffolding). Resolves [#13](https://github.com/dmriding/kaio/issues/13).
+**Status:** Complete as Sprint 8.0. Resolves
+[#13](https://github.com/dmriding/kaio/issues/13). Phase 8.5 as a
+separate future phase no longer exists — its content is now part of
+the Phase 8 timeline.
 
 ---
 
@@ -349,7 +356,9 @@ for additional TC headroom).
 
 **Status:** Planned
 
-**Depends on:** Phase 8.5 complete.
+**Depends on:** Phase 8 complete (pointer-syntax prelude landed as
+Sprint 8.0; Phase 9 kernel work can proceed in parallel with Phase 8
+PyO3 binding work since they touch non-overlapping surfaces).
 
 ---
 
