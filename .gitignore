@@ -15,6 +15,7 @@ kaio-candle/Cargo.lock
 *.swo
 *~
 .codex
+.claude
 
 # OS
 Thumbs.db
