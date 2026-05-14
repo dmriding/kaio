@@ -90,6 +90,14 @@ pub use matmul_kernel::matmul_naive;
 pub use matmul_tc_async_kernel::matmul_tc_async;
 pub use matmul_tc_kernel::matmul_tc;
 
+// Sprint 9.1 — bf16 × bf16 → f32 sync tensor-core matmul. Sibling of
+// `matmul_tc` (f16); same 64×64 block tile / 4-warp 32×32 quadrant /
+// edge-tile predication / Sprint 6.7b D10 fragment hoist. Uses the
+// dedicated `TensorCoreOp::MmaSyncBf16` IR variant (D2.5). Requires
+// SM 8.0+ and K%16==0. Async / auto-tuner / candle bf16 variants
+// land in sub-sprints 9.1.1–9.1.5.
+pub use matmul_tc_bf16_kernel::matmul_tc_bf16;
+
 // Sprint 7.1 — INT8 symmetric dequantize-matmul (W8A8, i8 × i8 → f32).
 // Path FAST: direct mma.sync.m16n8k32.s8.s8.s32 with s32 accumulator,
 // single global scalar scale applied post-accumulation. Reference quant

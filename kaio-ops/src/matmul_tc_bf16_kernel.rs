@@ -1,8 +1,3 @@
-// C3-only allow: the bf16 kernel module's symbols become live when C4
-// adds the public host launch fn `matmul_tc_bf16` (plus the `pub use`
-// re-export in `lib.rs`). Remove this attribute at C4.
-#![allow(dead_code)]
-
 //! Tensor-core matrix multiply — `m16n8k16.f32.bf16.bf16.f32`, multi-warp.
 //!
 //! bf16 × bf16 inputs with fp32 accumulation, using the dedicated
@@ -30,10 +25,10 @@
 //! register-class label, not a value conversion — PTX memory ops do
 //! not canonicalize across f16/bf16, so the bytes round-trip bit-perfect.
 //!
-//! C3 (Sprint 9.1 commit plan): kernel skeleton + module-build host
-//! tests + the D4 cvt-free hot-path gate. The public host launch fn
-//! `kaio_ops::matmul_tc_bf16` lands at C4 with the first correctness
-//! test.
+//! Sprint 9.1 commit plan: C3 shipped the kernel skeleton, module-build
+//! host tests, and the D4 cvt-free hot-path gate; C4 (this commit) adds
+//! the public host launch fn [`matmul_tc_bf16`] and the first GPU
+//! correctness test.
 
 use crate::matmul_tc_kernel::{
     TILE_A_BYTES, TILE_A_ROW_STRIDE_BYTES, TILE_B_BYTES, TILE_B_COL_STRIDE_BYTES,
@@ -690,6 +685,71 @@ pub(crate) fn build_matmul_tc_bf16_module(sm: &str) -> PtxModule {
     let mut module = PtxModule::new(sm);
     module.add_kernel(kernel);
     module
+}
+
+/// Tensor-core matmul — bf16 × bf16 → f32 with fp32 accumulation.
+///
+/// Sibling of [`crate::matmul_tc`] for bf16 inputs. Same multi-warp
+/// 64×64 block tile structure, same edge-tile predication on M and N
+/// (only `K % 16 == 0` is enforced — the mma K-tile is structural).
+/// Sprint 9.1 sync-only deliverable; the async / auto-tuner / candle
+/// variants land in sub-sprints 9.1.1–9.1.5.
+///
+/// # Hardware
+///
+/// Requires NVIDIA Ampere or newer (SM 8.0+). Sub-Ampere targets are
+/// rejected by `PtxModule::validate()` via `ValidationError::SmTooLow`
+/// before driver dispatch.
+///
+/// # Layout
+///
+/// A is M×K row-major, B is K×N row-major, D is M×N row-major. B is
+/// transposed on the way into shared memory (column-major) by the
+/// reused `pub(crate)` tile-B loader from `matmul_tc_kernel` — bf16
+/// byte layout is bit-identical to f16 in shared memory, so the same
+/// loader works for both precisions.
+pub fn matmul_tc_bf16(
+    device: &KaioDevice,
+    a: &GpuBuffer<bf16>,
+    b: &GpuBuffer<bf16>,
+    c: &mut GpuBuffer<f32>,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<()> {
+    use cudarc::driver::{LaunchConfig, PushKernelArg};
+
+    validate_dims_tc_bf16(a, b, c, m, n, k)?;
+
+    let info = device.info()?;
+    let (major, minor) = info.compute_capability;
+    let sm = format!("sm_{major}{minor}");
+    let module = build_matmul_tc_bf16_module(&sm);
+
+    let kmodule = device.load_module(&module)?;
+    let func = kmodule.function("matmul_tc_bf16")?;
+
+    let grid = (n.div_ceil(BN_BLOCK), m.div_ceil(BM_BLOCK), 1);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (32, WARPS_PER_BLOCK, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(func.inner())
+            .arg(a.inner())
+            .arg(b.inner())
+            .arg(c.inner_mut())
+            .arg(&m)
+            .arg(&n)
+            .arg(&k)
+            .launch(cfg)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

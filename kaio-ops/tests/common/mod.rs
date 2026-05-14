@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use half::f16;
+use half::{bf16, f16};
 
 /// Generate patterned f16 data scaled to |x| ≤ 1.0.
 ///
@@ -135,6 +135,114 @@ pub fn assert_close_with_k_scaled_tol(
          abs_tol = {abs_tol:e}, usage = {:.1}% of tolerance",
         100.0 * worst_abs_err / abs_tol
     );
+}
+
+// ============================================================================
+// Sprint 9.1 — bf16 TC matmul helpers
+// ============================================================================
+//
+// Sibling of the f16 trio above. Per the Sprint 9.1 D5 reference-strategy
+// table, small/medium bf16 correctness tests use a dense f64 CPU reference
+// (cheaper than f32-accumulated reference would be misleading: bf16's weak
+// 7-bit mantissa makes the f64 reference materially tighter than f32 for
+// dot-product cancellation patterns). Large shapes use sampled-cell f64 —
+// that helper lands at C5 when the full correctness suite arrives.
+
+/// Generate patterned bf16 data scaled to |x| ≤ 1.0.
+///
+/// Same `(i % 17) / 17 - 0.5` deterministic pattern as
+/// [`patterned_f16_data`] — keeps the comparison apples-to-apples
+/// across the f16 and bf16 paths. bf16's wider exponent doesn't
+/// matter at this magnitude; mantissa precision is what differs.
+pub fn patterned_bf16_data(len: usize) -> Vec<bf16> {
+    (0..len)
+        .map(|i| {
+            let v = ((i % 17) as f32) / 17.0 - 0.5;
+            bf16::from_f32(v)
+        })
+        .collect()
+}
+
+/// f64 CPU reference matmul for bf16 inputs.
+///
+/// Promotes each bf16 input to f64 and accumulates in f64. Per D5,
+/// f64 is the reference for the bf16 correctness suite because bf16's
+/// 7-bit mantissa can lose precision in cancellation-prone dot products
+/// at sizes where f32 accumulation would also be lossy enough to mask
+/// real kernel bugs. Used at small/medium shapes; sampled-cell f64
+/// for large shapes lands at C5.
+pub fn cpu_matmul_bf16xbf16_f64(a: &[bf16], b: &[bf16], m: usize, n: usize, k: usize) -> Vec<f64> {
+    let mut c = vec![0.0f64; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f64;
+            for p in 0..k {
+                let av = a[i * k + p].to_f32() as f64;
+                let bv = b[p * n + j].to_f32() as f64;
+                sum += av * bv;
+            }
+            c[i * n + j] = sum;
+        }
+    }
+    c
+}
+
+/// Sprint 9.1 D5 standard-tolerance assertion: `rel_err < 1e-2 ||
+/// abs_err < 1e-3` against an f64 reference, computed in f64 and only
+/// downcast when reporting the failure. Used for small/medium/large
+/// magnitude classes. The near-denorm class (C5+) uses a stricter
+/// rel-only bound + a nonzero-output assertion in its own helper.
+///
+/// `got` is the GPU output (f32 from the bf16 mma's f32 accumulator);
+/// `expected` is the f64 reference. The element-wise check is f64
+/// throughout, with `worst_*` reported in f64 for diagnostic fidelity.
+pub fn assert_bf16_close_d5(got: &[f32], expected: &[f64], m: usize, n: usize, label: &str) {
+    const REL_BOUND: f64 = 1e-2;
+    const ABS_BOUND: f64 = 1e-3;
+
+    let mut worst_idx: Option<(usize, usize)> = None;
+    let mut worst_rel = 0.0f64;
+    let mut worst_abs = 0.0f64;
+    let mut worst_got = 0.0f64;
+    let mut worst_expected = 0.0f64;
+
+    for i in 0..m {
+        for j in 0..n {
+            let idx = i * n + j;
+            let g = got[idx] as f64;
+            let e = expected[idx];
+            let abs_err = (g - e).abs();
+            let rel_err = if e.abs() > 0.0 {
+                abs_err / e.abs()
+            } else {
+                abs_err
+            };
+            if abs_err < ABS_BOUND || rel_err < REL_BOUND {
+                continue;
+            }
+            // Track the worst failing element.
+            if rel_err > worst_rel {
+                worst_idx = Some((i, j));
+                worst_rel = rel_err;
+                worst_abs = abs_err;
+                worst_got = g;
+                worst_expected = e;
+            }
+        }
+    }
+
+    if let Some((wi, wj)) = worst_idx {
+        panic!(
+            "{label} ({m}×_ × _×{n}) FAILED Sprint 9.1 D5 tolerance:\n\
+             \n\
+             bounds:                rel_err < {REL_BOUND:e} || abs_err < {ABS_BOUND:e}\n\
+             worst index (i, j)     = ({wi}, {wj})\n\
+             f64 reference value    = {worst_expected}\n\
+             GPU value (f32 → f64)  = {worst_got}\n\
+             abs_err                = {worst_abs:e}\n\
+             rel_err                = {worst_rel:e}\n",
+        );
+    }
 }
 
 // ============================================================================
