@@ -47,6 +47,13 @@ mod matmul_int4_kernel;
 mod matmul_int8_kernel;
 mod matmul_kernel;
 mod matmul_tc_async_kernel;
+// Sprint 9.1 — bf16 tensor-core matmul. Sync-only sibling of
+// `matmul_tc_kernel`; reuses its `pub(crate)` shared-tile loaders,
+// store helper, and tile constants (the bf16 byte layout in shared is
+// bit-identical). Public host launch fn lands at C4; C3 ships the
+// kernel-module builder + host validation tests + the D4 cvt-free
+// hot-path gate.
+mod matmul_tc_bf16_kernel;
 mod matmul_tc_kernel;
 // Sprint 7.3 — fused tri-output QKV projection. INT8 (W8A16) is the MVS
 // deliverable; INT4 (W4A16) is contingent on D2.5 register budget and
