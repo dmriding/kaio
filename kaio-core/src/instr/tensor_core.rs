@@ -12,8 +12,8 @@ use std::fmt;
 
 use crate::emit::{Emit, PtxWriter};
 use crate::fragment::{
-    FragmentA_F16, FragmentA_M16N8K32, FragmentB_F16, FragmentB_M16N8K32, FragmentC,
-    FragmentC_M16N8K32,
+    FragmentA_BF16, FragmentA_F16, FragmentA_M16N8K32, FragmentB_BF16, FragmentB_F16,
+    FragmentB_M16N8K32, FragmentC, FragmentC_M16N8K32,
 };
 use crate::types::PtxType;
 
@@ -133,6 +133,43 @@ pub enum TensorCoreOp {
         /// Input C fragment — four `.s32` accumulator registers.
         c: FragmentC_M16N8K32,
     },
+    /// bf16 matrix-multiply-accumulate:
+    /// `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`
+    /// `{d_regs}, {a_regs}, {b_regs}, {c_regs};`
+    ///
+    /// Sibling of [`MmaSync`](Self::MmaSync) specialized for bf16 inputs.
+    /// Operand fragments carry the bf16-distinguishing sibling types
+    /// ([`FragmentA_BF16`] / [`FragmentB_BF16`]) so cross-precision wiring
+    /// at call sites is a compile error rather than a silent dtype tag
+    /// mismatch on `MmaSync`. The accumulator is the same `.f32`
+    /// [`FragmentC`] used by the f16 path.
+    ///
+    /// Shape is implicitly [`MmaShape::M16N8K16`]; element types are
+    /// implicitly `.f32.bf16.bf16.f32`. Requires SM 8.0+ (Ampere or newer).
+    ///
+    /// Introduced in Sprint 9.1 per the D2.5 sibling-IR-variant decision —
+    /// mirrors the `MmaSyncInt8` precedent. Adding [`MmaSync`] with
+    /// `a_ty: BF16, b_ty: BF16` still emits the same PTX but loses the
+    /// type-level precision distinction at call sites.
+    ///
+    /// Example emission:
+    /// ```text
+    /// mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
+    ///     {%f4,%f5,%f6,%f7},
+    ///     {%r0,%r1,%r2,%r3},
+    ///     {%r4,%r5},
+    ///     {%f0,%f1,%f2,%f3};
+    /// ```
+    MmaSyncBf16 {
+        /// Destination (D) fragment — `.f32` accumulator output.
+        d: FragmentC,
+        /// Input A fragment — `.b32` packed bfloat2 registers.
+        a: FragmentA_BF16,
+        /// Input B fragment — `.b32` packed bfloat2 registers.
+        b: FragmentB_BF16,
+        /// Input C fragment — `.f32` accumulator input.
+        c: FragmentC,
+    },
 }
 
 impl TensorCoreOp {
@@ -141,6 +178,7 @@ impl TensorCoreOp {
         match self {
             Self::MmaSync { shape, .. } => shape.min_sm(),
             Self::MmaSyncInt8 { .. } => MmaShape::M16N8K32.min_sm(),
+            Self::MmaSyncBf16 { .. } => MmaShape::M16N8K16.min_sm(),
         }
     }
 
@@ -151,6 +189,9 @@ impl TensorCoreOp {
             Self::MmaSync { shape, .. } => format!("mma.sync.{}", shape.ptx_token()),
             Self::MmaSyncInt8 { .. } => {
                 format!("mma.sync.{}.s8.s8.s32", MmaShape::M16N8K32.ptx_token())
+            }
+            Self::MmaSyncBf16 { .. } => {
+                format!("mma.sync.{}.bf16.bf16.f32", MmaShape::M16N8K16.ptx_token())
             }
         }
     }
@@ -216,6 +257,23 @@ impl Emit for TensorCoreOp {
                     &[&d_list as &dyn fmt::Display, &a_list, &b_list, &c_list],
                 )
             }
+            TensorCoreOp::MmaSyncBf16 { d, a, b, c } => {
+                // Full instruction: mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
+                // The .row.col layout qualifiers are mandatory; type-suffix
+                // order is {d_ty}.{a_ty}.{b_ty}.{c_ty} — f32 accumulator
+                // with bf16 inputs. Operand register byte layout is
+                // identical to the f16 path (.b32 packed pairs); only the
+                // mma operand dtype tag differs.
+                let mnemonic = "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32";
+                let d_list = format_reg_list(&d.regs);
+                let a_list = format_reg_list(&a.regs);
+                let b_list = format_reg_list(&b.regs);
+                let c_list = format_reg_list(&c.regs);
+                w.instruction(
+                    mnemonic,
+                    &[&d_list as &dyn fmt::Display, &a_list, &b_list, &c_list],
+                )
+            }
         }
     }
 }
@@ -269,6 +327,10 @@ mod tests {
 
     #[test]
     fn emit_mma_sync_m16n8k16_bf16_f32() {
+        // Regression test for the legacy bf16 path: MmaSync with
+        // a_ty/b_ty=BF16 still emits the dtype-tag bf16 instruction.
+        // The preferred path for new code is the dedicated MmaSyncBf16
+        // variant (covered by emit_mma_sync_bf16_m16n8k16 below).
         let mut alloc = RegisterAllocator::new();
         let a = alloc_a_f16(&mut alloc);
         let b = alloc_b_f16(&mut alloc);
@@ -294,6 +356,50 @@ mod tests {
             w.finish()
                 .contains("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32")
         );
+    }
+
+    #[test]
+    fn emit_mma_sync_bf16_m16n8k16() {
+        use crate::fragment::{alloc_a_bf16, alloc_b_bf16};
+        let mut alloc = RegisterAllocator::new();
+        let a = alloc_a_bf16(&mut alloc);
+        let b = alloc_b_bf16(&mut alloc);
+        let c = alloc_c(&mut alloc);
+        let d = alloc_c(&mut alloc);
+
+        let op = TensorCoreOp::MmaSyncBf16 { d, a, b, c };
+
+        let mut w = PtxWriter::new();
+        w.indent();
+        op.emit(&mut w).unwrap();
+        let out = w.finish();
+
+        // Register layout mirrors the f16 path — alloc_a_bf16 and
+        // alloc_b_bf16 reuse alloc_packed_half2, so:
+        //   A = 4 × .b32  → %r0..%r3
+        //   B = 2 × .b32  → %r4..%r5
+        //   C = 4 × .f32  → %f0..%f3
+        //   D = 4 × .f32  → %f4..%f7
+        // Operand order in mma: D, A, B, C.
+        let expected = concat!(
+            "    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 ",
+            "{%f4,%f5,%f6,%f7}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n",
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn min_sm_and_feature_label_bf16() {
+        use crate::fragment::{alloc_a_bf16, alloc_b_bf16};
+        let mut alloc = RegisterAllocator::new();
+        let op = TensorCoreOp::MmaSyncBf16 {
+            d: alloc_c(&mut alloc),
+            a: alloc_a_bf16(&mut alloc),
+            b: alloc_b_bf16(&mut alloc),
+            c: alloc_c(&mut alloc),
+        };
+        assert_eq!(op.min_sm(), 80);
+        assert_eq!(op.feature_label(), "mma.sync.m16n8k16.bf16.bf16.f32");
     }
 
     #[test]

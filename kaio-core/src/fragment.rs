@@ -959,6 +959,65 @@ pub fn load_fragment_a_m16n8k16_shared_row(
     row_stride_bytes: u32,
     group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
 ) -> FragmentA_F16 {
+    let frag = alloc_a_f16(alloc);
+    load_fragment_a_m16n8k16_shared_row_impl(
+        alloc,
+        kernel,
+        &frag.regs,
+        tile_base_shared,
+        tid_x,
+        row_stride_bytes,
+        group_tig_override,
+    );
+    frag
+}
+
+/// Load one A-fragment for `mma.sync.m16n8k16.bf16` from a 16×16
+/// row-major bf16 tile in **shared** memory.
+///
+/// The emitted PTX (offsets and `ld.shared.b32` instructions) is
+/// bit-identical to the [`load_fragment_a_m16n8k16_shared_row`] f16
+/// path — both pack two 16-bit values per `.b32` register with the
+/// same byte layout. The dtype distinction lives at the mma operand
+/// level (`TensorCoreOp::MmaSyncBf16`), not in the loader.
+///
+/// Parameters mirror the f16 helper.
+pub fn load_fragment_a_m16n8k16_shared_row_bf16(
+    alloc: &mut crate::ir::RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_base_shared: crate::ir::Register,
+    tid_x: crate::ir::Register,
+    row_stride_bytes: u32,
+    group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
+) -> FragmentA_BF16 {
+    let frag = alloc_a_bf16(alloc);
+    load_fragment_a_m16n8k16_shared_row_impl(
+        alloc,
+        kernel,
+        &frag.regs,
+        tile_base_shared,
+        tid_x,
+        row_stride_bytes,
+        group_tig_override,
+    );
+    frag
+}
+
+/// Shared PTX-emit body for `load_fragment_a_m16n8k16_shared_row{,_bf16}`.
+///
+/// Takes the four pre-allocated fragment registers as the load
+/// destinations. The offset arithmetic and `ld.shared.b32` emit are
+/// identical between f16 and bf16 — only the typed fragment wrapper
+/// differs at the public API.
+fn load_fragment_a_m16n8k16_shared_row_impl(
+    alloc: &mut crate::ir::RegisterAllocator,
+    kernel: &mut PtxKernel,
+    dst_regs: &[crate::ir::Register; 4],
+    tile_base_shared: crate::ir::Register,
+    tid_x: crate::ir::Register,
+    row_stride_bytes: u32,
+    group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
+) {
     let (group_id, tig) = match group_tig_override {
         Some(pair) => pair,
         None => compute_group_thread_ids(alloc, kernel, tid_x),
@@ -973,7 +1032,7 @@ pub fn load_fragment_a_m16n8k16_shared_row(
         ty: PtxType::U32,
     }));
 
-    // base_off = tig * 4 + row_off   (half2 = 4 bytes)
+    // base_off = tig * 4 + row_off   (packed-b32 pair = 4 bytes)
     let base_off = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mad {
         dst: base_off,
@@ -1005,17 +1064,14 @@ pub fn load_fragment_a_m16n8k16_shared_row(
     let addr3 =
         u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off_plus_8rows, 16);
 
-    let frag = alloc_a_f16(alloc);
-    for (reg, addr) in frag.regs.iter().zip([addr0, addr1, addr2, addr3]) {
+    for (reg, addr) in dst_regs.iter().zip([addr0, addr1, addr2, addr3]) {
         kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
             dst: *reg,
             addr,
-            // Load as .b32 — packed half2 representation.
+            // Load as .b32 — packed pair representation (half2 or bfloat2).
             ty: PtxType::U32,
         }));
     }
-
-    frag
 }
 
 /// Load one B-fragment for `mma.sync.m16n8k16.f16` from a 16×8
@@ -1048,6 +1104,63 @@ pub fn load_fragment_b_m16n8k16_shared_col(
     col_stride_bytes: u32,
     group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
 ) -> FragmentB_F16 {
+    let frag = alloc_b_f16(alloc);
+    load_fragment_b_m16n8k16_shared_col_impl(
+        alloc,
+        kernel,
+        &frag.regs,
+        tile_base_shared,
+        tid_x,
+        col_stride_bytes,
+        group_tig_override,
+    );
+    frag
+}
+
+/// Load one B-fragment for `mma.sync.m16n8k16.bf16` from a 16×8
+/// column-major bf16 tile in **shared** memory.
+///
+/// The emitted PTX is bit-identical to the
+/// [`load_fragment_b_m16n8k16_shared_col`] f16 path — the bf16 vs f16
+/// distinction lives at the mma operand level
+/// (`TensorCoreOp::MmaSyncBf16`).
+///
+/// Parameters mirror the f16 helper.
+pub fn load_fragment_b_m16n8k16_shared_col_bf16(
+    alloc: &mut crate::ir::RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_base_shared: crate::ir::Register,
+    tid_x: crate::ir::Register,
+    col_stride_bytes: u32,
+    group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
+) -> FragmentB_BF16 {
+    let frag = alloc_b_bf16(alloc);
+    load_fragment_b_m16n8k16_shared_col_impl(
+        alloc,
+        kernel,
+        &frag.regs,
+        tile_base_shared,
+        tid_x,
+        col_stride_bytes,
+        group_tig_override,
+    );
+    frag
+}
+
+/// Shared PTX-emit body for `load_fragment_b_m16n8k16_shared_col{,_bf16}`.
+///
+/// Takes the two pre-allocated fragment registers as the load
+/// destinations. Offset arithmetic and `ld.shared.b32` emit are
+/// identical between f16 and bf16.
+fn load_fragment_b_m16n8k16_shared_col_impl(
+    alloc: &mut crate::ir::RegisterAllocator,
+    kernel: &mut PtxKernel,
+    dst_regs: &[crate::ir::Register; 2],
+    tile_base_shared: crate::ir::Register,
+    tid_x: crate::ir::Register,
+    col_stride_bytes: u32,
+    group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
+) {
     let (group_id, tig) = match group_tig_override {
         Some(pair) => pair,
         None => compute_group_thread_ids(alloc, kernel, tid_x),
@@ -1063,7 +1176,7 @@ pub fn load_fragment_b_m16n8k16_shared_col(
     }));
 
     // base_off = tig * 4 + col_off   (rows 2*tig and 2*tig+1 are adjacent,
-    //                                  4 bytes / half2 pair)
+    //                                  4 bytes / packed-b32 pair)
     let base_off = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mad {
         dst: base_off,
@@ -1080,16 +1193,13 @@ pub fn load_fragment_b_m16n8k16_shared_col(
     let addr0 = u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off, 0);
     let addr1 = u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off, 16);
 
-    let frag = alloc_b_f16(alloc);
-    for (reg, addr) in frag.regs.iter().zip([addr0, addr1]) {
+    for (reg, addr) in dst_regs.iter().zip([addr0, addr1]) {
         kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
             dst: *reg,
             addr,
             ty: PtxType::U32,
         }));
     }
-
-    frag
 }
 
 // ============================================================================
@@ -1450,6 +1560,62 @@ mod tests {
             })
             .count();
         assert_eq!(n_loads, 2, "expected 2 ld.shared.b32 for FragmentB_F16");
+    }
+
+    #[test]
+    fn load_fragment_a_bf16_shared_emits_four_b32_shared_loads() {
+        use crate::ir::{PtxKernel, RegisterAllocator};
+        let mut alloc = RegisterAllocator::new();
+        let mut kernel = PtxKernel::new("test");
+        let base = alloc.alloc(PtxType::U32);
+        let tid = alloc.alloc(PtxType::U32);
+        // Binding to FragmentA_BF16 also acts as a type-level check: the
+        // bf16 wrapper would fail to compile if it returned FragmentA_F16.
+        let frag: FragmentA_BF16 =
+            load_fragment_a_m16n8k16_shared_row_bf16(&mut alloc, &mut kernel, base, tid, 32, None);
+        assert_eq!(frag.regs.len(), 4);
+
+        let n_loads = kernel
+            .body
+            .iter()
+            .filter(|instr| {
+                matches!(
+                    instr,
+                    PtxInstruction::Memory(MemoryOp::LdShared {
+                        ty: PtxType::U32,
+                        ..
+                    })
+                )
+            })
+            .count();
+        assert_eq!(n_loads, 4, "expected 4 ld.shared.b32 for FragmentA_BF16");
+    }
+
+    #[test]
+    fn load_fragment_b_bf16_shared_emits_two_b32_shared_loads() {
+        use crate::ir::{PtxKernel, RegisterAllocator};
+        let mut alloc = RegisterAllocator::new();
+        let mut kernel = PtxKernel::new("test");
+        let base = alloc.alloc(PtxType::U32);
+        let tid = alloc.alloc(PtxType::U32);
+        let frag: FragmentB_BF16 =
+            load_fragment_b_m16n8k16_shared_col_bf16(&mut alloc, &mut kernel, base, tid, 32, None);
+        assert_eq!(frag.regs.len(), 2);
+
+        let n_loads = kernel
+            .body
+            .iter()
+            .filter(|instr| {
+                matches!(
+                    instr,
+                    PtxInstruction::Memory(MemoryOp::LdShared {
+                        ty: PtxType::U32,
+                        ..
+                    })
+                )
+            })
+            .count();
+        assert_eq!(n_loads, 2, "expected 2 ld.shared.b32 for FragmentB_BF16");
     }
 
     #[test]

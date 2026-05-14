@@ -156,6 +156,44 @@ fn ptxas_verify_mma_sync_shared() {
 
 #[test]
 #[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
+fn ptxas_verify_mma_sync_bf16_shared() {
+    let ptxas_check = std::process::Command::new("ptxas")
+        .arg("--version")
+        .output();
+    if ptxas_check.is_err() {
+        eprintln!("NOTE: ptxas not found in PATH — skipping PTX verification");
+        return;
+    }
+
+    let sm = sm_target_ampere_or_better();
+    let ptx = common::build_mma_sync_bf16_shared_ptx(&sm);
+
+    let tmp = std::env::temp_dir().join("kaio_mma_sync_bf16_shared_verify.ptx");
+    std::fs::write(&tmp, &ptx).expect("failed to write temp PTX file");
+
+    let output = std::process::Command::new("ptxas")
+        .args(["--gpu-name", &sm])
+        .arg(tmp.to_str().unwrap())
+        .output()
+        .expect("failed to run ptxas");
+
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        output.status.success(),
+        "ptxas verification FAILED for mma.sync.bf16 shared-source ({sm}):\nstdout: {}\nstderr: {}\n\n=== PTX ===\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        ptx
+    );
+
+    eprintln!(
+        "ptxas verification PASSED for shared-source m16n8k16 bf16 fragment loaders + MmaSyncBf16 ({sm})"
+    );
+}
+
+#[test]
+#[ignore] // requires CUDA toolkit (ptxas) — run via `cargo test -- --ignored`
 fn ptxas_verify_cp_async() {
     let ptxas_check = std::process::Command::new("ptxas")
         .arg("--version")
