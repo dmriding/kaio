@@ -108,6 +108,85 @@ pub fn alloc_b_f16(alloc: &mut RegisterAllocator) -> FragmentB_F16 {
 }
 
 // ----------------------------------------------------------------------------
+// BF16 sibling types for `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`.
+// ----------------------------------------------------------------------------
+//
+// Same shape (m16n8k16) and same per-thread register counts as the F16 path:
+// A = 4 × .b32, B = 2 × .b32, accumulator reuses FragmentC (.f32 × 4). The
+// distinction is the input dtype — bf16 has a wider exponent and narrower
+// mantissa than f16, but at the storage level both pack two 16-bit values
+// into one .b32 register identically. The .b32 byte layout is bit-identical;
+// only the mma.sync operand dtype tag differs.
+//
+// Per Sprint 9.1 D2: new sibling types rather than overloading the f16
+// fragments. The register-level layout is interchangeable, but separate
+// types keep the precision visible at every call site and make
+// cross-precision wiring a compile error rather than a silent dtype mismatch.
+// Reaching the mma site with these types requires the dedicated
+// `TensorCoreOp::MmaSyncBf16` IR variant (per Sprint 9.1 D2.5, lands at C2).
+//
+// `alloc.alloc_packed_half2()` is reused below: the method is dtype-agnostic
+// at the register-allocator level (it allocates a .b32-class register tagged
+// PtxType::U32), and the underlying byte layout is the same. The "half2"
+// in the method name is a historical naming artefact, not a precision claim;
+// a rename to `alloc_packed_b32_pair` is tracked as follow-up, not blocking.
+
+/// A-matrix fragment for `mma.sync.m16n8k16.bf16`.
+///
+/// Holds 4 × `.b32` packed-bfloat2 registers per thread (8 bf16 values
+/// per thread across the warp → 16×16 matrix in total). Storage layout
+/// is bit-identical to [`FragmentA_F16`]; the dtype distinction lives
+/// at the mma.sync operand-tag level.
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentA_BF16 {
+    /// The four `%r` (`.b32`) registers holding the thread's A-fragment
+    /// slice. Each register packs two bf16 values. Layout is fixed by
+    /// PTX ISA §9.7.13.5.8.1.
+    pub regs: [Register; 4],
+}
+
+/// B-matrix fragment for `mma.sync.m16n8k16.bf16`.
+///
+/// Holds 2 × `.b32` packed-bfloat2 registers per thread (4 bf16 values
+/// per thread across the warp → 16×8 matrix in total). Storage layout
+/// is bit-identical to [`FragmentB_F16`]; the dtype distinction lives
+/// at the mma.sync operand-tag level.
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentB_BF16 {
+    /// The two `%r` (`.b32`) registers holding the thread's B-fragment
+    /// slice. Each register packs two bf16 values. Layout is fixed by
+    /// PTX ISA §9.7.13.5.8.1.
+    pub regs: [Register; 2],
+}
+
+/// Allocate a fresh [`FragmentA_BF16`] — four packed-bfloat2 `.b32` registers.
+///
+/// Shares the underlying register allocation with [`alloc_a_f16`] — the
+/// .b32 byte layout is identical between half2 and bfloat2.
+pub fn alloc_a_bf16(alloc: &mut RegisterAllocator) -> FragmentA_BF16 {
+    FragmentA_BF16 {
+        regs: [
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+        ],
+    }
+}
+
+/// Allocate a fresh [`FragmentB_BF16`] — two packed-bfloat2 `.b32` registers.
+///
+/// Shares the underlying register allocation with [`alloc_b_f16`] — the
+/// .b32 byte layout is identical between half2 and bfloat2.
+pub fn alloc_b_bf16(alloc: &mut RegisterAllocator) -> FragmentB_BF16 {
+    FragmentB_BF16 {
+        regs: [alloc.alloc_packed_half2(), alloc.alloc_packed_half2()],
+    }
+}
+
+// ----------------------------------------------------------------------------
 // INT8 sibling types for `mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32`.
 // ----------------------------------------------------------------------------
 //
@@ -1185,6 +1264,33 @@ mod tests {
     fn alloc_b_gives_two_b32_regs() {
         let mut a = RegisterAllocator::new();
         let frag = alloc_b_f16(&mut a);
+        for r in &frag.regs {
+            assert_eq!(r.kind, RegKind::R);
+            assert_eq!(r.ptx_type, PtxType::U32);
+        }
+    }
+
+    #[test]
+    fn alloc_a_bf16_gives_four_b32_regs() {
+        let mut a = RegisterAllocator::new();
+        let frag = alloc_a_bf16(&mut a);
+        for r in &frag.regs {
+            assert_eq!(r.kind, RegKind::R);
+            // alloc_packed_half2 tags ptx_type as U32 (b32 at PTX level);
+            // the bf16 path reuses this allocator — byte layout is
+            // identical to the f16 fragment.
+            assert_eq!(r.ptx_type, PtxType::U32);
+        }
+        assert_eq!(frag.regs[0].index, 0);
+        assert_eq!(frag.regs[1].index, 1);
+        assert_eq!(frag.regs[2].index, 2);
+        assert_eq!(frag.regs[3].index, 3);
+    }
+
+    #[test]
+    fn alloc_b_bf16_gives_two_b32_regs() {
+        let mut a = RegisterAllocator::new();
+        let frag = alloc_b_bf16(&mut a);
         for r in &frag.regs {
             assert_eq!(r.kind, RegKind::R);
             assert_eq!(r.ptx_type, PtxType::U32);
