@@ -12,14 +12,17 @@
 //!
 //! Total: 8 small + 8 medium + 2 large 2048³ + 1 large 4096³ + 2 non-square = 21 tests.
 //!
-//! Magnitudes per D5:
-//! - **small:** `[-0.5, 0.5]` patterned (within `[-1, 1]` per D5 spec).
+//! Magnitudes:
+//! - **small:** `[-0.5, 0.5]` patterned (within `[-1, 1]`).
 //! - **medium:** patterned × 200 → peak `|x| ≈ 100`.
-//! - **large:** patterned × 2e14 → peak `|x| ≈ 1e14` (Round-1 cap; keeps
-//!   `|a| × |b| × K` under f32 max in the accumulator).
-//! - **near-denorm:** positive-only `[1e-18, ~1.94e-18]` (Round-3 fix).
+//! - **large:** patterned × 2e14 → peak `|x| ≈ 1e14` — caps at the
+//!   level that keeps `|a| × |b| × K` under f32 max in the accumulator
+//!   while exercising bf16's full f32-style exponent range.
+//! - **near-denorm:** positive-only `[1e-18, ~1.94e-18]` — the
+//!   positive bias keeps products from cancelling to zero so the
+//!   nonzero-output assertion has signal.
 //!
-//! Tolerances per D5:
+//! Tolerances:
 //! - **standard (small/medium/large mag):** `rel_err < 1e-2 || abs_err < 1e-3`.
 //! - **near-denorm:** `rel_err < 1e-1` only + nonzero-output assertion
 //!   (the latter is the "kernel returns zero on small inputs" canary).
@@ -395,10 +398,9 @@ fn tc_bf16_64_128_32_small() {
     );
 }
 
-/// Odd-N shape from D5: M=65, N=17, K=32. K=32 satisfies the `K % 16 == 0`
-/// kernel constraint; M and N are deliberately small odd values to stress
-/// edge-tile predication in both row and column directions (Round-3 fix —
-/// Round-2 had K=33 which violated the constraint).
+/// Odd-N shape: M=65, N=17, K=32. K=32 satisfies the `K % 16 == 0`
+/// kernel constraint; M and N are deliberately small odd values to
+/// stress edge-tile predication in both row and column directions.
 #[test]
 #[ignore]
 fn tc_bf16_65_17_32_small() {

@@ -191,11 +191,12 @@ pub fn cpu_matmul_bf16xbf16_f64(a: &[bf16], b: &[bf16], m: usize, n: usize, k: u
 ///
 /// Same base pattern as [`patterned_bf16_data`] (`(i % 17) / 17 - 0.5`),
 /// scaled by `magnitude_scale` so peak |x| ≈ `0.5 * magnitude_scale`.
-/// Used for the D5 medium (`scale = 200`, |x| ≤ 100) and large
-/// (`scale = 2e14`, |x| ≤ 1e14) magnitude classes — the magnitude
-/// caps come from D5's Round-1 fix that lowered the large-magnitude
-/// upper bound from `1e30` to `1e14` to keep `|a| × |b| × K` under
-/// f32 max in the accumulator.
+/// Used for the medium (`scale = 200`, |x| ≤ 100) and large
+/// (`scale = 2e14`, |x| ≤ 1e14) magnitude classes in the bf16
+/// correctness suite. The large-magnitude cap of 1e14 keeps
+/// `|a| × |b| × K` comfortably under f32 max in the accumulator
+/// while still exercising bf16's full f32-style exponent range —
+/// well past f16's 65504 overflow point.
 pub fn patterned_bf16_magnitude(len: usize, magnitude_scale: f32) -> Vec<bf16> {
     (0..len)
         .map(|i| {
@@ -207,12 +208,13 @@ pub fn patterned_bf16_magnitude(len: usize, magnitude_scale: f32) -> Vec<bf16> {
 
 /// Generate positive-only near-denorm bf16 data in `[1e-18, 2e-18]`.
 ///
-/// Sprint 9.1 D5 near-denorm class. Positive-only and non-cancelling
-/// per the Round 3 (Codex 5.5) fix — symmetric `[-1e-18, 1e-18]` would
-/// let an all-zero kernel pass the absolute-tolerance check vacuously
-/// at outputs `~K × 1e-36`. The positive bias keeps products from
-/// cancelling toward zero so the nonzero-output assertion in
-/// [`assert_bf16_close_d5_near_denorm`] is meaningful.
+/// The bf16 near-denorm magnitude class for the correctness suite.
+/// Positive-only and non-cancelling — a symmetric `[-1e-18, 1e-18]`
+/// generator would let an all-zero kernel pass the absolute-tolerance
+/// check vacuously at expected outputs `~K × 1e-36`. The positive
+/// bias keeps products from cancelling toward zero so the
+/// nonzero-output assertion in [`assert_bf16_close_d5_near_denorm`]
+/// has signal.
 pub fn patterned_bf16_near_denorm(len: usize) -> Vec<bf16> {
     (0..len)
         .map(|i| {
@@ -384,18 +386,15 @@ pub fn assert_bf16_close_d5(got: &[f32], expected: &[f64], m: usize, n: usize, l
     }
 }
 
-/// Sprint 9.1 D5 near-denorm tolerance assertion: `rel_err < 1e-1`
-/// **only** (no absolute-error fallback), plus a "non-zero output"
-/// assertion that catches the "kernel returns zero on small inputs"
-/// bug class. The looser relative bound reflects bf16's genuinely
-/// worse mantissa precision at near-denorm magnitudes; the nonzero
-/// gate is the bug-class catch that a permissive `abs_err < 1e-3`
-/// would silently let through (since expected outputs are
-/// `~K × 1e-36`, far below any reasonable absolute tolerance).
-///
-/// Fixed Round 3 (Codex 5.5) — the Round-1 symmetric-and-abs-fallback
-/// version was vacuous against an all-zero kernel; this is the
-/// hardened replacement.
+/// Near-denorm tolerance assertion for the bf16 correctness suite:
+/// `rel_err < 1e-1` **only** (no absolute-error fallback), plus a
+/// "non-zero output" assertion that catches the "kernel returns zero
+/// on small inputs" bug class. The looser relative bound reflects
+/// bf16's genuinely worse mantissa precision at near-denorm
+/// magnitudes; the nonzero gate is the bug-class catch that a
+/// permissive `abs_err < 1e-3` would silently let through (since
+/// expected outputs are `~K × 1e-36`, far below any reasonable
+/// absolute tolerance).
 pub fn assert_bf16_close_d5_near_denorm(
     got: &[f32],
     expected: &[f64],

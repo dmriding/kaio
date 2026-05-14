@@ -148,9 +148,9 @@ pub enum TensorCoreOp {
     /// implicitly `.f32.bf16.bf16.f32`. Requires SM 8.0+ (Ampere or newer).
     ///
     /// Introduced in Sprint 9.1 per the D2.5 sibling-IR-variant decision —
-    /// mirrors the `MmaSyncInt8` precedent. Adding [`MmaSync`] with
-    /// `a_ty: BF16, b_ty: BF16` still emits the same PTX but loses the
-    /// type-level precision distinction at call sites.
+    /// mirrors the `MmaSyncInt8` precedent. Using [`MmaSync`](Self::MmaSync)
+    /// with `a_ty: BF16, b_ty: BF16` still emits the same PTX but loses
+    /// the type-level precision distinction at call sites.
     ///
     /// Example emission:
     /// ```text
