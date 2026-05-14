@@ -1,52 +1,63 @@
-//! Tensor-core matrix multiply with cp.async double-buffering, multi-warp.
+//! Tensor-core matrix multiply — `m16n8k16.f32.bf16.bf16.f32`, multi-warp,
+//! cp.async double-buffered (Sprint 9.1.1).
 //!
-//! Sprint 6.7 Gate B: layered on top of Gate A's multi-warp `matmul_tc`
-//! (64×64 block tile, 4 warps, 32×32 quadrant per warp, 8 mma per
-//! K-tile). Same shared-memory layout contract (A row-major in shared,
-//! B column-major in shared), same fragment loaders, same per-warp 8-mma
-//! accumulation, same edge-tile predication. Only the staging path
-//! differs:
+//! bf16 × bf16 inputs with fp32 accumulation, layered on top of Sprint
+//! 6.7c's cp.async-pipelined `matmul_tc_async`. Structurally the
+//! cross-product of [`crate::matmul_tc_async_kernel`] (f16 async, the
+//! pipeline structure) and [`crate::matmul_tc_bf16_kernel`] (bf16 sync,
+//! the precision-specific mma path):
 //!
-//! - **A** is staged via `cp.async.ca.shared.global` (16 bytes per
-//!   thread × 128 threads = 2,048 B = one full A buffer). Next K-tile's
-//!   A is issued **before** the current K-tile's `mma.sync` work, so
-//!   the memory fetch overlaps with compute.
-//! - **B** stays synchronous — the row-major → column-major transpose
-//!   during staging is a strided gather that `cp.async` cannot express
-//!   (source must be contiguous bytes). Reuses Gate A's
-//!   `emit_mw_load_tile_b_16x64` from `matmul_tc_kernel`.
+//! ```text
+//!               f16              bf16
+//! sync     matmul_tc        matmul_tc_bf16        (Sprint 9.1)
+//! async    matmul_tc_async  matmul_tc_bf16_async  (Sprint 9.1.1)
+//! ```
+//!
+//! Same 64×64 block tile, 4-warp 32×32 quadrant layout, padded Tile B
+//! col-stride (Sprint 6.7b), 8 mma per K-tile, edge-tile predication
+//! on M and N, fragment-loader `(group_id, tig)` hoist.
+//!
+//! - **A staging:** double-buffered via `cp.async.ca.shared.global`
+//!   (size = 16). 128 threads × 1 issue per thread = 2,048 B = one
+//!   full A buffer. The async A-tile loader
+//!   [`crate::matmul_tc_async_kernel::emit_mw_load_tile_a_64x16_async`]
+//!   is precision-agnostic at the byte level (the cp.async issue
+//!   carries no dtype) — promoted to `pub(crate)` in Sprint 9.1.1 C0
+//!   and reused here verbatim.
+//! - **B staging:** synchronous — the row-major → column-major
+//!   transpose during staging is a strided gather that `cp.async`
+//!   cannot express. Reuses
+//!   [`crate::matmul_tc_kernel::emit_mw_load_tile_b_16x64`] (also
+//!   precision-agnostic at the storage-bit level; the `.f16`
+//!   register-class label on the load/store moves raw 16-bit
+//!   payloads without numeric conversion).
+//! - **mma:** dedicated [`kaio_core::instr::TensorCoreOp::MmaSyncBf16`]
+//!   via [`crate::matmul_tc_bf16_kernel::emit_warp_quadrant_mma_bf16`]
+//!   (promoted to `pub(crate)` in Sprint 9.1.1 C0).
 //!
 //! # Dimension constraint
 //!
-//! Identical to `matmul_tc`: `M % 16 == 0 && N % 8 == 0 && K % 16 == 0`.
-//! Validation shared via [`validate_dims_tc`](crate::matmul_tc_kernel::validate_dims_tc).
-//! Edge tiles inside the 64×64 block are handled by per-warp/per-thread
-//! bra-skip on OOB — same mechanism as Gate A.
+//! Identical to [`crate::matmul_tc_bf16_kernel::matmul_tc_bf16`]:
+//! `K % 16 == 0`. M and N may be any positive value (edge-tile
+//! predication handles non-multiple-of-64). Validation shared via
+//! [`crate::matmul_tc_bf16_kernel::validate_dims_tc_bf16`].
 //!
 //! # Shared-memory layout (2 buffers per tile, multi-warp sized)
 //!
 //! ```text
 //! .shared .align 16 .b8 tile_a[4096];   // 2 × 2048 B, row-major per buffer
-//! .shared .align 4  .b8 tile_b[4096];   // 2 × 2048 B, col-major per buffer
+//! .shared .align 4  .b8 tile_b[5120];   // 2 × 2560 B padded col-stride
 //! ```
 //!
-//! Per-buffer: `tile_a` 64×16 fp16 (2,048 B), `tile_b` 16×64 fp16
-//! (2,048 B). Total shared per block: **8 KB** — well under the 48 KB
-//! ceiling.
-//!
-//! `tile_a` is `align = 16` because `cp.async.ca.shared.global` with
-//! `size = 16` requires 16-byte shared alignment. `tile_b` stays
-//! `align = 4` — sync-store path, no cp.async writes there.
-//!
-//! Buffer selection at iteration `k_tile`: `cur = k_tile % 2`. Buffer
-//! offsets computed via [`buffer_offsets`] each iter as
-//! `(k_tile & 1) * buffer_size`.
+//! Per-buffer: `tile_a` 64×16 bf16 (2,048 B), `tile_b` 64×16 bf16
+//! padded col-stride (2,560 B per Sprint 6.7b). Total shared per
+//! block: **9 KB** — well under the 48 KB ceiling.
 //!
 //! # Pipeline ordering
 //!
 //! ```text
 //! preamble:
-//!     pre-zero tile_a + tile_b (all 8 KB cooperatively)
+//!     pre-zero tile_a + tile_b (9 KB cooperatively)
 //!     bar.sync
 //!     cp.async A[0] → tile_a[0]; commit_group
 //!     sync-store B[0] → tile_b[0]
@@ -57,27 +68,31 @@
 //!     if k + 1 < num_k_tiles:
 //!         cp.async A[k+1] → tile_a[nxt]; commit_group
 //!         sync-store B[k+1] → tile_b[nxt]
-//!     emit_warp_quadrant_mma on tile_{a,b}[cur]   ; 8 mma per warp
+//!     emit_warp_quadrant_mma_bf16 on tile_{a,b}[cur]   ; 8 mma per warp
 //!     cur, nxt = nxt, cur (implicit via k_tile + 1)
 //! ```
 //!
-//! **Loop-entry invariant:** `tile_{a,b}_cur` name the buffers that
-//! have been *issued* (by the preamble at k=0 or by iter k-1). The
-//! `wait_group 0` + `bar.sync` at the top of each iter is what makes
-//! them *resident* and *visible* to the per-warp fragment loads.
-//! `tile_{a,b}_nxt` name the free buffers, ready to receive the next
-//! K-tile's issues.
+//! Same multi-warp safety argument as Sprint 6.7c: disjoint cur/nxt
+//! buffers + top-of-iter `bar.sync` together fence reads from writes.
 //!
-//! **Multi-warp safety vs Sprint 6.4:** the same "no trailing bar.sync
-//! after mma" optimization holds — disjoint cur/nxt buffers + top-of-
-//! iter `bar.sync` together fence reads from writes. With 4 warps now
-//! all reading `tile_cur` simultaneously and all 4 warps' next-iter
-//! cp.async issues going to `tile_nxt`, no inter-warp race exists
-//! within a single K-iter, and the top-of-next-iter `bar.sync` covers
-//! cross-warp visibility before the next mma reads.
+//! Sprint 9.1.1 commit plan: C1 (this commit) ships the kernel module
+//! builder + host validation tests + the D6 cvt-free hot-path gate.
+//! C2 adds the public host launch fn [`matmul_tc_bf16_async`] and the
+//! full 25-test correctness suite (`tests/matmul_tc_bf16_async_correctness.rs`).
+//! C3 adds the bench + SC-2 perf-parity gate.
 
-use half::f16;
-use kaio::prelude::*;
+// C1: the build_matmul_tc_bf16_async_module function and its supporting
+// constants are reachable from the test module and from C2's host fn
+// (which lands next commit). Until C2 wires the host fn, lib-only
+// compilation flags them as dead. Remove this attribute at C2.
+#![allow(dead_code)]
+
+use crate::matmul_tc_async_kernel::emit_mw_load_tile_a_64x16_async;
+use crate::matmul_tc_bf16_kernel::emit_warp_quadrant_mma_bf16;
+use crate::matmul_tc_kernel::{
+    TILE_A_BYTES, TILE_A_ROW_STRIDE_BYTES, TILE_B_BYTES, TILE_B_COL_STRIDE_BYTES,
+    emit_mw_load_tile_b_16x64, emit_pre_zero_shared_tiles,
+};
 use kaio_core::fragment::FragmentC;
 use kaio_core::instr::control::{CmpOp, ControlOp};
 use kaio_core::instr::memory::MemoryOp;
@@ -89,225 +104,41 @@ use kaio_core::ir::{
 };
 use kaio_core::types::PtxType;
 
-use crate::matmul_tc_kernel::{
-    emit_mw_load_tile_b_16x64, emit_pre_zero_shared_tiles, emit_warp_quadrant_mma,
-    emit_warp_quadrant_store, validate_dims_tc,
-};
-
-// --- mma.sync.m16n8k16 instance shape (used for validate constraint
-// reference; BM/BN are also encoded in the matmul_tc_kernel module's
-// validate path which we share via `validate_dims_tc`) ---
+// --- mma.sync.m16n8k16 instance shape ---
 const BK: u32 = 16;
 
-// --- Multi-warp block tiling (Sprint 6.7) ---
+// --- Multi-warp block tiling (mirrors matmul_tc_async_kernel) ---
 const BM_BLOCK: u32 = 64;
 const BN_BLOCK: u32 = 64;
 const WARP_QUAD_M: u32 = 32;
 const WARP_QUAD_N: u32 = 32;
-const WARPS_PER_BLOCK: u32 = 4;
+pub(crate) const WARPS_PER_BLOCK: u32 = 4;
 
 // --- Shared tile sizes (per buffer; 2 buffers each for double-buffering) ---
-// Sprint 6.7b: tile constants are shared with the sync kernel (matmul_tc_kernel.rs)
-// to guarantee the layout stored by the cooperative load is identical to what
-// the fragment-B loader reads. Async kernel's Tile B per-buffer inherits the
-// padded col stride (36 B) + rounded data size (2560 B).
-const BYTES_PER_HALF: u32 = 2;
+const BYTES_PER_HALF: u32 = 2; // bf16 storage = 2 bytes per element (same as f16)
 const BYTES_PER_F32: u32 = 4;
-use crate::matmul_tc_kernel::{
-    TILE_A_BYTES, TILE_A_ROW_STRIDE_BYTES, TILE_B_BYTES, TILE_B_COL_STRIDE_BYTES,
-};
 const TILE_A_TOTAL_BYTES: u32 = 2 * TILE_A_BYTES; // 4096 (2 buffers)
-const TILE_B_TOTAL_BYTES: u32 = 2 * TILE_B_BYTES; // 2 × 2560 = 5120 per async (was 4096 pre-6.7b)
+const TILE_B_TOTAL_BYTES: u32 = 2 * TILE_B_BYTES; // 5120 (2 × 2560 padded col-stride)
 
-/// Pure helper: byte offsets of the (cur, nxt) buffer pair within
-/// `tile_a` and `tile_b` at iteration `k_tile`.
+/// Build the IR module for `matmul_tc_bf16_async` targeting the given SM.
 ///
-/// Returns `(a_cur, a_nxt, b_cur, b_nxt)`. Sprint 6.7 multi-warp
-/// buffer sizes: tile_a per-buffer = 2048 B, tile_b per-buffer = 2048 B.
-/// Pure function so the toggle math is host-testable; the kernel
-/// builder inlines equivalent runtime arithmetic via register operands.
-#[allow(dead_code)]
-pub(crate) fn buffer_offsets(k_tile: u32) -> (u32, u32, u32, u32) {
-    let cur = k_tile & 1;
-    let nxt = cur ^ 1;
-    (
-        cur * TILE_A_BYTES,
-        nxt * TILE_A_BYTES,
-        cur * TILE_B_BYTES,
-        nxt * TILE_B_BYTES,
-    )
-}
-
-/// Multi-warp cooperative async-load of the 64×16 row-major A block
-/// tile via `cp.async.ca.shared.global` (size = 16). 128 threads × 1
-/// issue per thread = 2,048 B = full A buffer.
+/// Multi-warp 64×64 block tile, 4 warps × 32×32 quadrant via 8
+/// `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` per K-tile,
+/// with double-buffered cp.async A staging and sync B staging. Same
+/// staging contracts as `matmul_tc_async`; see the module docstring
+/// for the pipeline ordering.
 ///
-/// **Precision-agnostic at the byte level.** `cp.async.ca.shared.global`
-/// issues a 16-byte transfer with no dtype involvement; this helper
-/// is suitable for any 2-byte fragment dtype with M=64, K=16 tile
-/// geometry. The "fp16" framing below describes the canonical caller
-/// (`matmul_tc_async`); the bf16 async sibling reuses this verbatim
-/// since bf16 storage is also 2 bytes/element and bf16 zero is
-/// all-zero bytes (matching the pre-zero contract). The alignment
-/// contract is enforced by the caller's shared-tile `align` decl +
-/// the upstream `K % 16` validate gate.
-///
-/// **Per-thread layout:** thread `t` writes 16 contiguous bytes (= 8
-/// 2-byte elements = a half-row of 8 cols) at:
-/// - `row = t / 2`            (0..64 across all 128 threads ✓)
-/// - `col_byte = (t % 2) * 16`
-/// - `shared_off = row * 32 + col_byte`
-/// - `global_off = row * K_bytes + col_byte`
-///
-/// **Edge handling:** Caller pre-zeros `tile_a` shared at kernel start.
-/// OOB threads (`row_global = block_row + row >= M`) skip the cp.async
-/// issue via `@!p bra A_ASYNC_SKIP_<suffix>` — the buffer slot stays
-/// zero. No K-direction edge check (`K % 16 == 0` enforced by validate).
-///
-/// **Alignment safety:** shared dst is `align = 16` (decl) and
-/// per-thread byte offset = `t * 16` so each thread's address is also
-/// 16-byte aligned. Global src starts at `block_row * K_bytes + k_tile
-/// * 32`; since `K % 16 == 0` and `BK = 16`, `K_bytes = 2K` is a
-/// multiple of 32, and `t * 16` keeps each per-thread global address
-/// 16-byte aligned. Same alignment contract as Sprint 6.4's single-warp
-/// `emit_load_a_tile_async`.
-///
-/// Does **not** emit `cp.async.commit_group` — caller owns the commit
-/// boundary so preamble and in-loop issues each commit independently.
-///
-/// `label_suffix` makes the bra-skip label unique per call site.
-///
-/// Currently used by [`build_matmul_tc_async_module`] and
-/// [`crate::matmul_tc_bf16_async_kernel::build_matmul_tc_bf16_async_module`].
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_mw_load_tile_a_64x16_async(
-    alloc: &mut RegisterAllocator,
-    kernel: &mut PtxKernel,
-    a_block_base_global: Register, // u64 — A[block_row, k_tile*16]
-    tile_a_shared: Register,       // u32 — base of the chosen A buffer
-    flat_tid: Register,            // u32 — 0..128
-    block_row: Register,           // u32
-    m: Register,                   // u32
-    k_bytes: Register,             // u32 — K * 2
-    label_suffix: &str,
-) {
-    let skip_label = format!("A_ASYNC_SKIP_{label_suffix}");
-
-    // row = flat_tid / 2; col_byte = (flat_tid % 2) * 16
-    let row = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Div {
-        dst: row,
-        lhs: Operand::Reg(flat_tid),
-        rhs: Operand::ImmU32(2),
-        ty: PtxType::U32,
-    }));
-    let lane_mod2 = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Rem {
-        dst: lane_mod2,
-        lhs: Operand::Reg(flat_tid),
-        rhs: Operand::ImmU32(2),
-        ty: PtxType::U32,
-    }));
-    let col_byte = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Mul {
-        dst: col_byte,
-        lhs: Operand::Reg(lane_mod2),
-        rhs: Operand::ImmU32(16),
-        ty: PtxType::U32,
-    }));
-
-    // p_row_in = block_row + row < M; if false, skip cp.async.
-    let row_global = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Add {
-        dst: row_global,
-        lhs: Operand::Reg(block_row),
-        rhs: Operand::Reg(row),
-        ty: PtxType::U32,
-    }));
-    let p_row_in = alloc.alloc(PtxType::Pred);
-    kernel.push(PtxInstruction::Control(ControlOp::SetP {
-        dst: p_row_in,
-        cmp_op: CmpOp::Lt,
-        lhs: Operand::Reg(row_global),
-        rhs: Operand::Reg(m),
-        ty: PtxType::U32,
-    }));
-    kernel.push(PtxInstruction::Control(ControlOp::BraPred {
-        pred: p_row_in,
-        target: skip_label.clone(),
-        negate: true,
-    }));
-
-    // shared_addr = tile_a_shared + row * 32 + col_byte
-    let shared_off = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
-        dst: shared_off,
-        a: Operand::Reg(row),
-        b: Operand::ImmU32(TILE_A_ROW_STRIDE_BYTES),
-        c: Operand::Reg(col_byte),
-        ty: PtxType::U32,
-        mode: MadMode::Lo,
-    }));
-    let shared_addr = alloc.alloc(PtxType::U32);
-    kernel.push(PtxInstruction::Arith(ArithOp::Add {
-        dst: shared_addr,
-        lhs: Operand::Reg(tile_a_shared),
-        rhs: Operand::Reg(shared_off),
-        ty: PtxType::U32,
-    }));
-
-    // global_addr = a_block_base + row * K_bytes + col_byte
-    let row_off64 = alloc.alloc(PtxType::U64);
-    kernel.push(PtxInstruction::Arith(ArithOp::MulWide {
-        dst: row_off64,
-        lhs: Operand::Reg(row),
-        rhs: Operand::Reg(k_bytes),
-        src_ty: PtxType::U32,
-    }));
-    let col_byte64 = alloc.alloc(PtxType::U64);
-    kernel.push(PtxInstruction::Cvt {
-        dst: col_byte64,
-        src: col_byte,
-        dst_ty: PtxType::U64,
-        src_ty: PtxType::U32,
-    });
-    let per_thread_off64 = alloc.alloc(PtxType::U64);
-    kernel.push(PtxInstruction::Arith(ArithOp::Add {
-        dst: per_thread_off64,
-        lhs: Operand::Reg(row_off64),
-        rhs: Operand::Reg(col_byte64),
-        ty: PtxType::U64,
-    }));
-    let global_addr = alloc.alloc(PtxType::U64);
-    kernel.push(PtxInstruction::Arith(ArithOp::Add {
-        dst: global_addr,
-        lhs: Operand::Reg(a_block_base_global),
-        rhs: Operand::Reg(per_thread_off64),
-        ty: PtxType::U64,
-    }));
-
-    // Issue cp.async.ca size=16. Caller commits the group.
-    kernel.push(PtxInstruction::Memory(MemoryOp::new_cp_async_ca(
-        shared_addr,
-        global_addr,
-        16,
-    )));
-
-    kernel.push(PtxInstruction::Label(skip_label));
-}
-
-/// Build the IR module for `matmul_tc_async` targeting the given SM.
-///
-/// Multi-warp 64×64 block tile, 4 warps × 32×32 quadrant via 8 mma per
-/// K-tile, with double-buffered cp.async A staging and sync B staging.
-/// Same staging contracts as Sprint 6.4's single-warp variant — see
-/// the module docstring for the pipeline ordering.
-pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
+/// `sm` is a PTX target string such as `"sm_89"`. Sub-Ampere targets
+/// are legal at build time; `PtxModule::validate()` inside
+/// `KaioDevice::load_module` rejects them via `ValidationError::SmTooLow`
+/// (the combined `mma.sync.bf16` + `cp.async.ca` feature gate fires at
+/// SM 8.0+).
+pub(crate) fn build_matmul_tc_bf16_async_module(sm: &str) -> PtxModule {
     let mut alloc = RegisterAllocator::new();
-    let mut kernel = PtxKernel::new("matmul_tc_async");
+    let mut kernel = PtxKernel::new("matmul_tc_bf16_async");
 
-    kernel.add_param(PtxParam::pointer("a_ptr", PtxType::F16));
-    kernel.add_param(PtxParam::pointer("b_ptr", PtxType::F16));
+    kernel.add_param(PtxParam::pointer("a_ptr", PtxType::BF16));
+    kernel.add_param(PtxParam::pointer("b_ptr", PtxType::BF16));
     kernel.add_param(PtxParam::pointer("d_ptr", PtxType::F32));
     kernel.add_param(PtxParam::scalar("m", PtxType::U32));
     kernel.add_param(PtxParam::scalar("n", PtxType::U32));
@@ -399,10 +230,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         mode: MadMode::Lo,
     }));
 
-    // Sprint 6.7b D10 hoist: compute fragment-layout (group_id, tig) ONCE at
-    // kernel start, reuse across every emit_warp_quadrant_mma call. Saves
-    // 6 × div/rem pairs per K-iter that the fragment loaders would otherwise
-    // recompute internally (2 FragmentA_F16 + 4 FragmentB_F16 per K-iter).
+    // Sprint 6.7b D10 hoist — group_id and tig once at kernel start.
     let r_hoisted_group_id = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Div {
         dst: r_hoisted_group_id,
@@ -523,7 +351,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         ty: PtxType::U32,
     });
 
-    // Pre-zero shared (all 8 KB: tile_a 4096 + tile_b 4096).
+    // Pre-zero shared (all 9 KB: tile_a 4096 + tile_b 5120).
     emit_pre_zero_shared_tiles(
         &mut alloc,
         &mut kernel,
@@ -596,7 +424,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         ty: PtxType::U32,
     }));
 
-    // Helper closures (inline inside this builder; capture rd_*_block_base, r_*_bytes, r_tile_*_sym).
+    // Helper closures — capture rd_*_block_base, r_*_bytes, r_tile_*_sym.
     let emit_a_tile_src =
         |alloc: &mut RegisterAllocator, kernel: &mut PtxKernel, k_tile: Register| -> Register {
             // a_tile_src = rd_a_block_base + k_tile * 32
@@ -859,8 +687,8 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         ty: PtxType::U32,
     }));
 
-    // Per-warp 8-mma accumulation. Same helper as Gate A.
-    emit_warp_quadrant_mma(
+    // Per-warp 8-mma accumulation — bf16 mma variant.
+    emit_warp_quadrant_mma_bf16(
         &mut alloc,
         &mut kernel,
         r_tile_a_warp_cur,
@@ -890,10 +718,10 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         negate: false,
     }));
 
-    // --- Per-warp output store (same helper + same address protocol as Gate A) ---
+    // --- Per-warp output store ---
     // Pass rd_d directly (NOT a per-block base) — warp_block_row /
     // warp_block_col are absolute, so store helper computes global
-    // addresses from rd_d. (Gate A bug: double-counted block_row/col.)
+    // addresses from rd_d.
     let r_wq_row_start = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Mul {
         dst: r_wq_row_start,
@@ -922,7 +750,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         rhs: Operand::Reg(r_wq_col_start),
         ty: PtxType::U32,
     }));
-    emit_warp_quadrant_store(
+    crate::matmul_tc_kernel::emit_warp_quadrant_store(
         &mut alloc,
         &mut kernel,
         rd_d,
@@ -945,75 +773,6 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
     module
 }
 
-/// Double-buffered tensor-core matmul — f16 × f16 → f32 with fp32
-/// accumulation, cp.async-staged A tiles, multi-warp 64×64 block tile.
-///
-/// Sprint 6.7 Gate B: same 4-warp 32×32-quadrant restructure as
-/// `matmul_tc`, with cp.async double-buffering on the A staging path.
-/// Semantically equivalent to [`matmul_tc`](crate::matmul_tc) on the
-/// same inputs; ships alongside it so Sprint 6.5's auto-tuner can
-/// dispatch between the two based on profile data.
-///
-/// # Dimension constraint
-///
-/// Requires `M % 16 == 0`, `N % 8 == 0`, `K % 16 == 0`. Returns
-/// [`KaioError::InvalidConfig`] otherwise. Sprint 6.7 Gate C will
-/// relax M, N to "any positive value" (K%16 stays — mma K dim is
-/// fixed) and promote this kernel from `#[doc(hidden)]` to stable
-/// `pub` API.
-///
-/// # Hardware requirement
-///
-/// SM 8.0+ (Ampere) — required by both `mma.sync.m16n8k16` and
-/// `cp.async.ca`. On a sub-Ampere device, returns
-/// [`KaioError::Validation`] (wrapping
-/// [`ValidationError::SmTooLow`](kaio_core::ir::ValidationError::SmTooLow))
-/// via the `PtxModule::validate()` pass inside
-/// [`KaioDevice::load_module`].
-pub fn matmul_tc_async(
-    device: &KaioDevice,
-    a: &GpuBuffer<f16>,
-    b: &GpuBuffer<f16>,
-    c: &mut GpuBuffer<f32>,
-    m: u32,
-    n: u32,
-    k: u32,
-) -> Result<()> {
-    use cudarc::driver::{LaunchConfig, PushKernelArg};
-
-    validate_dims_tc(a, b, c, m, n, k)?;
-
-    let info = device.info()?;
-    let (major, minor) = info.compute_capability;
-    let sm = format!("sm_{major}{minor}");
-    let module = build_matmul_tc_async_module(&sm);
-
-    let kmodule = device.load_module(&module)?;
-    let func = kmodule.function("matmul_tc_async")?;
-
-    let grid = (n.div_ceil(BN_BLOCK), m.div_ceil(BM_BLOCK), 1);
-    let cfg = LaunchConfig {
-        grid_dim: grid,
-        block_dim: (32, WARPS_PER_BLOCK, 1),
-        shared_mem_bytes: 0,
-    };
-
-    unsafe {
-        device
-            .stream()
-            .launch_builder(func.inner())
-            .arg(a.inner())
-            .arg(b.inner())
-            .arg(c.inner_mut())
-            .arg(&m)
-            .arg(&n)
-            .arg(&k)
-            .launch(cfg)?;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1025,64 +784,65 @@ mod tests {
         w.finish()
     }
 
-    /// Sprint 6.7 multi-warp buffer toggle.
-    /// A per-buffer is 2048 B (unchanged in 6.7b). B per-buffer is 2560 B
-    /// post-6.7b (col-stride padded 32→36, rounded up to multiple of 512
-    /// for the cooperative pre-zero pass).
     #[test]
-    fn buffer_offsets_toggle() {
-        assert_eq!(buffer_offsets(0), (0, 2048, 0, 2560));
-        assert_eq!(buffer_offsets(1), (2048, 0, 2560, 0));
-        assert_eq!(buffer_offsets(2), (0, 2048, 0, 2560));
-        assert_eq!(buffer_offsets(3), (2048, 0, 2560, 0));
-    }
-
-    #[test]
-    fn build_matmul_tc_async_module_produces_valid_structure() {
-        let module = build_matmul_tc_async_module("sm_89");
+    fn build_matmul_tc_bf16_async_module_produces_valid_structure() {
+        let module = build_matmul_tc_bf16_async_module("sm_89");
         let ptx = emit_module_to_string(&module);
 
-        // Instruction presence.
+        // Entry symbol present.
+        assert!(ptx.contains(".visible .entry matmul_tc_bf16_async("));
+
+        // Shared layout: tile_a 4096 (2 × 2048 B, align 16 for cp.async.ca),
+        // tile_b 5120 (2 × 2560 B Sprint 6.7b padded col-stride).
         assert!(
-            ptx.contains("cp.async.ca.shared.global"),
-            "missing cp.async.ca"
+            ptx.contains(".shared .align 16 .b8 tile_a[4096]"),
+            "tile_a should be 4096 B with align 16 (cp.async.ca size=16 dst alignment)"
         );
         assert!(
-            ptx.contains("cp.async.commit_group"),
-            "missing cp.async.commit_group"
+            ptx.contains(".shared .align 4 .b8 tile_b[5120]"),
+            "tile_b should be 5120 B (2 buffers × 2560 B padded col-stride per Sprint 6.7b)"
+        );
+
+        // cp.async issue/commit/wait structure.
+        // Per Round 3 / Codex 5.5 F2: the async kernel has EXACTLY TWO
+        // static cp.async.ca issue sites (preamble + in-loop next-iter),
+        // matching the 2 commit_group instances. Same structural count as
+        // the f16 async sibling.
+        let cp_async_ca_count = ptx.matches("cp.async.ca.shared.global").count();
+        assert_eq!(
+            cp_async_ca_count, 2,
+            "expected exactly 2 cp.async.ca.shared.global issue sites (preamble + in-loop), got {cp_async_ca_count}"
+        );
+        let commit_count = ptx.matches("cp.async.commit_group").count();
+        assert_eq!(
+            commit_count, 2,
+            "expected exactly 2 cp.async.commit_group instances (matching cp.async.ca count)"
         );
         assert!(
             ptx.contains("cp.async.wait_group"),
             "missing cp.async.wait_group"
         );
+
+        // No `.cg` cache-global variant — we deliberately use `.ca`
+        // (cache-all) to match the f16 async kernel's choice.
         assert!(
-            ptx.contains("mma.sync.aligned.m16n8k16"),
-            "missing mma.sync"
+            !ptx.contains("cp.async.cg.shared.global"),
+            "matmul_tc_bf16_async must not emit cp.async.cg (we use .ca)"
         );
 
-        // Multi-warp shared sizing: 4 KB tile_a (2× 2048 B), 5 KB tile_b
-        // (Sprint 6.7b: 2× 2560 B per buffer — padded col stride).
+        // Dedicated bf16 mma mnemonic; no f16 mma tag.
         assert!(
-            ptx.contains(".shared .align 16 .b8 tile_a[4096]"),
-            "tile_a should be 4096 B (2 buffers × 64×16 fp16)"
+            ptx.contains("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"),
+            "expected dedicated MmaSyncBf16 mnemonic"
         );
         assert!(
-            ptx.contains(".shared .align 4 .b8 tile_b[5120]"),
-            "tile_b should be 5120 B (2 buffers × 2560 B padded col-stride)"
+            !ptx.contains("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"),
+            "bf16 async kernel must not emit any f16-tagged mma.sync"
         );
-
-        // 8 mma.sync per warp per K-tile (2 m_stripes × 4 n_stripes).
         let mma_count = ptx.matches("mma.sync.aligned.m16n8k16").count();
         assert_eq!(
             mma_count, 8,
             "expected 8 mma.sync per K-iter (multi-warp 2×4 stripe grid)"
-        );
-
-        // 2 cp.async.commit_group: preamble + in-loop.
-        let commit_count = ptx.matches("cp.async.commit_group").count();
-        assert_eq!(
-            commit_count, 2,
-            "expected two commit_groups (preamble + in-loop)"
         );
 
         // Edge-tile predication present.
@@ -1091,30 +851,33 @@ mod tests {
             "missing combined edge-tile predicate emit"
         );
 
+        // bar.sync for cross-warp visibility.
+        assert!(ptx.contains("bar.sync"), "missing bar.sync");
+
         // 32 predicated st.global.f32 per warp output (8 fragments × 4 stores).
         let store_count = ptx.matches("st.global.f32").count();
-        assert_eq!(store_count, 32, "expected 32 predicated st.global.f32");
+        assert_eq!(
+            store_count, 32,
+            "expected 32 predicated st.global.f32 (8 fragments × 4 stores)"
+        );
     }
 
     #[test]
-    fn build_matmul_tc_async_module_declares_requested_sm_target() {
-        let module_70 = build_matmul_tc_async_module("sm_70");
-        let ptx_70 = emit_module_to_string(&module_70);
-        assert!(ptx_70.contains(".target sm_70"));
-
-        let module_89 = build_matmul_tc_async_module("sm_89");
-        let ptx_89 = emit_module_to_string(&module_89);
-        assert!(ptx_89.contains(".target sm_89"));
+    fn build_matmul_tc_bf16_async_module_declares_requested_sm_target() {
+        let module_70 = build_matmul_tc_bf16_async_module("sm_70");
+        assert!(emit_module_to_string(&module_70).contains(".target sm_70"));
+        let module_89 = build_matmul_tc_bf16_async_module("sm_89");
+        assert!(emit_module_to_string(&module_89).contains(".target sm_89"));
     }
 
     #[test]
-    fn matmul_tc_async_module_rejects_sm_70_via_validate() {
+    fn matmul_tc_bf16_async_module_rejects_sm_70_via_validate() {
         use kaio_core::ir::ValidationError;
 
-        let module = build_matmul_tc_async_module("sm_70");
+        let module = build_matmul_tc_bf16_async_module("sm_70");
         let err = module
             .validate()
-            .expect_err("matmul_tc_async module at sm_70 must fail validation");
+            .expect_err("matmul_tc_bf16_async module at sm_70 must fail validation");
         match err {
             ValidationError::SmTooLow {
                 required,
@@ -1123,6 +886,10 @@ mod tests {
             } => {
                 assert_eq!(required, 80);
                 assert_eq!(actual, 70);
+                // Permissive `||` pattern matching the existing
+                // matmul_tc_async test at matmul_tc_async_kernel.rs:1115
+                // — per Round 2 / Codex D7 and Round 3 / Codex 5.5 F6,
+                // don't introduce a stricter standard mid-sprint.
                 assert!(
                     feature.contains("mma.sync") || feature.contains("cp.async"),
                     "unexpected feature name: {feature}"
@@ -1133,12 +900,60 @@ mod tests {
     }
 
     #[test]
-    fn matmul_tc_async_module_validates_at_sm_80_and_above() {
+    fn matmul_tc_bf16_async_module_validates_at_sm_80_and_above() {
         for sm in ["sm_80", "sm_89", "sm_90"] {
-            let module = build_matmul_tc_async_module(sm);
+            let module = build_matmul_tc_bf16_async_module(sm);
             module
                 .validate()
                 .unwrap_or_else(|e| panic!("{sm} should validate; got error: {e}"));
+        }
+    }
+
+    /// Sprint 9.1.1 D6 resolution gate (port of 9.1's D4 cvt-free gate
+    /// onto the async path): the inner K-loop hot path must contain
+    /// **no `cvt.*` instructions** between any `ld.shared.b32` fragment
+    /// load and the nearest subsequent
+    /// `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. A `cvt`
+    /// on that hot path would indicate accidental f16↔bf16 conversion
+    /// inserted somewhere on the fragment-load → mma flow — exactly
+    /// the precision bug class 9.1's D4 gate was written to prevent.
+    ///
+    /// Why this matters more in async than sync: the async kernel has
+    /// more in-loop arithmetic (buffer toggle math, has_next predicate,
+    /// next-iter cp.async issue), which is more PTX surface where an
+    /// accidental cvt could hide.
+    ///
+    /// Acceptable `cvt`s elsewhere: host-side scale lowering, address
+    /// widening (`cvt.u32.s32`, `cvt.u64.u32`), output-store cvt. None
+    /// of these appear between an `ld.shared.b32` and the next
+    /// `mma.sync.bf16` on the hot path.
+    #[test]
+    fn d4_gate_no_cvt_in_bf16_mma_hot_path() {
+        let module = build_matmul_tc_bf16_async_module("sm_89");
+        let ptx = emit_module_to_string(&module);
+
+        let loop_start = ptx
+            .find("K_LOOP:")
+            .expect("K_LOOP label must appear in emitted PTX");
+        let loop_end_rel = ptx[loop_start..]
+            .rfind("K_LOOP")
+            .expect("matching back-edge to K_LOOP must exist");
+        let loop_body = &ptx[loop_start..loop_start + loop_end_rel];
+
+        let mut between_ld_and_mma = false;
+        for line in loop_body.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("ld.shared.b32") || trimmed.starts_with("ld.shared.u32") {
+                between_ld_and_mma = true;
+            } else if trimmed.starts_with("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32") {
+                between_ld_and_mma = false;
+            } else if between_ld_and_mma && trimmed.starts_with("cvt.") {
+                panic!(
+                    "D6 GATE FAILED: cvt found between fragment ld.shared.b32 and mma.sync.bf16 \
+                     in K_LOOP body — would indicate accidental precision conversion on the bf16 \
+                     async hot path.\nOffending line: `{line}`\n\n=== K_LOOP body ===\n{loop_body}"
+                );
+            }
         }
     }
 }

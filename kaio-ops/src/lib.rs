@@ -54,6 +54,14 @@ mod matmul_tc_async_kernel;
 // kernel-module builder + host validation tests + the D4 cvt-free
 // hot-path gate.
 mod matmul_tc_bf16_kernel;
+// Sprint 9.1.1 — bf16 async tensor-core matmul. cp.async-pipelined
+// sibling of `matmul_tc_bf16_kernel`; cross-product of (f16 async ×
+// bf16 sync). Reuses the precision-agnostic cp.async A-tile loader
+// from `matmul_tc_async_kernel` and the dedicated bf16 mma helper
+// from `matmul_tc_bf16_kernel` (both promoted to `pub(crate)` at C0).
+// Public host launch fn lands at C2; C1 ships the module builder +
+// validation tests + the D6 cvt-free hot-path gate.
+mod matmul_tc_bf16_async_kernel;
 mod matmul_tc_kernel;
 // Sprint 7.3 — fused tri-output QKV projection. INT8 (W8A16) is the MVS
 // deliverable; INT4 (W4A16) is contingent on D2.5 register budget and

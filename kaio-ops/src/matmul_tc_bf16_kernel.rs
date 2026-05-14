@@ -138,6 +138,9 @@ pub(crate) fn validate_dims_tc_bf16(
 /// (`FragmentC × 8` zero-initialized) and bf16 fragment operands
 /// loaded via [`load_fragment_a_m16n8k16_shared_row_bf16`] and
 /// [`load_fragment_b_m16n8k16_shared_col_bf16`].
+///
+/// Currently used by [`matmul_tc_bf16`] and
+/// [`crate::matmul_tc_bf16_async_kernel::build_matmul_tc_bf16_async_module`].
 pub(crate) fn emit_warp_quadrant_mma_bf16(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
