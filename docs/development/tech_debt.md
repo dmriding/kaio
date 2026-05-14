@@ -190,3 +190,32 @@ pattern, compared against a CPU-computed checksum); (3) lower the
 512 boundary without the 4× runtime hit.
 
 **Added:** Sprint 6.7 Gate C | **Sprint:** TBD (low priority)
+
+### `cublasGemmEx`-bf16 reference for the bf16 matmul bench
+
+`kaio-ops/tests/matmul_tc_bf16_bench.rs` (Sprint 9.1) compares
+`matmul_tc_bf16` against `cuBLAS sgemm` for the throughput-vs-vendor
+column, mirroring the existing `matmul_tc_bench.rs` pattern. sgemm is
+f32 × f32 → f32 — apples-to-oranges precision compared to KAIO's
+bf16 × bf16 → f32. The bf16-vs-f16 column in the same bench *is*
+apples-to-apples (same kernel structure, same bandwidth) and is what
+the SC-2 perf-parity gate measures; the cuBLAS column is a project-
+local sanity floor.
+
+A true apples-to-apples bf16 reference would call `cublasGemmEx` with
+`CUDA_R_16BF` input descriptors and an `f32` accumulator. cudarc 0.19's
+`Gemm::gemm` exposes only sgemm/dgemm cleanly; `cublasGemmEx` needs
+raw FFI or an upstream cudarc PR. The same caveat already applies to
+`matmul_tc_bench` (f16), `matmul_int8_bench`, and `matmul_int4_bench` —
+none of those bench against a same-precision cuBLAS path either.
+
+Candidates: (1) raw `cublasGemmEx` FFI in the kaio-ops bench
+harnesses; (2) upstream cudarc PR exposing `Gemm`-like wrappers for
+`cublasGemmEx` covering f16, bf16, INT8, INT4; (3) skip the cuBLAS
+column in the bf16 bench and lean entirely on the SC-2 bf16-vs-f16
+parity (least-effort option — the parity gate is the load-bearing
+comparison anyway, the cuBLAS sgemm column is reference noise).
+
+**Added:** Sprint 9.1 C8 | **Sprint:** TBD (low priority — covered
+generally by the same tracking item across f16 / INT8 / INT4 benches;
+not blocking 9.x or v0.5.0)
