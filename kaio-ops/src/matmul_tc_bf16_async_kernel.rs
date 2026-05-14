@@ -888,11 +888,10 @@ mod tests {
             "tile_b should be 5120 B (2 buffers × 2560 B padded col-stride per Sprint 6.7b)"
         );
 
-        // cp.async issue/commit/wait structure.
-        // Per Round 3 / Codex 5.5 F2: the async kernel has EXACTLY TWO
-        // static cp.async.ca issue sites (preamble + in-loop next-iter),
-        // matching the 2 commit_group instances. Same structural count as
-        // the f16 async sibling.
+        // cp.async issue/commit/wait structure. The async kernel has
+        // EXACTLY TWO static cp.async.ca issue sites (preamble + in-loop
+        // next-iter), matching the 2 commit_group instances. Same
+        // structural count as the f16 async sibling.
         let cp_async_ca_count = ptx.matches("cp.async.ca.shared.global").count();
         assert_eq!(
             cp_async_ca_count, 2,
@@ -973,8 +972,9 @@ mod tests {
                 assert_eq!(actual, 70);
                 // Permissive `||` pattern matching the existing
                 // matmul_tc_async test at matmul_tc_async_kernel.rs:1115
-                // — per Round 2 / Codex D7 and Round 3 / Codex 5.5 F6,
-                // don't introduce a stricter standard mid-sprint.
+                // — don't introduce a stricter standard mid-sprint;
+                // cross-precision test-consistency tightening is
+                // out-of-scope here.
                 assert!(
                     feature.contains("mma.sync") || feature.contains("cp.async"),
                     "unexpected feature name: {feature}"

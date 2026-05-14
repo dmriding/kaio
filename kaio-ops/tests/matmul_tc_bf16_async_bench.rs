@@ -31,9 +31,7 @@
 //! SC-2 interleaves bf16_async and f16_async in the **same** bench run
 //! with alternating order. The same-run f16_async value is the
 //! baseline for the precision-isolation ratio — no separate historical
-//! anchor needed (this is a deliberate Round-2 / Codex 5.4 simplification
-//! away from a first-run-pinned `F16_ASYNC_4096_BASELINE_TFLOPS`
-//! constant). Same-run interleaving cancels thermal drift and
+//! anchor needed. Same-run interleaving cancels thermal drift and
 //! toolchain/driver variations on its own.
 //!
 //! Historical f16_async numbers (from prior runs of this bench) are
