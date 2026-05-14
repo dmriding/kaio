@@ -11,6 +11,7 @@ Master plan: [phase9_master_plan.md](phase9_master_plan.md)
 | Sprint | Scope | Status | Headline |
 |---|---|---|---|
 | 9.1 | bf16 TC matmul family (`matmul_tc_bf16` + optional async / auto-tuner / candle bindings) | ✅ Complete (2026-05-14) | bf16 sync ≈ 55–60 median TF at 4096³; SC-2 split-bound gate green (per-iter bf16/f16 median ≈ +0.9% within ±3%, worst ≈ +2–9% within ±15%); 25/25 D5 correctness tests green. [sprint_9_1.md](sprint_9_1.md) |
+| 9.1.1 | bf16 async TC matmul (`matmul_tc_bf16_async`) — cp.async-pipelined sibling | ✅ Complete (2026-05-15) | bf16_async at 4096³ on RTX 4090 sm_89: SC-2 perf-parity gate green vs f16_async (median +0.72% within ±3%, worst +1.55% within ±15%); 25/25 D5 correctness tests green; D6 cvt-free hot-path gate green. [sprint_9_1_1.md](sprint_9_1_1.md) |
 | 9.2 | FlashAttention backward (`attention_flash_bwd` + causal, candle bridge integration) | 📝 Planned | — |
 | 9.3 | `ldmatrix.sync.aligned` IR primitive + `matmul_tc` fragment-A loader rewire | 📝 Planned | — |
 | v0.5.0 | Phase 9 aggregate release | 📝 Planned | After 9.2 ships |
@@ -41,6 +42,7 @@ phase but do not bump versions on their own.
 | Op | Variant | Sprint | Input / output types | Notes |
 |---|---|---|---|---|
 | `matmul_tc_bf16` | sync | 9.1 | `bf16 × bf16 → f32` | SM 8.0+, K%16==0, edge-tile predication on M/N. ≈ 91.8% of cuBLAS sgemm at 4096³ on sm_89; SC-2 split-bound gate (per-iter bf16/f16 median ±3% + worst ±15%) green. |
+| `matmul_tc_bf16_async` | async | 9.1.1 | `bf16 × bf16 → f32` | SM 8.0+, K%16==0, edge-tile predication on M/N. cp.async-pipelined A staging (double-buffered, size=16 issue); cross-product of (f16 async × bf16 sync). SC-2 split-bound gate (per-iter bf16_async/f16_async median +0.72% within ±3%, worst +1.55% within ±15%) green at 4096³ on sm_89. |
 
 ## kaio-candle additions (`kaio-candle` — standalone crate)
 
