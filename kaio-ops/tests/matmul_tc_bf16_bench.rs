@@ -342,6 +342,26 @@ fn benchmark_matmul_tc_bf16() {
     eprintln!("  bf16 / f16 (TFLOPS): {bf16_vs_f16_pct:.2}% (delta: {delta_pct:+.2}%)");
     eprintln!();
 
+    // Debug builds suffer ~10-20x slower kernel execution and much wider
+    // per-iter variance (launch overhead dominates, CPU-side measurement
+    // jitter inflates the worst-of-N pick asymmetrically across kernels).
+    // The SC-2 gate compares kernel throughput, not host-side noise — only
+    // assert in release builds. `cargo xtask bench` always uses release;
+    // the raw `cargo test` path falls into this debug branch unless given
+    // `--release`.
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "DEBUG BUILD detected (debug_assertions=on): SC-2 hard assertion skipped.\n\
+             The worst-of-{SC2_WORST_OF} TFLOPS comparison above is not representative —\n\
+             debug-mode launch overhead inflates per-iter variance asymmetrically\n\
+             between the two kernels. For the canonical SC-2 verdict run:\n\
+                 cargo xtask bench matmul_tc_bf16_bench\n\
+             or equivalently:\n\
+                 cargo test --release -p kaio-ops --test matmul_tc_bf16_bench -- --ignored --nocapture"
+        );
+        return;
+    }
+
     assert!(
         delta_pct.abs() <= SC2_BOUND_PCT,
         "Sprint 9.1 SC-2 PERF-PARITY GATE FAILED:\n\
