@@ -130,7 +130,15 @@ pub(crate) fn validate_dims_tc_bf16(
 ///
 /// The accumulator slice `&mut [FragmentC; 8]` is indexed as
 /// `accs[m_stripe * MMAS_PER_WARP_N + n_stripe]`.
-fn emit_warp_quadrant_mma_bf16(
+///
+/// **Cross-module within the bf16 path.** The accumulator layout,
+/// fragment-loader hoist, and mma index ordering are precision-
+/// independent within the bf16 family. Callers must supply a
+/// [`TensorCoreOp::MmaSyncBf16`]-compatible accumulator
+/// (`FragmentC × 8` zero-initialized) and bf16 fragment operands
+/// loaded via [`load_fragment_a_m16n8k16_shared_row_bf16`] and
+/// [`load_fragment_b_m16n8k16_shared_col_bf16`].
+pub(crate) fn emit_warp_quadrant_mma_bf16(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
     tile_a_warp_base_shared: Register, // u32
