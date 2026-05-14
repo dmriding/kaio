@@ -2688,6 +2688,7 @@ mod tests {
                 assert_eq!(actual, 70);
                 assert!(feature.contains("mma.sync.m16n8k16"));
             }
+            other => panic!("expected SmTooLow, got {other:?}"),
         }
     }
 

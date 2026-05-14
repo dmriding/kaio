@@ -4,7 +4,8 @@ use std::fmt;
 
 use super::instruction::PtxInstruction;
 use super::kernel::PtxKernel;
-use crate::instr::MemoryOp;
+use crate::instr::{MemoryOp, TensorCoreOp};
+use crate::types::PtxType;
 
 /// A complete PTX module containing version/target metadata and kernels.
 ///
@@ -64,14 +65,18 @@ impl PtxModule {
     /// dataflow pass. The goal is to surface clean errors at emit-time
     /// instead of cryptic ptxas messages downstream.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        let Some(target_sm) = self.parse_sm_target() else {
-            // Unrecognized target (e.g. custom or virtual arch) — skip.
-            return Ok(());
-        };
+        let target_sm = self.parse_sm_target();
 
         for kernel in &self.kernels {
             for instr in &kernel.body {
-                if let Some((required, feature)) = instruction_sm_requirement(instr)
+                // Target-agnostic shape/dtype routing checks.
+                if let PtxInstruction::TensorCore(op) = instr {
+                    validate_tensor_core_op(op)?;
+                }
+
+                // Target-capability check (skipped on unparseable targets).
+                if let Some(target_sm) = target_sm
+                    && let Some((required, feature)) = instruction_sm_requirement(instr)
                     && target_sm < required
                 {
                     return Err(ValidationError::SmTooLow {
@@ -84,6 +89,23 @@ impl PtxModule {
         }
         Ok(())
     }
+}
+
+/// Per-instruction target-agnostic IR validation for tensor-core ops.
+///
+/// Currently rejects bf16 dtype tags on the generic [`TensorCoreOp::MmaSync`]
+/// variant — bf16 emission must go through [`TensorCoreOp::MmaSyncBf16`] so
+/// the fragment types and instruction dtype stay aligned at the IR boundary.
+fn validate_tensor_core_op(op: &TensorCoreOp) -> Result<(), ValidationError> {
+    if let TensorCoreOp::MmaSync { a_ty, b_ty, .. } = op {
+        if *a_ty == PtxType::BF16 {
+            return Err(ValidationError::MmaSyncBf16Rejected { operand: "a_ty" });
+        }
+        if *b_ty == PtxType::BF16 {
+            return Err(ValidationError::MmaSyncBf16Rejected { operand: "b_ty" });
+        }
+    }
+    Ok(())
 }
 
 /// Return `Some((min_sm, feature_label))` if this instruction carries an SM
@@ -120,6 +142,19 @@ pub enum ValidationError {
         /// Human-readable name of the offending feature.
         feature: String,
     },
+    /// A [`TensorCoreOp::MmaSync`] instruction was constructed with
+    /// `PtxType::BF16` on `a_ty` or `b_ty`. Bf16 emission must use the
+    /// dedicated [`TensorCoreOp::MmaSyncBf16`] variant so fragment types
+    /// and instruction dtype stay aligned at the IR boundary.
+    ///
+    /// Introduced in Sprint 9.1 cleanup; closes the legacy hole where the
+    /// generic `MmaSync` path silently emitted a bf16 instruction from
+    /// `FragmentA_F16` / `FragmentB_F16` operands.
+    MmaSyncBf16Rejected {
+        /// Which operand carried the rejected dtype tag (`"a_ty"` or
+        /// `"b_ty"`).
+        operand: &'static str,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -133,6 +168,12 @@ impl fmt::Display for ValidationError {
                 write!(
                     f,
                     "{feature} requires sm_{required}+, target is sm_{actual}"
+                )
+            }
+            Self::MmaSyncBf16Rejected { operand } => {
+                write!(
+                    f,
+                    "TensorCoreOp::MmaSync with PtxType::BF16 on {operand} is rejected; use TensorCoreOp::MmaSyncBf16 for bf16 emission"
                 )
             }
         }
@@ -300,5 +341,95 @@ mod tests {
         assert_eq!(m2.parse_sm_target(), Some(80));
         let m3 = PtxModule::new("compute_90a");
         assert_eq!(m3.parse_sm_target(), None);
+    }
+
+    fn mma_sync_with_bf16_tags() -> PtxKernel {
+        let mut alloc = RegisterAllocator::new();
+        let mut k = PtxKernel::new("legacy_bf16_on_mma_sync");
+        k.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+            d: alloc_c(&mut alloc),
+            a: alloc_a_f16(&mut alloc),
+            b: alloc_b_f16(&mut alloc),
+            c: alloc_c(&mut alloc),
+            shape: MmaShape::M16N8K16,
+            d_ty: PtxType::F32,
+            a_ty: PtxType::BF16,
+            b_ty: PtxType::BF16,
+            c_ty: PtxType::F32,
+        }));
+        k
+    }
+
+    #[test]
+    fn validate_rejects_mma_sync_bf16_a_ty() {
+        let mut module = PtxModule::new("sm_89");
+        module.add_kernel(mma_sync_with_bf16_tags());
+        let err = module.validate().unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::MmaSyncBf16Rejected { operand: "a_ty" }
+        );
+        assert_eq!(
+            err.to_string(),
+            "TensorCoreOp::MmaSync with PtxType::BF16 on a_ty is rejected; \
+             use TensorCoreOp::MmaSyncBf16 for bf16 emission"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_mma_sync_bf16_b_ty_only() {
+        // Mixed: a_ty F16 + b_ty BF16 still rejected.
+        let mut alloc = RegisterAllocator::new();
+        let mut k = PtxKernel::new("mixed_bf16_b_only");
+        k.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
+            d: alloc_c(&mut alloc),
+            a: alloc_a_f16(&mut alloc),
+            b: alloc_b_f16(&mut alloc),
+            c: alloc_c(&mut alloc),
+            shape: MmaShape::M16N8K16,
+            d_ty: PtxType::F32,
+            a_ty: PtxType::F16,
+            b_ty: PtxType::BF16,
+            c_ty: PtxType::F32,
+        }));
+        let mut module = PtxModule::new("sm_89");
+        module.add_kernel(k);
+        let err = module.validate().unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::MmaSyncBf16Rejected { operand: "b_ty" }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_mma_sync_bf16_even_on_unparseable_target() {
+        // The dtype-routing check is target-agnostic — it fires regardless
+        // of whether the target string is `sm_NN`.
+        let mut module = PtxModule::new("compute_90a");
+        module.add_kernel(mma_sync_with_bf16_tags());
+        assert_eq!(
+            module.validate().unwrap_err(),
+            ValidationError::MmaSyncBf16Rejected { operand: "a_ty" }
+        );
+    }
+
+    fn mma_sync_bf16_kernel() -> PtxKernel {
+        use crate::fragment::{alloc_a_bf16, alloc_b_bf16};
+        let mut alloc = RegisterAllocator::new();
+        let mut k = PtxKernel::new("native_bf16");
+        k.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSyncBf16 {
+            d: alloc_c(&mut alloc),
+            a: alloc_a_bf16(&mut alloc),
+            b: alloc_b_bf16(&mut alloc),
+            c: alloc_c(&mut alloc),
+        }));
+        k
+    }
+
+    #[test]
+    fn validate_accepts_mma_sync_bf16_dedicated_variant() {
+        let mut module = PtxModule::new("sm_89");
+        module.add_kernel(mma_sync_bf16_kernel());
+        assert!(module.validate().is_ok());
     }
 }

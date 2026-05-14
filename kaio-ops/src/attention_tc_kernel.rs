@@ -2391,7 +2391,10 @@ mod tests {
             .expect_err("sm_70 should reject mma.sync via validate");
         let ValidationError::SmTooLow {
             required, actual, ..
-        } = err;
+        } = err
+        else {
+            panic!("expected SmTooLow, got {err:?}");
+        };
         assert_eq!(required, 80);
         assert_eq!(actual, 70);
     }
@@ -2405,7 +2408,10 @@ mod tests {
             .expect_err("sm_70 should reject mma.sync (causal variant) via validate");
         let ValidationError::SmTooLow {
             required, actual, ..
-        } = err;
+        } = err
+        else {
+            panic!("expected SmTooLow, got {err:?}");
+        };
         assert_eq!(required, 80);
         assert_eq!(actual, 70);
     }

@@ -69,6 +69,16 @@ Updated at phase completion. Per-sprint detail lives in
   types directly; `kaio-candle` consumes the public host APIs, not
   the IR-level fragment types. Absorbed in the v0.5.0 minor bump per
   the master-plan version-semantics decision.
+- **Breaking (kaio-core IR, pre-v1.0):** `PtxModule::validate` now
+  rejects `TensorCoreOp::MmaSync` constructed with
+  `a_ty: PtxType::BF16` or `b_ty: PtxType::BF16`, returning a new
+  `ValidationError::MmaSyncBf16Rejected { operand }` variant. This
+  closes a legacy hole where the generic `MmaSync` path silently
+  emitted a bf16 instruction from `FragmentA_F16` / `FragmentB_F16`
+  operands, undermining the type-safety claim made for `MmaSyncBf16`.
+  Bf16 mma emission must use `TensorCoreOp::MmaSyncBf16`; the public
+  `matmul_tc_bf16` op and every kernel in `kaio-ops` already do. No
+  known external IR consumers of the legacy route.
 
 ### Notes
 

@@ -92,9 +92,14 @@ pub enum TensorCoreOp {
         shape: MmaShape,
         /// D element type (currently `F32`).
         d_ty: PtxType,
-        /// A element type (currently `F16` or `BF16`).
+        /// A element type (must be `PtxType::F16`). Bf16 emission uses
+        /// the dedicated [`MmaSyncBf16`](Self::MmaSyncBf16) variant;
+        /// [`PtxModule::validate`](crate::ir::PtxModule::validate)
+        /// rejects `PtxType::BF16` here with
+        /// [`ValidationError::MmaSyncBf16Rejected`](crate::ir::ValidationError::MmaSyncBf16Rejected).
         a_ty: PtxType,
-        /// B element type (currently `F16` or `BF16`).
+        /// B element type (must be `PtxType::F16`). Same constraint as
+        /// `a_ty`.
         b_ty: PtxType,
         /// C element type (currently `F32`).
         c_ty: PtxType,
@@ -148,9 +153,11 @@ pub enum TensorCoreOp {
     /// implicitly `.f32.bf16.bf16.f32`. Requires SM 8.0+ (Ampere or newer).
     ///
     /// Introduced in Sprint 9.1 per the D2.5 sibling-IR-variant decision —
-    /// mirrors the `MmaSyncInt8` precedent. Using [`MmaSync`](Self::MmaSync)
-    /// with `a_ty: BF16, b_ty: BF16` still emits the same PTX but loses
-    /// the type-level precision distinction at call sites.
+    /// mirrors the `MmaSyncInt8` precedent. The legacy route of constructing
+    /// [`MmaSync`](Self::MmaSync) with `a_ty: BF16, b_ty: BF16` is rejected
+    /// by [`PtxModule::validate`](crate::ir::PtxModule::validate) with
+    /// [`ValidationError::MmaSyncBf16Rejected`](crate::ir::ValidationError::MmaSyncBf16Rejected);
+    /// emit bf16 mmas through this variant only.
     ///
     /// Example emission:
     /// ```text
@@ -323,39 +330,6 @@ mod tests {
             "{%f4,%f5,%f6,%f7}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};\n",
         );
         assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn emit_mma_sync_m16n8k16_bf16_f32() {
-        // Regression test for the legacy bf16 path: MmaSync with
-        // a_ty/b_ty=BF16 still emits the dtype-tag bf16 instruction.
-        // The preferred path for new code is the dedicated MmaSyncBf16
-        // variant (covered by emit_mma_sync_bf16_m16n8k16 below).
-        let mut alloc = RegisterAllocator::new();
-        let a = alloc_a_f16(&mut alloc);
-        let b = alloc_b_f16(&mut alloc);
-        let c = alloc_c(&mut alloc);
-        let d = alloc_c(&mut alloc);
-
-        let op = TensorCoreOp::MmaSync {
-            d,
-            a,
-            b,
-            c,
-            shape: MmaShape::M16N8K16,
-            d_ty: PtxType::F32,
-            a_ty: PtxType::BF16,
-            b_ty: PtxType::BF16,
-            c_ty: PtxType::F32,
-        };
-
-        let mut w = PtxWriter::new();
-        w.indent();
-        op.emit(&mut w).unwrap();
-        assert!(
-            w.finish()
-                .contains("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32")
-        );
     }
 
     #[test]

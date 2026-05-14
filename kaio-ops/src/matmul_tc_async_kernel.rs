@@ -1115,6 +1115,7 @@ mod tests {
                     "unexpected feature name: {feature}"
                 );
             }
+            other => panic!("expected SmTooLow, got {other:?}"),
         }
     }
 

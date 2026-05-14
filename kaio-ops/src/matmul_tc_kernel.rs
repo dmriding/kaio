@@ -1802,6 +1802,7 @@ mod tests {
                     "feature string should name mma.sync; got: {feature}"
                 );
             }
+            other => panic!("expected SmTooLow, got {other:?}"),
         }
     }
 
