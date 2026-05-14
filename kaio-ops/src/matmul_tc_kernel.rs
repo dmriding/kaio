@@ -60,7 +60,7 @@
 use half::f16;
 use kaio::prelude::*;
 use kaio_core::fragment::{
-    FragmentA, FragmentB, FragmentC, alloc_c, load_fragment_a_m16n8k16_shared_row,
+    FragmentA_F16, FragmentB_F16, FragmentC, alloc_c, load_fragment_a_m16n8k16_shared_row,
     load_fragment_b_m16n8k16_shared_col,
 };
 use kaio_core::instr::control::{CmpOp, ControlOp};
@@ -530,8 +530,8 @@ pub(crate) fn emit_warp_quadrant_mma(
     warp_group_tig: (Register, Register), // Sprint 6.7b D10 hoist: (group_id, tig) for this warp lane
     accs: &mut [FragmentC; 8],
 ) {
-    // Load 2 FragmentA's, one per m_stripe.
-    let mut frags_a: [Option<FragmentA>; MMAS_PER_WARP_M as usize] = [None, None];
+    // Load 2 FragmentA_F16's, one per m_stripe.
+    let mut frags_a: [Option<FragmentA_F16>; MMAS_PER_WARP_M as usize] = [None, None];
     for m_stripe in 0..MMAS_PER_WARP_M {
         let row_off_bytes = m_stripe * BM * TILE_A_ROW_STRIDE_BYTES; // m_stripe * 16 * 32
         let a_stripe_base = if row_off_bytes == 0 {
@@ -557,8 +557,8 @@ pub(crate) fn emit_warp_quadrant_mma(
         frags_a[m_stripe as usize] = Some(frag);
     }
 
-    // Load 4 FragmentB's, one per n_stripe.
-    let mut frags_b: [Option<FragmentB>; MMAS_PER_WARP_N as usize] = [None, None, None, None];
+    // Load 4 FragmentB_F16's, one per n_stripe.
+    let mut frags_b: [Option<FragmentB_F16>; MMAS_PER_WARP_N as usize] = [None, None, None, None];
     for n_stripe in 0..MMAS_PER_WARP_N {
         let col_off_bytes = n_stripe * BN * TILE_B_COL_STRIDE_BYTES; // n_stripe * 8 * padded_col_stride
         let b_stripe_base = if col_off_bytes == 0 {
@@ -1123,7 +1123,7 @@ pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
     // Sprint 6.7b D10 hoist: compute fragment-layout (group_id, tig) ONCE at
     // kernel start and reuse across every emit_warp_quadrant_mma call. Saves
     // 6 × div/rem pairs per K-iter that the fragment loaders would otherwise
-    // recompute internally (2 FragmentA + 4 FragmentB = 6 calls per K-iter).
+    // recompute internally (2 FragmentA_F16 + 4 FragmentB_F16 = 6 calls per K-iter).
     // group_id = tid_x / 4, tig = tid_x % 4.
     let r_hoisted_group_id = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Div {

@@ -12,7 +12,8 @@ use std::fmt;
 
 use crate::emit::{Emit, PtxWriter};
 use crate::fragment::{
-    FragmentA, FragmentA_M16N8K32, FragmentB, FragmentB_M16N8K32, FragmentC, FragmentC_M16N8K32,
+    FragmentA_F16, FragmentA_M16N8K32, FragmentB_F16, FragmentB_M16N8K32, FragmentC,
+    FragmentC_M16N8K32,
 };
 use crate::types::PtxType;
 
@@ -82,9 +83,9 @@ pub enum TensorCoreOp {
         /// Destination (D) fragment — `.f32` accumulator output.
         d: FragmentC,
         /// Input A fragment — `.b32` packed half2 registers.
-        a: FragmentA,
+        a: FragmentA_F16,
         /// Input B fragment — `.b32` packed half2 registers.
-        b: FragmentB,
+        b: FragmentB_F16,
         /// Input C fragment — `.f32` accumulator input.
         c: FragmentC,
         /// Matrix shape (currently only [`MmaShape::M16N8K16`]).
@@ -222,7 +223,7 @@ impl Emit for TensorCoreOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fragment::{alloc_a, alloc_b, alloc_c};
+    use crate::fragment::{alloc_a_f16, alloc_b_f16, alloc_c};
     use crate::ir::RegisterAllocator;
 
     #[test]
@@ -236,8 +237,8 @@ mod tests {
     #[test]
     fn emit_mma_sync_m16n8k16_f16_f32() {
         let mut alloc = RegisterAllocator::new();
-        let a = alloc_a(&mut alloc);
-        let b = alloc_b(&mut alloc);
+        let a = alloc_a_f16(&mut alloc);
+        let b = alloc_b_f16(&mut alloc);
         let c = alloc_c(&mut alloc);
         let d = alloc_c(&mut alloc);
 
@@ -269,8 +270,8 @@ mod tests {
     #[test]
     fn emit_mma_sync_m16n8k16_bf16_f32() {
         let mut alloc = RegisterAllocator::new();
-        let a = alloc_a(&mut alloc);
-        let b = alloc_b(&mut alloc);
+        let a = alloc_a_f16(&mut alloc);
+        let b = alloc_b_f16(&mut alloc);
         let c = alloc_c(&mut alloc);
         let d = alloc_c(&mut alloc);
 
@@ -300,8 +301,8 @@ mod tests {
         let mut alloc = RegisterAllocator::new();
         let op = TensorCoreOp::MmaSync {
             d: alloc_c(&mut alloc),
-            a: alloc_a(&mut alloc),
-            b: alloc_b(&mut alloc),
+            a: alloc_a_f16(&mut alloc),
+            b: alloc_b_f16(&mut alloc),
             c: alloc_c(&mut alloc),
             shape: MmaShape::M16N8K16,
             d_ty: PtxType::F32,
@@ -363,8 +364,8 @@ mod tests {
         let mut alloc = RegisterAllocator::new();
         let instr = PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
             d: alloc_c(&mut alloc),
-            a: alloc_a(&mut alloc),
-            b: alloc_b(&mut alloc),
+            a: alloc_a_f16(&mut alloc),
+            b: alloc_b_f16(&mut alloc),
             c: alloc_c(&mut alloc),
             shape: MmaShape::M16N8K16,
             d_ty: PtxType::F32,

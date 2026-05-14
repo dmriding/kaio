@@ -389,7 +389,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
     // Sprint 6.7b D10 hoist: compute fragment-layout (group_id, tig) ONCE at
     // kernel start, reuse across every emit_warp_quadrant_mma call. Saves
     // 6 × div/rem pairs per K-iter that the fragment loaders would otherwise
-    // recompute internally (2 FragmentA + 4 FragmentB per K-iter).
+    // recompute internally (2 FragmentA_F16 + 4 FragmentB_F16 per K-iter).
     let r_hoisted_group_id = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Div {
         dst: r_hoisted_group_id,

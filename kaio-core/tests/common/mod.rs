@@ -2,7 +2,7 @@
 
 use kaio_core::emit::{Emit, PtxWriter};
 use kaio_core::fragment::{
-    alloc_a, alloc_a_M16N8K32, alloc_b, alloc_b_M16N8K32, alloc_c, alloc_c_M16N8K32,
+    alloc_a_M16N8K32, alloc_a_f16, alloc_b_M16N8K32, alloc_b_f16, alloc_c, alloc_c_M16N8K32,
     load_fragment_a_m16n8k16_shared_row, load_fragment_a_m16n8k32_shared_row,
     load_fragment_b_m16n8k16_shared_col, load_fragment_b_m16n8k32_shared_col,
 };
@@ -275,8 +275,8 @@ pub fn build_mma_sync_ptx(sm: &str) -> String {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("mma_sync_smoke");
 
-    let a = alloc_a(&mut alloc);
-    let b = alloc_b(&mut alloc);
+    let a = alloc_a_f16(&mut alloc);
+    let b = alloc_b_f16(&mut alloc);
     let c = alloc_c(&mut alloc);
     let d = alloc_c(&mut alloc);
 

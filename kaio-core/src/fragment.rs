@@ -5,9 +5,9 @@
 //! shape Phase 6 supports), each of the 32 threads in a warp holds a
 //! fixed slice of the input matrices in registers:
 //!
-//! - **FragmentA** — 4 `.b32` packed-half2 registers per thread
+//! - **FragmentA_F16** — 4 `.b32` packed-half2 registers per thread
 //!   (8 fp16 values total)
-//! - **FragmentB** — 2 `.b32` packed-half2 registers per thread
+//! - **FragmentB_F16** — 2 `.b32` packed-half2 registers per thread
 //!   (4 fp16 values total)
 //! - **FragmentC / FragmentD** — 4 `.f32` registers per thread
 //!
@@ -50,8 +50,9 @@ use crate::ir::{Register, RegisterAllocator};
 ///
 /// Holds 4 × `.b32` packed-half2 registers per thread (8 fp16 values
 /// per thread across the warp → 16×16 matrix in total).
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FragmentA {
+pub struct FragmentA_F16 {
     /// The four `%r` (`.b32`) registers holding the thread's A-fragment
     /// slice. Each register packs two fp16 values. Layout is fixed by
     /// PTX ISA §9.7.13.5.8.1.
@@ -62,8 +63,9 @@ pub struct FragmentA {
 ///
 /// Holds 2 × `.b32` packed-half2 registers per thread (4 fp16 values
 /// per thread across the warp → 16×8 matrix in total).
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FragmentB {
+pub struct FragmentB_F16 {
     /// The two `%r` (`.b32`) registers holding the thread's B-fragment
     /// slice. Each register packs two fp16 values. Layout is fixed by
     /// PTX ISA §9.7.13.5.8.1.
@@ -86,9 +88,9 @@ pub struct FragmentC {
 // 2. Fragment alloc helpers (free functions)
 // ============================================================================
 
-/// Allocate a fresh [`FragmentA`] — four packed-half2 `.b32` registers.
-pub fn alloc_a(alloc: &mut RegisterAllocator) -> FragmentA {
-    FragmentA {
+/// Allocate a fresh [`FragmentA_F16`] — four packed-half2 `.b32` registers.
+pub fn alloc_a_f16(alloc: &mut RegisterAllocator) -> FragmentA_F16 {
+    FragmentA_F16 {
         regs: [
             alloc.alloc_packed_half2(),
             alloc.alloc_packed_half2(),
@@ -98,9 +100,9 @@ pub fn alloc_a(alloc: &mut RegisterAllocator) -> FragmentA {
     }
 }
 
-/// Allocate a fresh [`FragmentB`] — two packed-half2 `.b32` registers.
-pub fn alloc_b(alloc: &mut RegisterAllocator) -> FragmentB {
-    FragmentB {
+/// Allocate a fresh [`FragmentB_F16`] — two packed-half2 `.b32` registers.
+pub fn alloc_b_f16(alloc: &mut RegisterAllocator) -> FragmentB_F16 {
+    FragmentB_F16 {
         regs: [alloc.alloc_packed_half2(), alloc.alloc_packed_half2()],
     }
 }
@@ -355,7 +357,7 @@ pub fn load_fragment_a_m16n8k16_global_row(
     kernel: &mut PtxKernel,
     matrix_base_global: crate::ir::Register,
     tid_x: crate::ir::Register,
-) -> FragmentA {
+) -> FragmentA_F16 {
     let (group_id, tig) = compute_group_thread_ids(alloc, kernel, tid_x);
 
     // off0_u32 = groupID * 32 + threadID_in_group * 4
@@ -397,7 +399,7 @@ pub fn load_fragment_a_m16n8k16_global_row(
     let addr3 =
         u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off_plus_8rows, 16);
 
-    let frag = alloc_a(alloc);
+    let frag = alloc_a_f16(alloc);
     for (reg, addr) in frag.regs.iter().zip([addr0, addr1, addr2, addr3]) {
         kernel.push(PtxInstruction::Memory(MemoryOp::LdGlobal {
             dst: *reg,
@@ -421,7 +423,7 @@ pub fn load_fragment_b_m16n8k16_global_col(
     kernel: &mut PtxKernel,
     matrix_base_global: crate::ir::Register,
     tid_x: crate::ir::Register,
-) -> FragmentB {
+) -> FragmentB_F16 {
     let (group_id, tig) = compute_group_thread_ids(alloc, kernel, tid_x);
 
     // Column stride = 16 fp16 elements = 32 bytes.
@@ -448,7 +450,7 @@ pub fn load_fragment_b_m16n8k16_global_col(
     let addr0 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off, 0);
     let addr1 = u64_addr_from_u32_offset(alloc, kernel, matrix_base_global, base_off, 16);
 
-    let frag = alloc_b(alloc);
+    let frag = alloc_b_f16(alloc);
     for (reg, addr) in frag.regs.iter().zip([addr0, addr1]) {
         kernel.push(PtxInstruction::Memory(MemoryOp::LdGlobal {
             dst: *reg,
@@ -866,7 +868,7 @@ fn u32_shared_addr_from_offset(
 ///   skip the internal `div.u32`/`rem.u32` emit and use the caller-
 ///   supplied `group_id` and `thread_id_in_group` registers instead.
 ///   Callers that invoke multiple fragment loads per warp per K-tile
-///   (e.g. the multi-warp matmul_tc kernel's 2 FragmentA + 4 FragmentB
+///   (e.g. the multi-warp matmul_tc kernel's 2 FragmentA_F16 + 4 FragmentB_F16
 ///   per K-iter) can compute these once at block start and pass them
 ///   here, saving 2 div/rem pairs per extra call. Pass `None` to keep
 ///   the pre-6.7b behaviour (loader computes them internally).
@@ -877,7 +879,7 @@ pub fn load_fragment_a_m16n8k16_shared_row(
     tid_x: crate::ir::Register,
     row_stride_bytes: u32,
     group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
-) -> FragmentA {
+) -> FragmentA_F16 {
     let (group_id, tig) = match group_tig_override {
         Some(pair) => pair,
         None => compute_group_thread_ids(alloc, kernel, tid_x),
@@ -924,7 +926,7 @@ pub fn load_fragment_a_m16n8k16_shared_row(
     let addr3 =
         u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off_plus_8rows, 16);
 
-    let frag = alloc_a(alloc);
+    let frag = alloc_a_f16(alloc);
     for (reg, addr) in frag.regs.iter().zip([addr0, addr1, addr2, addr3]) {
         kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
             dst: *reg,
@@ -966,7 +968,7 @@ pub fn load_fragment_b_m16n8k16_shared_col(
     tid_x: crate::ir::Register,
     col_stride_bytes: u32,
     group_tig_override: Option<(crate::ir::Register, crate::ir::Register)>,
-) -> FragmentB {
+) -> FragmentB_F16 {
     let (group_id, tig) = match group_tig_override {
         Some(pair) => pair,
         None => compute_group_thread_ids(alloc, kernel, tid_x),
@@ -999,7 +1001,7 @@ pub fn load_fragment_b_m16n8k16_shared_col(
     let addr0 = u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off, 0);
     let addr1 = u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, base_off, 16);
 
-    let frag = alloc_b(alloc);
+    let frag = alloc_b_f16(alloc);
     for (reg, addr) in frag.regs.iter().zip([addr0, addr1]) {
         kernel.push(PtxInstruction::Memory(MemoryOp::LdShared {
             dst: *reg,
@@ -1166,7 +1168,7 @@ mod tests {
     #[test]
     fn alloc_a_gives_four_b32_regs() {
         let mut a = RegisterAllocator::new();
-        let frag = alloc_a(&mut a);
+        let frag = alloc_a_f16(&mut a);
         for r in &frag.regs {
             assert_eq!(r.kind, RegKind::R);
             // alloc_packed_half2 tags ptx_type as U32 (b32 at PTX level)
@@ -1182,7 +1184,7 @@ mod tests {
     #[test]
     fn alloc_b_gives_two_b32_regs() {
         let mut a = RegisterAllocator::new();
-        let frag = alloc_b(&mut a);
+        let frag = alloc_b_f16(&mut a);
         for r in &frag.regs {
             assert_eq!(r.kind, RegKind::R);
             assert_eq!(r.ptx_type, PtxType::U32);
@@ -1226,7 +1228,7 @@ mod tests {
                 )
             })
             .count();
-        assert_eq!(n_loads, 4, "expected 4 ld.global.b32 for FragmentA");
+        assert_eq!(n_loads, 4, "expected 4 ld.global.b32 for FragmentA_F16");
     }
 
     #[test]
@@ -1252,7 +1254,7 @@ mod tests {
                 )
             })
             .count();
-        assert_eq!(n_loads, 2, "expected 2 ld.global.b32 for FragmentB");
+        assert_eq!(n_loads, 2, "expected 2 ld.global.b32 for FragmentB_F16");
     }
 
     #[test]
@@ -1306,7 +1308,7 @@ mod tests {
                 )
             })
             .count();
-        assert_eq!(n_loads, 4, "expected 4 ld.shared.b32 for FragmentA");
+        assert_eq!(n_loads, 4, "expected 4 ld.shared.b32 for FragmentA_F16");
 
         // No ld.global in a shared-source load.
         let n_global = kernel
@@ -1341,7 +1343,7 @@ mod tests {
                 )
             })
             .count();
-        assert_eq!(n_loads, 2, "expected 2 ld.shared.b32 for FragmentB");
+        assert_eq!(n_loads, 2, "expected 2 ld.shared.b32 for FragmentB_F16");
     }
 
     #[test]
@@ -1416,8 +1418,8 @@ mod tests {
         // A and B both allocate from %r; C allocates from %f — indices
         // should be sequential within each kind, not collide across.
         let mut a = RegisterAllocator::new();
-        let fa = alloc_a(&mut a);
-        let fb = alloc_b(&mut a);
+        let fa = alloc_a_f16(&mut a);
+        let fb = alloc_b_f16(&mut a);
         let fc = alloc_c(&mut a);
 
         // A used %r0..%r3, B used %r4..%r5

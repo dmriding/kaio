@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn stats_counts_tensor_core_and_cp_async() {
-        use crate::fragment::{alloc_a, alloc_b, alloc_c};
+        use crate::fragment::{alloc_a_f16, alloc_b_f16, alloc_c};
         use crate::instr::MmaShape;
         use crate::ir::RegisterAllocator;
 
@@ -379,8 +379,8 @@ mod tests {
             kernel.push(PtxInstruction::TensorCore(
                 crate::instr::TensorCoreOp::MmaSync {
                     d: alloc_c(&mut alloc),
-                    a: alloc_a(&mut alloc),
-                    b: alloc_b(&mut alloc),
+                    a: alloc_a_f16(&mut alloc),
+                    b: alloc_b_f16(&mut alloc),
                     c: alloc_c(&mut alloc),
                     shape: MmaShape::M16N8K16,
                     d_ty: PtxType::F32,

@@ -563,7 +563,7 @@ fn emit_stage_k_chunk(
 }
 
 // ---------------------------------------------------------------------
-// Runtime-stride FragmentA loader — mirrors
+// Runtime-stride FragmentA_F16 loader — mirrors
 // `kaio_core::fragment::load_fragment_a_m16n8k16_shared_row`'s thread
 // layout but accepts a runtime register for the row stride instead of
 // a compile-time constant. Needed because tile_q's row stride is
@@ -586,8 +586,8 @@ fn emit_load_fragment_a_runtime_stride(
     tile_base_shared: Register, // u32
     tid_x: Register,            // u32
     row_stride_bytes: Register, // u32 runtime value
-) -> kaio_core::fragment::FragmentA {
-    use kaio_core::fragment::FragmentA;
+) -> kaio_core::fragment::FragmentA_F16 {
+    use kaio_core::fragment::FragmentA_F16;
 
     let r_group_id = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Div {
@@ -702,7 +702,7 @@ fn emit_load_fragment_a_runtime_stride(
         ty: PtxType::U32,
     }));
 
-    FragmentA {
+    FragmentA_F16 {
         regs: [reg0, reg1, reg2, reg3],
     }
 }

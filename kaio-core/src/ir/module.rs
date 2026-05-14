@@ -144,7 +144,7 @@ impl std::error::Error for ValidationError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fragment::{alloc_a, alloc_b, alloc_c};
+    use crate::fragment::{alloc_a_f16, alloc_b_f16, alloc_c};
     use crate::instr::{MemoryOp, MmaShape, TensorCoreOp};
     use crate::ir::{PtxInstruction, PtxKernel, Register, RegisterAllocator};
     use crate::types::{PtxType, RegKind};
@@ -162,8 +162,8 @@ mod tests {
         let mut k = PtxKernel::new("has_mma");
         k.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSync {
             d: alloc_c(&mut alloc),
-            a: alloc_a(&mut alloc),
-            b: alloc_b(&mut alloc),
+            a: alloc_a_f16(&mut alloc),
+            b: alloc_b_f16(&mut alloc),
             c: alloc_c(&mut alloc),
             shape: MmaShape::M16N8K16,
             d_ty: PtxType::F32,

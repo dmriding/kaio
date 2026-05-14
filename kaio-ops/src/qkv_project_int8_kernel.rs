@@ -551,7 +551,7 @@ pub(crate) fn emit_fragment_b_int8_per_lane(
     tile_w_shared: Register,
     n_stripe_col_base: Register,
     lane_within_warp: Register,
-) -> kaio_core::fragment::FragmentB {
+) -> kaio_core::fragment::FragmentB_F16 {
     // group_id = lane / 4   (0..8 — N-col within the 8-col fragment)
     let group_id = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Div {
@@ -675,7 +675,7 @@ pub(crate) fn emit_fragment_b_int8_per_lane(
         ty: PtxType::U32,
     });
 
-    kaio_core::fragment::FragmentB { regs: [reg0, reg1] }
+    kaio_core::fragment::FragmentB_F16 { regs: [reg0, reg1] }
 }
 
 /// Per-warp-quadrant tri-output mma sweep for one projection.
@@ -863,7 +863,7 @@ pub(crate) fn emit_warp_quadrant_mma_int8_per_projection_hoisted(
     tile_w_shared_slot: Register,
     warp_quad_col_base_in_tile_w: Register,
     tid_x_in_warp: Register,
-    frag_as: &[kaio_core::fragment::FragmentA; MMAS_PER_WARP_M as usize],
+    frag_as: &[kaio_core::fragment::FragmentA_F16; MMAS_PER_WARP_M as usize],
     frag_c_grid: &mut [[kaio_core::fragment::FragmentC; MMAS_PER_WARP_N as usize];
              MMAS_PER_WARP_M as usize],
 ) {
@@ -919,7 +919,7 @@ pub(crate) fn emit_warp_quadrant_mma_int8_per_projection_hoisted(
 /// K-tile start for the S+½P kernel.
 ///
 /// Sprint 7.3.5 D2 — INV #1 helper. Invoked **once per K-tile**
-/// immediately before the B1 barrier. The returned two `FragmentA`
+/// immediately before the B1 barrier. The returned two `FragmentA_F16`
 /// structs are used by all three projection mma calls (Q, K, V)
 /// within the same K-tile; `tile_x` must stay stable between this
 /// call and the B1 barrier, but may be overwritten by `X_next`
@@ -939,7 +939,7 @@ pub(crate) fn hoist_frag_as_for_warp_quadrant(
     tile_x_shared: Register,
     warp_quad_row_base_in_tile_x: Register,
     tid_x_in_warp: Register,
-) -> [kaio_core::fragment::FragmentA; MMAS_PER_WARP_M as usize] {
+) -> [kaio_core::fragment::FragmentA_F16; MMAS_PER_WARP_M as usize] {
     use kaio_core::fragment::load_fragment_a_m16n8k16_shared_row;
 
     // Pre-compute the warp-quadrant row-offset in bytes.
