@@ -81,18 +81,14 @@
 //! full 25-test correctness suite (`tests/matmul_tc_bf16_async_correctness.rs`).
 //! C3 adds the bench + SC-2 perf-parity gate.
 
-// C1: the build_matmul_tc_bf16_async_module function and its supporting
-// constants are reachable from the test module and from C2's host fn
-// (which lands next commit). Until C2 wires the host fn, lib-only
-// compilation flags them as dead. Remove this attribute at C2.
-#![allow(dead_code)]
-
 use crate::matmul_tc_async_kernel::emit_mw_load_tile_a_64x16_async;
-use crate::matmul_tc_bf16_kernel::emit_warp_quadrant_mma_bf16;
+use crate::matmul_tc_bf16_kernel::{emit_warp_quadrant_mma_bf16, validate_dims_tc_bf16};
 use crate::matmul_tc_kernel::{
     TILE_A_BYTES, TILE_A_ROW_STRIDE_BYTES, TILE_B_BYTES, TILE_B_COL_STRIDE_BYTES,
     emit_mw_load_tile_b_16x64, emit_pre_zero_shared_tiles,
 };
+use half::bf16;
+use kaio::prelude::*;
 use kaio_core::fragment::FragmentC;
 use kaio_core::instr::control::{CmpOp, ControlOp};
 use kaio_core::instr::memory::MemoryOp;
@@ -771,6 +767,95 @@ pub(crate) fn build_matmul_tc_bf16_async_module(sm: &str) -> PtxModule {
     let mut module = PtxModule::new(sm);
     module.add_kernel(kernel);
     module
+}
+
+/// Double-buffered tensor-core matmul — bf16 × bf16 → f32 with fp32
+/// accumulation, cp.async-pipelined A staging, multi-warp 64×64 block tile.
+///
+/// Sprint 9.1.1 — the async sibling of
+/// [`crate::matmul_tc_bf16`](crate::matmul_tc_bf16). Same multi-warp
+/// 64×64 block tile structure, edge-tile predication on M and N (only
+/// `K % 16 == 0` is enforced — the mma K-tile is structural), and same
+/// `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` instance via
+/// the dedicated [`kaio_core::instr::TensorCoreOp::MmaSyncBf16`] IR
+/// variant.
+///
+/// The async path overlaps the K-loop's A-tile loads with the
+/// previous iteration's mma compute via `cp.async.ca.shared.global`
+/// double-buffering (Sprint 6.7c pattern applied to bf16). The B-tile
+/// staging stays synchronous since the row-major → column-major
+/// transpose is a strided gather `cp.async` cannot express.
+///
+/// Semantically equivalent to [`crate::matmul_tc_bf16`] on the same
+/// inputs; ships alongside it so the future
+/// `matmul_auto_tc_bf16` auto-tuner (Sprint 9.1.2) can dispatch
+/// between the two based on profile data.
+///
+/// # Dimension constraint
+///
+/// Requires `K % 16 == 0`. M and N may be any positive value
+/// (edge-tile predication handles non-multiple-of-64). Returns
+/// [`KaioError::InvalidConfig`] otherwise. Validation shared with the
+/// sync sibling via
+/// [`crate::matmul_tc_bf16_kernel::validate_dims_tc_bf16`].
+///
+/// # Hardware requirement
+///
+/// SM 8.0+ (Ampere) — required by both `mma.sync.bf16` and
+/// `cp.async.ca`. Sub-Ampere targets are rejected by
+/// [`PtxModule::validate()`](kaio_core::ir::PtxModule::validate) via
+/// [`ValidationError::SmTooLow`](kaio_core::ir::ValidationError::SmTooLow)
+/// before driver dispatch.
+///
+/// # Layout
+///
+/// A is M×K row-major, B is K×N row-major, D is M×N row-major. B is
+/// transposed on the way into shared memory (column-major) by the
+/// reused `pub(crate)` tile-B loader from
+/// [`crate::matmul_tc_kernel`] — bf16 byte layout is bit-identical to
+/// f16 in shared memory, so the same loader works for both precisions.
+pub fn matmul_tc_bf16_async(
+    device: &KaioDevice,
+    a: &GpuBuffer<bf16>,
+    b: &GpuBuffer<bf16>,
+    c: &mut GpuBuffer<f32>,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<()> {
+    use cudarc::driver::{LaunchConfig, PushKernelArg};
+
+    validate_dims_tc_bf16(a, b, c, m, n, k)?;
+
+    let info = device.info()?;
+    let (major, minor) = info.compute_capability;
+    let sm = format!("sm_{major}{minor}");
+    let module = build_matmul_tc_bf16_async_module(&sm);
+
+    let kmodule = device.load_module(&module)?;
+    let func = kmodule.function("matmul_tc_bf16_async")?;
+
+    let grid = (n.div_ceil(BN_BLOCK), m.div_ceil(BM_BLOCK), 1);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (32, WARPS_PER_BLOCK, 1),
+        shared_mem_bytes: 0,
+    };
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(func.inner())
+            .arg(a.inner())
+            .arg(b.inner())
+            .arg(c.inner_mut())
+            .arg(&m)
+            .arg(&n)
+            .arg(&k)
+            .launch(cfg)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

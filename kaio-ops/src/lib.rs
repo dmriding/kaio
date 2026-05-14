@@ -106,6 +106,15 @@ pub use matmul_tc_kernel::matmul_tc;
 // land in sub-sprints 9.1.1–9.1.5.
 pub use matmul_tc_bf16_kernel::matmul_tc_bf16;
 
+// Sprint 9.1.1 — bf16 × bf16 → f32 cp.async-pipelined tensor-core
+// matmul. Async sibling of `matmul_tc_bf16`; cross-product of (f16
+// async × bf16 sync). Same 64×64 block tile / 4-warp 32×32 quadrant
+// / edge-tile predication / Sprint 6.7b D10 fragment hoist as the
+// sync sibling, with double-buffered `cp.async.ca` A staging
+// overlapping the K-loop's memory fetch with the previous iteration's
+// mma compute. Requires SM 8.0+ and K%16==0.
+pub use matmul_tc_bf16_async_kernel::matmul_tc_bf16_async;
+
 // Sprint 7.1 — INT8 symmetric dequantize-matmul (W8A8, i8 × i8 → f32).
 // Path FAST: direct mma.sync.m16n8k32.s8.s8.s32 with s32 accumulator,
 // single global scalar scale applied post-accumulation. Reference quant
