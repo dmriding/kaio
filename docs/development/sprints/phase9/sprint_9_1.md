@@ -63,10 +63,11 @@ mnemonic, no `a_ty`/`b_ty` parameters). Takes `FragmentA_BF16` /
 accumulator. Emits
 `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. `min_sm()`
 returns 80; `feature_label()` returns
-`"mma.sync.m16n8k16.bf16.bf16.f32"`. The existing
-`emit_mma_sync_m16n8k16_bf16_f32` test on the generic-`MmaSync`
-dtype-tag path is preserved as a regression check; a new
+`"mma.sync.m16n8k16.bf16.bf16.f32"`. A new
 `emit_mma_sync_bf16_m16n8k16` test exercises the dedicated variant.
+(The pre-9.1 `emit_mma_sync_m16n8k16_bf16_f32` regression check on the
+generic-`MmaSync` dtype-tag path landed in 9.1's C2 and was retired in
+the post-delivery cleanup — see § "Post-delivery cleanup pass".)
 
 Companion bf16 shared-mem loaders
 (`load_fragment_a_m16n8k16_shared_row_bf16` /
@@ -258,11 +259,16 @@ stratified correctness grid, SC-2 split-bound gate) held.
   sites become a compile error rather than a silent dtype-tag mismatch"
   was only true for callers using `MmaSyncBf16`. The legacy generic
   `MmaSync` path still accepted `a_ty: BF16, b_ty: BF16` paired with
-  `FragmentA_F16` / `FragmentB_F16` operands and emitted the bf16
+  `FragmentA_F16` / `FragmentB_F16` operands and produced the bf16
   instruction. Fixed by adding `ValidationError::MmaSyncBf16Rejected`
-  and a target-agnostic validator that fires regardless of SM target.
-  The pre-9.1 emit regression test (which documented the footgun) is
-  retired; three new validation tests assert rejection.
+  and a target-agnostic check in `PtxModule::validate` that fires
+  regardless of SM target. The enforcement boundary is at module-load
+  time — the same boundary the existing SM-target check lives at — so
+  raw `Emit::emit` callers below `PtxModule::validate` can still
+  produce the legacy string; every shipped public host-launch path
+  invokes `validate` before driver dispatch. The pre-9.1 emit
+  regression test (which documented the footgun) is retired; three
+  new validation tests assert rejection.
 - **D5 near-denorm coverage (medium).** The `near_denorm` class name
   promised bf16 min-normal / subnormal coverage; the actual generator
   used `[1e-18, ~1.94e-18]`, which are normal bf16 values 20 orders of
@@ -286,10 +292,16 @@ stratified correctness grid, SC-2 split-bound gate) held.
   current `lib.rs` export surface — every shipped op now appears
   with min-SM + divisibility constraints.
 
-The two medium findings genuinely improved the sprint deliverable
-(the IR fix delivers on the type-safety claim that was previously
-only partially true; the new `min_normal` class actually closes the
-R-9.1-BF16-DENORM risk identified at plan time). The two low findings
+The two medium findings genuinely improved the sprint deliverable —
+the IR fix tightens the type-safety claim from "partially true" to
+"true at the `PtxModule::validate` boundary that all public host-launch
+paths run through" (raw `Emit::emit` callers below that boundary can
+still produce the legacy string, matching the SM-check convention),
+and the new `min_normal` class closes the **min-normal-band / FTZ-on-
+load** failure mode that R-9.1-BF16-DENORM was framed around (true
+subnormal coverage — inputs `< 1.175e-38` — remains future work; the
+test class deliberately stays one decade above the subnormal boundary
+to keep the f32 accumulator in normal range). The two low findings
 were release hygiene. None of the four required reopening the
 correctness grid, the SC-2 methodology, or the kernel itself.
 

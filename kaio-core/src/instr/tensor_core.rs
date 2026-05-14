@@ -92,14 +92,21 @@ pub enum TensorCoreOp {
         shape: MmaShape,
         /// D element type (currently `F32`).
         d_ty: PtxType,
-        /// A element type (must be `PtxType::F16`). Bf16 emission uses
-        /// the dedicated [`MmaSyncBf16`](Self::MmaSyncBf16) variant;
+        /// A element type. Expected to be `PtxType::F16`; bf16 emission
+        /// uses the dedicated [`MmaSyncBf16`](Self::MmaSyncBf16) variant.
+        /// The enforcement boundary is at module-load time:
         /// [`PtxModule::validate`](crate::ir::PtxModule::validate)
         /// rejects `PtxType::BF16` here with
-        /// [`ValidationError::MmaSyncBf16Rejected`](crate::ir::ValidationError::MmaSyncBf16Rejected).
+        /// [`ValidationError::MmaSyncBf16Rejected`](crate::ir::ValidationError::MmaSyncBf16Rejected),
+        /// matching the convention used by the SM-target capability checks
+        /// (also validated at module-load, not at raw emit). Direct
+        /// `Emit::emit()` of a `MmaSync` carrying a BF16 dtype tag will
+        /// still produce the corresponding PTX string — callers using
+        /// the IR below the [`PtxModule`](crate::ir::PtxModule) boundary
+        /// must invoke validation themselves.
         a_ty: PtxType,
-        /// B element type (must be `PtxType::F16`). Same constraint as
-        /// `a_ty`.
+        /// B element type. Same expectation and enforcement-boundary
+        /// note as `a_ty`.
         b_ty: PtxType,
         /// C element type (currently `F32`).
         c_ty: PtxType,
@@ -155,9 +162,14 @@ pub enum TensorCoreOp {
     /// Introduced in Sprint 9.1 per the D2.5 sibling-IR-variant decision —
     /// mirrors the `MmaSyncInt8` precedent. The legacy route of constructing
     /// [`MmaSync`](Self::MmaSync) with `a_ty: BF16, b_ty: BF16` is rejected
-    /// by [`PtxModule::validate`](crate::ir::PtxModule::validate) with
+    /// at module-load time by
+    /// [`PtxModule::validate`](crate::ir::PtxModule::validate) with
     /// [`ValidationError::MmaSyncBf16Rejected`](crate::ir::ValidationError::MmaSyncBf16Rejected);
-    /// emit bf16 mmas through this variant only.
+    /// callers that drive `Emit::emit()` directly without going through
+    /// `PtxModule::validate` can still produce the legacy bf16 string,
+    /// matching the SM-check convention. Public host-launch paths run
+    /// validation before driver dispatch, so shipped kernels are
+    /// protected. New bf16 mmas should go through this variant.
     ///
     /// Example emission:
     /// ```text
