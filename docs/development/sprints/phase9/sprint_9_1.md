@@ -246,23 +246,73 @@ inputs); the bf16-vs-f16 column is apples-to-apples. The
 `cublasGemmEx`-bf16 future reference is tracked in
 `docs/development/tech_debt.md`.
 
+## Post-delivery cleanup pass (2026-05-14)
+
+After C9 closed the sprint, a post-delivery audit surfaced two real
+gaps the original sprint had missed plus two doc-precision items. All
+four were closed in a five-commit cleanup series on the same branch;
+the underlying methodology (D2 sibling-IR design, D5 magnitude-
+stratified correctness grid, SC-2 split-bound gate) held.
+
+- **IR type-safety boundary (medium).** The 9.1 claim that "bf16 call
+  sites become a compile error rather than a silent dtype-tag mismatch"
+  was only true for callers using `MmaSyncBf16`. The legacy generic
+  `MmaSync` path still accepted `a_ty: BF16, b_ty: BF16` paired with
+  `FragmentA_F16` / `FragmentB_F16` operands and emitted the bf16
+  instruction. Fixed by adding `ValidationError::MmaSyncBf16Rejected`
+  and a target-agnostic validator that fires regardless of SM target.
+  The pre-9.1 emit regression test (which documented the footgun) is
+  retired; three new validation tests assert rejection.
+- **D5 near-denorm coverage (medium).** The `near_denorm` class name
+  promised bf16 min-normal / subnormal coverage; the actual generator
+  used `[1e-18, ~1.94e-18]`, which are normal bf16 values 20 orders of
+  magnitude above min-normal (~1.175e-38). Renamed to `tiny_product`
+  (accurate to what the data actually is — both operands normal,
+  per-element products `~1e-36`) and added a new `min_normal` class
+  with asymmetric magnitudes — A in bf16's min-normal band `~2e-38`,
+  B large positive `~1e10`, products `~2e-28` in normal-f32 range.
+  4 new tests at 32³/64³/256³/512³; bf16 correctness suite goes
+  21 → 25 tests.
+- **Stale SC-2 gate wording (low).** The post-methodology-evolution
+  SC-2 split-bound gate (median ±3% + worst ±15%) was inconsistently
+  described — this sprint doc, the Phase 9 log, and the xtask bench
+  description still carried "worst-of-10 ±5%". Swept.
+- **Public-doc discoverability (low).** `matmul_tc_bf16` was not
+  surfaced in `README.md` or `kaio-ops/README.md` (the latter was
+  several sprints stale, listing only scalar matmul + scalar
+  attention). Added the bf16 row to the root README feature table
+  (API + constraints; perf table deferred to v0.5.0 per the
+  master-plan rule) and refreshed `kaio-ops/README.md` against the
+  current `lib.rs` export surface — every shipped op now appears
+  with min-SM + divisibility constraints.
+
+The two medium findings genuinely improved the sprint deliverable
+(the IR fix delivers on the type-safety claim that was previously
+only partially true; the new `min_normal` class actually closes the
+R-9.1-BF16-DENORM risk identified at plan time). The two low findings
+were release hygiene. None of the four required reopening the
+correctness grid, the SC-2 methodology, or the kernel itself.
+
 ## Tests
 
 - 4 new `kaio-core` host unit tests: `alloc_a_bf16_*`,
   `alloc_b_bf16_*`, `load_fragment_a_bf16_shared_*`,
   `load_fragment_b_bf16_shared_*`.
 - 2 new `tensor_core` host unit tests: `emit_mma_sync_bf16_m16n8k16`
-  + `min_sm_and_feature_label_bf16`.
+  + `min_sm_and_feature_label_bf16` (the prior legacy
+  `emit_mma_sync_m16n8k16_bf16_f32` regression test was retired in
+  the post-delivery cleanup).
+- 4 new `ir::module` validation tests asserting the new
+  `MmaSyncBf16Rejected` variant fires correctly.
 - 1 new `ptxas_verify` GPU-toolkit test: `ptxas_verify_mma_sync_bf16_shared`.
 - 10 new `kaio-ops` host unit tests for the bf16 kernel module
   (validate_dims, module build / SM gating / structure / D4
   cvt-free hot-path gate).
-- 21 new bf16 correctness tests (`#[ignore]`-gated, GPU required).
+- 25 new bf16 correctness tests (`#[ignore]`-gated, GPU required) —
+  shape × magnitude grid including the post-review `min_normal`
+  asymmetric-magnitude class.
 - 1 new bf16 vs f16 bench test (`#[ignore]`-gated, GPU + CUDA toolkit
   required, includes the SC-2 hard assertion in release builds).
-
-Workspace host-test total: 414 passed / 0 failed at C5 close
-(was 404 before 9.1).
 
 ## What didn't change
 
