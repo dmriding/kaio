@@ -256,7 +256,7 @@ acceptance at sm_80 / sm_89 / sm_90.
   backward (via forward-reuse — no saved intermediates needed,
   since matmul bwd recomputes via two extra forward calls
   `grad_a = grad_out @ b^T`, `grad_b = a^T @ grad_out`), and
-  async-candle. Independent of 9.1.2; can ship in parallel if needed.
+  async-candle. Follows 9.1.2 per the phase master plan chain.
 
 None of these block 9.2 (FA backward, v0.5.0 hard gate) or 9.3
 (`ldmatrix.sync.aligned`). The chain continues as scheduling permits.

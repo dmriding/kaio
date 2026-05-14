@@ -35,8 +35,8 @@
 //! toolchain/driver variations on its own.
 //!
 //! Historical f16_async numbers (from prior runs of this bench) are
-//! informational only — see the soft-warning paragraph below the
-//! SC-2 verdict.
+//! informational only — the same-run f16_async median is printed
+//! after the SC-2 verdict as a reference value for manual comparison.
 //!
 //! Run with:
 //! ```sh
@@ -446,8 +446,7 @@ fn benchmark_matmul_tc_bf16_async() {
     let worst_delta_pct = worst_ratio_pct - 100.0;
 
     // Same-run f16_async TFLOPS median, useful as a forward-looking
-    // local-reference data point for future runs to compare against
-    // (the soft historical-drift WARNING from § D3 of the plan).
+    // local-reference data point for future runs to compare against.
     let f16_async_median_tflops = {
         let mut f16_tfs: Vec<f64> = iter_samples
             .iter()
