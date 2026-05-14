@@ -8,11 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Sprint 9.1: bf16 tensor-core matmul
+## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1)
 
 ### Added
 
-- `kaio_ops::matmul_tc_bf16` — sync tensor-core matmul for bf16 × bf16
+- `kaio_ops::matmul_tc_bf16_async` (Sprint 9.1.1) — cp.async-pipelined
+  tensor-core matmul for bf16 × bf16 → f32. Async sibling of
+  `matmul_tc_bf16`; cross-product of (f16 async × bf16 sync) on the
+  matmul precision-vs-staging table. Same 64×64 block tile / 4-warp
+  32×32 quadrant / Sprint 6.7b padded Tile B / D10 fragment hoist as
+  the sync sibling, with double-buffered `cp.async.ca` A staging
+  overlapping the K-loop's memory fetch with the previous iteration's
+  mma compute. Reuses the precision-agnostic async A-tile loader from
+  `matmul_tc_async` and the dedicated bf16 mma helper from
+  `matmul_tc_bf16` (both promoted to `pub(crate)` at C0). Requires
+  SM 8.0+ (Ampere) and `K % 16 == 0`. Auto-tuner integration ships
+  in a future sub-sprint.
+- 25-test bf16-async correctness suite
+  (`kaio-ops/tests/matmul_tc_bf16_async_correctness.rs`) mirroring the
+  Sprint 9.1 D5 grid — same shape × magnitude coverage, same
+  shape-scoped reference strategy (dense f64 small/medium,
+  sampled-cell f64 large), same tolerances. Data generators and
+  assertions imported from the existing `tests/common/mod.rs`; the
+  test file owns its own per-flavor launch + runner wrappers (matches
+  the existing `matmul_tc_bf16_correctness.rs` pattern).
+- bf16-async vs f16-async bench
+  (`kaio-ops/tests/matmul_tc_bf16_async_bench.rs`) registered with
+  `cargo xtask bench`. Sprint 9.1.1 SC-2 split-bound perf-parity gate
+  at 4096³: 10 interleaved alternating-order runs, median ratio ±3%
+  AND worst ratio ±15% on the bf16_async/f16_async TFLOPS ratio. Both
+  bounds enforced; debug-build guard skips the hard assertion in
+  `cfg!(debug_assertions)`. On RTX 4090 sm_89 the gate held with
+  substantial headroom — median +0.72%, worst +1.55% — confirming
+  the kernels are structurally equivalent with only the mma operand
+  dtype tag differing.
+- `kaio_ops::matmul_tc_bf16` (Sprint 9.1) — sync tensor-core matmul for bf16 × bf16
   → f32. Sibling of `matmul_tc` with byte-identical kernel structure
   (64×64 block tile, 4-warp 32×32 quadrants, Sprint 6.7b
   bank-conflict-padded Tile B, D10 fragment-loader hoist). Edge-tile

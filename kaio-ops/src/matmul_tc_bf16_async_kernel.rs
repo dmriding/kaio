@@ -796,8 +796,8 @@ pub(crate) fn build_matmul_tc_bf16_async_module(sm: &str) -> PtxModule {
 /// Requires `K % 16 == 0`. M and N may be any positive value
 /// (edge-tile predication handles non-multiple-of-64). Returns
 /// [`KaioError::InvalidConfig`] otherwise. Validation shared with the
-/// sync sibling via
-/// [`crate::matmul_tc_bf16_kernel::validate_dims_tc_bf16`].
+/// sync sibling via `matmul_tc_bf16_kernel::validate_dims_tc_bf16`
+/// (private; see source).
 ///
 /// # Hardware requirement
 ///
@@ -811,9 +811,9 @@ pub(crate) fn build_matmul_tc_bf16_async_module(sm: &str) -> PtxModule {
 ///
 /// A is M×K row-major, B is K×N row-major, D is M×N row-major. B is
 /// transposed on the way into shared memory (column-major) by the
-/// reused `pub(crate)` tile-B loader from
-/// [`crate::matmul_tc_kernel`] — bf16 byte layout is bit-identical to
-/// f16 in shared memory, so the same loader works for both precisions.
+/// reused `pub(crate)` tile-B loader from `matmul_tc_kernel` (private
+/// module; see source) — bf16 byte layout is bit-identical to f16 in
+/// shared memory, so the same loader works for both precisions.
 pub fn matmul_tc_bf16_async(
     device: &KaioDevice,
     a: &GpuBuffer<bf16>,

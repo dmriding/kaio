@@ -19,6 +19,7 @@ on Volta+ (RTX 2000 / V100 and up).
 | `matmul_tc` | f16 × f16 → f32 | 8.0+ | `K % 16 == 0` | Synchronous tensor-core path. 4-warp 32×32 quadrant, 8× `mma.sync.m16n8k16` per K-tile, bank-conflict-padded shared Tile B. |
 | `matmul_tc_async` | f16 × f16 → f32 | 8.0+ | `K % 16 == 0` | Async sibling of `matmul_tc` — overlaps shared-tile loads with compute via `cp.async`. |
 | `matmul_tc_bf16` | bf16 × bf16 → f32 | 8.0+ | `K % 16 == 0` | bf16 tensor-core sync matmul (Sprint 9.1). Same layout as `matmul_tc` with `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` on the hot path. |
+| `matmul_tc_bf16_async` | bf16 × bf16 → f32 | 8.0+ | `K % 16 == 0` | bf16 tensor-core async matmul (Sprint 9.1.1). cp.async-pipelined sibling of `matmul_tc_bf16` — cross-product of (f16 async × bf16 sync). Same staging contracts as `matmul_tc_async` with `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` on the hot path. |
 | `matmul_int8` | i8 × i8 → f32 | 8.0+ | `K % 32 == 0` | W8A8 symmetric dequant-matmul with a single scalar scale applied post-accumulation. Uses `mma.sync.m16n8k32.s8.s8.s32`. |
 | `matmul_int4` | packed-s4 × f16 → f32 | 8.0+ | `K % 128 == 0`, `group_size = 128` | W4A16 GPTQ-style: 4-bit signed weights, f16 activations, f16 per-group scales. Dequant-to-f16 path through `mma.sync.m16n8k16`. Reference quant op — not a drop-in for external GPTQ/GGUF formats. |
 
