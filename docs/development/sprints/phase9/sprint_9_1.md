@@ -154,11 +154,15 @@ via an inline LCG (no new dev-dep).
 `matmul_tc_bench.rs` methodology (5 warm-ups + 20 timed iterations,
 median per run), benches bf16 sync + f16 sync + cuBLAS sgemm
 reference across the same shape sweep (256³ → 4096³).
-**SC-2 perf-parity gate** at 4096³ uses worst-of-10 consecutive runs
-per kernel and asserts bf16-sync within ±5% of f16-sync. Debug-build
-guard skips the hard assertion when launch-overhead variance
-dominates the measurement; the canonical reproduction is
+**SC-2 perf-parity gate** at 4096³ uses 10 alternating-order
+interleaved runs (per-iter bf16/f16 TFLOPS ratio) and asserts a
+split bound: median ratio within ±3% (structural-kernel gate) AND
+worst ratio within ±15% (catastrophic-tail gate). Both bounds must
+hold. Debug-build guard skips the hard assertion when launch-overhead
+variance dominates the measurement; the canonical reproduction is
 `cargo xtask bench matmul_tc_bf16_bench` (release-mode by default).
+Methodology evolution from the plan-locked "worst-of-10 ±5%" gate
+is documented in the § "Methodology evolution" section below.
 
 **First bench numbers (RTX 4090 sm_89, release mode):**
 

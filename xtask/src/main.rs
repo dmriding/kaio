@@ -242,7 +242,7 @@ const BENCHES: &[(&str, &str, &str)] = &[
     (
         "=== Matmul tensor-core benchmark (KAIO bf16 × bf16 → f32 vs f16 + cuBLAS sgemm) ===",
         "matmul_tc_bf16_bench",
-        "bf16 × bf16 → f32 TC sync vs f16 sync; Sprint 9.1 SC-2 ±5% perf-parity gate at 4096³",
+        "bf16 × bf16 → f32 TC sync vs f16 sync; Sprint 9.1 SC-2 split-bound perf-parity gate (median ±3% + worst ±15%) at 4096³",
     ),
     (
         "=== matmul_int8 benchmark (KAIO i8 × i8 → f32 vs cuBLAS sgemm, rough reference) ===",
