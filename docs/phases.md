@@ -354,7 +354,9 @@ recomputation, tiled Q/K/V backward, causal mask in reverse) and
 further kernel improvements (bf16 TC matmul variant, `ldmatrix.sync`
 for additional TC headroom).
 
-**Status:** Planned
+**Status:** In progress — Sprint 9.1 (bf16 sync TC matmul) shipped
+2026-05-14; the v0.5.0 aggregate release lands after 9.2
+(FlashAttention backward) and 9.3 (`ldmatrix.sync.aligned`) ship.
 
 **Depends on:** Phase 8 complete (pointer-syntax prelude landed as
 Sprint 8.0; Phase 9 kernel work can proceed in parallel with Phase 8
