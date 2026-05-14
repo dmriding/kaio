@@ -2,15 +2,15 @@
 //!
 //! Full D5 grid: shape × magnitude with shape-scoped reference strategy.
 //!
-//! | Shape class           | Magnitudes run                            | Reference        |
-//! |-----------------------|-------------------------------------------|------------------|
-//! | Small (32³, 64³)      | small / medium / large / near-denorm      | dense f64        |
-//! | Medium (256³, 512³)   | small / medium / large / near-denorm      | dense f64        |
-//! | Large 2048³           | small + one large smoke                   | sampled-cell f64 |
-//! | Large 4096³           | small only (also the bench shape)         | sampled-cell f64 |
-//! | Non-square / odd-N    | small only (edge-tile predication)        | dense f64        |
+//! | Shape class           | Magnitudes run                                            | Reference        |
+//! |-----------------------|-----------------------------------------------------------|------------------|
+//! | Small (32³, 64³)      | small / medium / large / tiny_product / min_normal        | dense f64        |
+//! | Medium (256³, 512³)   | small / medium / large / tiny_product / min_normal        | dense f64        |
+//! | Large 2048³           | small + one large smoke                                   | sampled-cell f64 |
+//! | Large 4096³           | small only (also the bench shape)                         | sampled-cell f64 |
+//! | Non-square / odd-N    | small only (edge-tile predication)                        | dense f64        |
 //!
-//! Total: 8 small + 8 medium + 2 large 2048³ + 1 large 4096³ + 2 non-square = 21 tests.
+//! Total: 10 small + 10 medium + 2 large 2048³ + 1 large 4096³ + 2 non-square = 25 tests.
 //!
 //! Magnitudes:
 //! - **small:** `[-0.5, 0.5]` patterned (within `[-1, 1]`).
@@ -18,23 +18,33 @@
 //! - **large:** patterned × 2e14 → peak `|x| ≈ 1e14` — caps at the
 //!   level that keeps `|a| × |b| × K` under f32 max in the accumulator
 //!   while exercising bf16's full f32-style exponent range.
-//! - **near-denorm:** positive-only `[1e-18, ~1.94e-18]` — the
-//!   positive bias keeps products from cancelling to zero so the
-//!   nonzero-output assertion has signal.
+//! - **tiny_product:** positive-only `[1e-18, ~1.94e-18]`. Both operands
+//!   are normal bf16 values; per-element products `~1e-36` exercise the
+//!   underflow-during-mul / underflow-during-accumulate bug classes.
+//!   The positive bias keeps products from cancelling.
+//! - **min_normal:** asymmetric — A positive-only `[2e-38, ~3.88e-38]`
+//!   (bf16's min-normal exponent band, just above the
+//!   `~1.175e-38` normal/subnormal boundary), B positive-only
+//!   `[1e10, ~1.94e10]`. Per-element products are `~2e-28` (normal-f32
+//!   range), so the f32 accumulator does not underflow. This is the
+//!   bf16-min-normal canary — catches an implementation that flushes
+//!   min-normal inputs to zero before the mma.sync.
 //!
 //! Tolerances:
 //! - **standard (small/medium/large mag):** `rel_err < 1e-2 || abs_err < 1e-3`.
-//! - **near-denorm:** `rel_err < 1e-1` only + nonzero-output assertion
-//!   (the latter is the "kernel returns zero on small inputs" canary).
+//! - **tiny_product / min_normal:** `rel_err < 1e-1` only + nonzero-output
+//!   assertion (the latter is the "kernel returns zero on small inputs"
+//!   canary that catches FTZ-on-load / internal-underflow bug classes).
 
 use kaio::prelude::*;
 use kaio_ops::matmul_tc_bf16;
 
 mod common;
 use common::{
-    assert_bf16_close_d5, assert_bf16_close_d5_near_denorm, assert_bf16_close_d5_sampled,
-    cpu_matmul_bf16xbf16_f64, patterned_bf16_data, patterned_bf16_magnitude,
-    patterned_bf16_near_denorm, sample_cells, sampled_cell_f64_reference,
+    assert_bf16_close_d5, assert_bf16_close_d5_relative_only, assert_bf16_close_d5_sampled,
+    cpu_matmul_bf16xbf16_f64, patterned_bf16_data, patterned_bf16_large_positive,
+    patterned_bf16_magnitude, patterned_bf16_min_normal, patterned_bf16_tiny_product, sample_cells,
+    sampled_cell_f64_reference,
 };
 
 // ----------------------------------------------------------------------------
@@ -71,8 +81,10 @@ fn launch_bf16(
 }
 
 /// Dense f64 reference + D5 standard tolerance. Used at small/medium
-/// shapes for all four magnitude classes (modulo near-denorm which
-/// uses [`run_dense_near_denorm`]).
+/// shapes for the small/medium/large magnitude classes. The
+/// tiny-product and min-normal classes route through
+/// [`run_dense_tiny_product`] and [`run_dense_min_normal`] respectively
+/// since their tolerance is relative-only with a nonzero-output gate.
 fn run_dense(
     m: usize,
     n: usize,
@@ -87,14 +99,28 @@ fn run_dense(
     assert_bf16_close_d5(&got, &expected, m, n, label);
 }
 
-/// Dense f64 reference + D5 near-denorm tolerance + nonzero-output gate.
-fn run_dense_near_denorm(m: usize, n: usize, k: usize, label: &str) {
-    let a_host = patterned_bf16_near_denorm(m * k);
-    let b_host = patterned_bf16_near_denorm(k * n);
+/// Dense f64 reference + relative-only tolerance + nonzero-output gate
+/// for the tiny-product class (both operands `~1e-18`, products
+/// `~1e-36`).
+fn run_dense_tiny_product(m: usize, n: usize, k: usize, label: &str) {
+    let a_host = patterned_bf16_tiny_product(m * k);
+    let b_host = patterned_bf16_tiny_product(k * n);
     let device = require_gpu_ampere(label);
     let got = launch_bf16(&device, &a_host, &b_host, m, n, k, label);
     let expected = cpu_matmul_bf16xbf16_f64(&a_host, &b_host, m, n, k);
-    assert_bf16_close_d5_near_denorm(&got, &expected, m, n, label);
+    assert_bf16_close_d5_relative_only(&got, &expected, m, n, label);
+}
+
+/// Dense f64 reference + relative-only tolerance + nonzero-output gate
+/// for the min-normal class (A in bf16's min-normal band `~2e-38`, B
+/// large positive `~1e10`, products `~2e-28` in normal-f32 range).
+fn run_dense_min_normal(m: usize, n: usize, k: usize, label: &str) {
+    let a_host = patterned_bf16_min_normal(m * k);
+    let b_host = patterned_bf16_large_positive(k * n, 1e10);
+    let device = require_gpu_ampere(label);
+    let got = launch_bf16(&device, &a_host, &b_host, m, n, k, label);
+    let expected = cpu_matmul_bf16xbf16_f64(&a_host, &b_host, m, n, k);
+    assert_bf16_close_d5_relative_only(&got, &expected, m, n, label);
 }
 
 /// Sampled-cell f64 reference + D5 standard tolerance. Used at large
@@ -119,7 +145,7 @@ fn run_sampled(
 }
 
 // ----------------------------------------------------------------------------
-// Small shapes (32³, 64³) — all four magnitude classes, dense f64 reference
+// Small shapes (32³, 64³) — all five magnitude classes, dense f64 reference
 // ----------------------------------------------------------------------------
 
 #[test]
@@ -166,8 +192,14 @@ fn tc_bf16_32_32_32_large() {
 
 #[test]
 #[ignore]
-fn tc_bf16_32_32_32_near_denorm() {
-    run_dense_near_denorm(32, 32, 32, "32_32_32_near_denorm");
+fn tc_bf16_32_32_32_tiny_product() {
+    run_dense_tiny_product(32, 32, 32, "32_32_32_tiny_product");
+}
+
+#[test]
+#[ignore]
+fn tc_bf16_32_32_32_min_normal() {
+    run_dense_min_normal(32, 32, 32, "32_32_32_min_normal");
 }
 
 #[test]
@@ -214,12 +246,18 @@ fn tc_bf16_64_64_64_large() {
 
 #[test]
 #[ignore]
-fn tc_bf16_64_64_64_near_denorm() {
-    run_dense_near_denorm(64, 64, 64, "64_64_64_near_denorm");
+fn tc_bf16_64_64_64_tiny_product() {
+    run_dense_tiny_product(64, 64, 64, "64_64_64_tiny_product");
+}
+
+#[test]
+#[ignore]
+fn tc_bf16_64_64_64_min_normal() {
+    run_dense_min_normal(64, 64, 64, "64_64_64_min_normal");
 }
 
 // ----------------------------------------------------------------------------
-// Medium shapes (256³, 512³) — all four magnitude classes, dense f64 reference
+// Medium shapes (256³, 512³) — all five magnitude classes, dense f64 reference
 // ----------------------------------------------------------------------------
 
 #[test]
@@ -266,8 +304,14 @@ fn tc_bf16_256_256_256_large() {
 
 #[test]
 #[ignore]
-fn tc_bf16_256_256_256_near_denorm() {
-    run_dense_near_denorm(256, 256, 256, "256_256_256_near_denorm");
+fn tc_bf16_256_256_256_tiny_product() {
+    run_dense_tiny_product(256, 256, 256, "256_256_256_tiny_product");
+}
+
+#[test]
+#[ignore]
+fn tc_bf16_256_256_256_min_normal() {
+    run_dense_min_normal(256, 256, 256, "256_256_256_min_normal");
 }
 
 #[test]
@@ -314,8 +358,14 @@ fn tc_bf16_512_512_512_large() {
 
 #[test]
 #[ignore]
-fn tc_bf16_512_512_512_near_denorm() {
-    run_dense_near_denorm(512, 512, 512, "512_512_512_near_denorm");
+fn tc_bf16_512_512_512_tiny_product() {
+    run_dense_tiny_product(512, 512, 512, "512_512_512_tiny_product");
+}
+
+#[test]
+#[ignore]
+fn tc_bf16_512_512_512_min_normal() {
+    run_dense_min_normal(512, 512, 512, "512_512_512_min_normal");
 }
 
 // ----------------------------------------------------------------------------

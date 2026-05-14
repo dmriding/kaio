@@ -206,21 +206,63 @@ pub fn patterned_bf16_magnitude(len: usize, magnitude_scale: f32) -> Vec<bf16> {
         .collect()
 }
 
-/// Generate positive-only near-denorm bf16 data in `[1e-18, 2e-18]`.
+/// Generate positive-only tiny-product bf16 data in `[1e-18, ~1.94e-18]`.
 ///
-/// The bf16 near-denorm magnitude class for the correctness suite.
-/// Positive-only and non-cancelling — a symmetric `[-1e-18, 1e-18]`
-/// generator would let an all-zero kernel pass the absolute-tolerance
-/// check vacuously at expected outputs `~K × 1e-36`. The positive
-/// bias keeps products from cancelling toward zero so the
-/// nonzero-output assertion in [`assert_bf16_close_d5_near_denorm`]
-/// has signal.
-pub fn patterned_bf16_near_denorm(len: usize) -> Vec<bf16> {
+/// Both operands are normal bf16 values (bf16's min positive normal is
+/// `~1.175e-38`, so `1e-18` is comfortably normal). The class is a
+/// **tiny-product canary**: per-element products are `~1e-36`, far below
+/// any reasonable absolute tolerance, so an all-zero kernel would pass
+/// `abs_err < 1e-3` vacuously — the companion
+/// [`assert_bf16_close_d5_relative_only`] uses a relative-only bound
+/// plus a nonzero-output gate to catch underflow-to-zero bug classes.
+///
+/// Note: this class does **not** exercise bf16's lowest exponent band —
+/// inputs are 20 orders of magnitude above min-normal. For
+/// min-normal-band coverage see [`patterned_bf16_min_normal`].
+pub fn patterned_bf16_tiny_product(len: usize) -> Vec<bf16> {
     (0..len)
         .map(|i| {
             // (i % 17) / 17 ∈ [0, ~0.94], shifted to [1.0, ~1.94] then × 1e-18
             // → [1e-18, ~1.94e-18]. Strictly positive, deterministic.
             let v = (1.0 + ((i % 17) as f32) / 17.0) * 1e-18;
+            bf16::from_f32(v)
+        })
+        .collect()
+}
+
+/// Generate positive-only bf16 data spanning the min-normal exponent
+/// band: `[2e-38, ~3.88e-38]`. Strictly above bf16's min positive
+/// normal `~1.175e-38` so values are normal-not-subnormal, but at the
+/// lowest exponent decade bf16 supports.
+///
+/// Pair with [`patterned_bf16_large_positive`] (e.g. `scale = 1e10`)
+/// to keep per-element products in normal-f32 range while exercising
+/// bf16's bottom exponent band on one operand — the canary against an
+/// implementation that flushes min-normal inputs to zero before the
+/// mma.sync. f32 min-normal is also `~1.175e-38` so the accumulator
+/// stays in normal range when the product is `~2e-28`.
+pub fn patterned_bf16_min_normal(len: usize) -> Vec<bf16> {
+    (0..len)
+        .map(|i| {
+            // (i % 17) / 17 ∈ [0, ~0.94], shifted to [1.0, ~1.94] then × 2e-38
+            // → [2e-38, ~3.88e-38]. Strictly positive, deterministic, strictly
+            // above the bf16/f32 min-normal boundary at ~1.175e-38.
+            let v = (1.0 + ((i % 17) as f32) / 17.0) * 2e-38;
+            bf16::from_f32(v)
+        })
+        .collect()
+}
+
+/// Generate positive-only bf16 data in `[scale, ~1.94 × scale]`.
+///
+/// Companion to [`patterned_bf16_min_normal`] for asymmetric-magnitude
+/// reference inputs: with `scale = 1e10`, paired against min-normal A
+/// (~2e-38), per-element products land near `2e-28` — well inside f32's
+/// normal range so the accumulator does not underflow.
+pub fn patterned_bf16_large_positive(len: usize, scale: f32) -> Vec<bf16> {
+    (0..len)
+        .map(|i| {
+            let v = (1.0 + ((i % 17) as f32) / 17.0) * scale;
             bf16::from_f32(v)
         })
         .collect()
@@ -330,9 +372,11 @@ pub fn assert_bf16_close_d5_sampled(
 /// Sprint 9.1 D5 standard-tolerance assertion: `rel_err < 1e-2 ||
 /// abs_err < 1e-3` against an f64 reference, computed in f64 and only
 /// downcast when reporting the failure. Used for small/medium/large
-/// magnitude classes. The near-denorm class uses a stricter rel-only
-/// bound + a nonzero-output assertion in
-/// [`assert_bf16_close_d5_near_denorm`].
+/// magnitude classes. The tiny-product and min-normal classes use a
+/// stricter rel-only bound + a nonzero-output assertion in
+/// [`assert_bf16_close_d5_relative_only`] (output magnitudes are far
+/// below the `abs_err < 1e-3` floor, which would otherwise pass an
+/// all-zero kernel vacuously).
 ///
 /// `got` is the GPU output (f32 from the bf16 mma's f32 accumulator);
 /// `expected` is the f64 reference. The element-wise check is f64
@@ -386,16 +430,20 @@ pub fn assert_bf16_close_d5(got: &[f32], expected: &[f64], m: usize, n: usize, l
     }
 }
 
-/// Near-denorm tolerance assertion for the bf16 correctness suite:
+/// Relative-only tolerance assertion for the bf16 correctness suite:
 /// `rel_err < 1e-1` **only** (no absolute-error fallback), plus a
 /// "non-zero output" assertion that catches the "kernel returns zero
-/// on small inputs" bug class. The looser relative bound reflects
-/// bf16's genuinely worse mantissa precision at near-denorm
-/// magnitudes; the nonzero gate is the bug-class catch that a
-/// permissive `abs_err < 1e-3` would silently let through (since
-/// expected outputs are `~K × 1e-36`, far below any reasonable
-/// absolute tolerance).
-pub fn assert_bf16_close_d5_near_denorm(
+/// on small inputs" bug class.
+///
+/// Used by magnitude classes whose expected outputs are so small that
+/// the standard `abs_err < 1e-3` floor would pass an all-zero kernel
+/// vacuously: the tiny-product class (expected outputs `~K × 1e-36`)
+/// and the min-normal class (expected outputs `~K × 1e-28` after
+/// `min-normal × large-positive`). The nonzero-output gate is the
+/// primary bug-class catch — an FTZ-on-load implementation, or a
+/// kernel that underflows internally, would emit all zeros and fail
+/// here.
+pub fn assert_bf16_close_d5_relative_only(
     got: &[f32],
     expected: &[f64],
     m: usize,
@@ -406,14 +454,14 @@ pub fn assert_bf16_close_d5_near_denorm(
 
     // (1) Nonzero-output assertion: at least one output cell must be
     //     non-trivially non-zero. An all-zeros (or near-zeros) result
-    //     is the "kernel returns zero on small inputs" bug class the
-    //     near-denorm test is specifically targeting.
+    //     is the "kernel returns zero on small inputs" bug class this
+    //     relative-only tolerance is specifically targeting.
     let max_abs_got = got.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
     let max_abs_expected = expected.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()));
     let nonzero_floor = (max_abs_expected * 0.01).max(f64::MIN_POSITIVE);
     assert!(
         (max_abs_got as f64) > nonzero_floor,
-        "{label}: near-denorm output is all-zero or far-below-expected — \
+        "{label}: output is all-zero or far-below-expected — \
          max_abs(got)={max_abs_got:e}, max_abs(expected)={max_abs_expected:e}, \
          floor={nonzero_floor:e}. Likely the kernel underflowed at small inputs \
          (the bug class this assertion is here to catch)."
@@ -444,7 +492,7 @@ pub fn assert_bf16_close_d5_near_denorm(
 
     if let Some((wi, wj, e, g, rel_err)) = worst {
         panic!(
-            "{label} ({m}×_ × _×{n}) FAILED Sprint 9.1 D5 near-denorm tolerance:\n\
+            "{label} ({m}×_ × _×{n}) FAILED Sprint 9.1 D5 relative-only tolerance:\n\
              \n\
              bound:                 rel_err < {REL_BOUND:e} (no abs fallback at this magnitude)\n\
              worst index (i, j)     = ({wi}, {wj})\n\

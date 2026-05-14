@@ -35,15 +35,20 @@ Updated at phase completion. Per-sprint detail lives in
   siblings — offset arithmetic and `ld.shared.b32` emit are
   bit-identical between the precisions, only the typed fragment
   wrapper differs at the public API.
-- 21-test bf16 correctness suite (`kaio-ops/tests/matmul_tc_bf16_correctness.rs`)
+- 25-test bf16 correctness suite (`kaio-ops/tests/matmul_tc_bf16_correctness.rs`)
   covering the full D5 shape × magnitude grid: 32³ + 64³ + 256³ +
-  512³ × {small, medium, large, near-denorm} magnitudes + 2048³
-  small/large + 4096³ small + non-square 64×128×32 + odd-N 65×17×32.
-  Dense f64 CPU reference at small/medium shapes; sampled-cell f64
-  (100 cells, fixed seed via inline LCG — no new dev-dep) at large
-  shapes. Standard tolerance `rel < 1e-2 || abs < 1e-3`; near-denorm
-  uses `rel < 1e-1` only plus a nonzero-output assertion that
-  catches the "kernel returns zero on small inputs" bug class.
+  512³ × {small, medium, large, tiny_product, min_normal} magnitudes
+  + 2048³ small/large + 4096³ small + non-square 64×128×32 + odd-N
+  65×17×32. Dense f64 CPU reference at small/medium shapes;
+  sampled-cell f64 (100 cells, fixed seed via inline LCG — no new
+  dev-dep) at large shapes. Standard tolerance `rel < 1e-2 ||
+  abs < 1e-3`; tiny_product and min_normal use `rel < 1e-1` only
+  plus a nonzero-output assertion that catches the "kernel returns
+  zero on small inputs" bug class (the min_normal class uses
+  asymmetric magnitudes — A near bf16's min-normal exponent band
+  `~2e-38`, B `~1e10` — so per-element products land in normal-f32
+  range and the accumulator does not underflow, isolating the
+  FTZ-on-load failure mode on the bf16 side).
 - bf16 vs f16 bench harness (`kaio-ops/tests/matmul_tc_bf16_bench.rs`)
   with **SC-2 perf-parity gate**: 10 interleaved alternating-order
   runs at 4096³ with two independent bounds on the per-iter bf16/f16

@@ -116,32 +116,37 @@ driver dispatch.
 
 ### Full D5 correctness suite (C5)
 
-21 GPU correctness tests in `kaio-ops/tests/matmul_tc_bf16_correctness.rs`,
+25 GPU correctness tests in `kaio-ops/tests/matmul_tc_bf16_correctness.rs`,
 covering the full D5 shape × magnitude grid with shape-scoped
 reference strategy:
 
-| Shape class           | Magnitudes run                       | Reference        |
-|-----------------------|--------------------------------------|------------------|
-| Small (32³, 64³)      | small / medium / large / near-denorm | dense f64        |
-| Medium (256³, 512³)   | small / medium / large / near-denorm | dense f64        |
-| Large 2048³           | small + one large smoke              | sampled-cell f64 |
-| Large 4096³           | small only (also the bench shape)    | sampled-cell f64 |
-| Non-square / odd-N    | small only (edge-tile predication)   | dense f64        |
+| Shape class           | Magnitudes run                                            | Reference        |
+|-----------------------|-----------------------------------------------------------|------------------|
+| Small (32³, 64³)      | small / medium / large / tiny_product / min_normal        | dense f64        |
+| Medium (256³, 512³)   | small / medium / large / tiny_product / min_normal        | dense f64        |
+| Large 2048³           | small + one large smoke                                   | sampled-cell f64 |
+| Large 4096³           | small only (also the bench shape)                         | sampled-cell f64 |
+| Non-square / odd-N    | small only (edge-tile predication)                        | dense f64        |
 
 Magnitude classes: small `[-0.5, 0.5]` patterned; medium ×200 →
 peak `|x| ≈ 100`; large ×2e14 → peak `|x| ≈ 1e14` (the upper bound
-keeps `|a| × |b| × K` under f32 max in the accumulator); near-denorm
-positive-only `[1e-18, ~1.94e-18]` (the positive-only bias keeps
-products from cancelling to zero so the "kernel returns zero on small
-inputs" canary is meaningful).
+keeps `|a| × |b| × K` under f32 max in the accumulator); tiny_product
+positive-only `[1e-18, ~1.94e-18]` (both operands normal bf16 values
+with per-element products `~1e-36` — the positive-only bias keeps
+products from cancelling so the "kernel returns zero on small inputs"
+canary is meaningful); min_normal asymmetric — A positive-only
+`[2e-38, ~3.88e-38]` (bf16's min-normal exponent band, just above the
+`~1.175e-38` subnormal boundary) paired with B positive-only
+`[1e10, ~1.94e10]`. Per-element products land near `2e-28`, well
+inside normal-f32 range, so the f32 accumulator does not underflow —
+isolating the FTZ-on-load failure mode on the bf16 side.
 
 Tolerance: standard `rel_err < 1e-2 || abs_err < 1e-3` against the
-f64 reference; near-denorm `rel_err < 1e-1` only (no abs fallback)
-plus a non-zero output assertion. Sampled-cell reference at the two
-large shapes uses 100 cells with a fixed seed via an inline LCG
-(no new dev-dep).
-
-All 21 tests pass in 1.69 seconds on RTX 4090 sm_89.
+f64 reference; tiny_product and min_normal use `rel_err < 1e-1` only
+(no abs fallback) plus a non-zero output assertion that catches the
+"kernel returns zero on small inputs" bug class. Sampled-cell
+reference at the two large shapes uses 100 cells with a fixed seed
+via an inline LCG (no new dev-dep).
 
 ### bf16 vs f16 bench + SC-2 perf-parity gate (C6)
 
