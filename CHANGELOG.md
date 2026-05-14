@@ -8,6 +8,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
+## [Unreleased] — Sprint 9.1: bf16 tensor-core matmul
+
+### Added
+
+- `kaio_ops::matmul_tc_bf16` — sync tensor-core matmul for bf16 × bf16
+  → f32. Sibling of `matmul_tc` with byte-identical kernel structure
+  (64×64 block tile, 4-warp 32×32 quadrants, Sprint 6.7b
+  bank-conflict-padded Tile B, D10 fragment-loader hoist). Edge-tile
+  predication on M and N; `K % 16 == 0` is the only divisibility
+  constraint (the mma K-tile is structural). Requires SM 8.0+
+  (Ampere). Async / auto-tuner / candle bf16 variants are scheduled
+  as sub-sprints 9.1.1–9.1.5 and not gated by 9.1's close.
+- New IR variant `TensorCoreOp::MmaSyncBf16` in `kaio-core` —
+  dedicated bf16 mma sibling of `MmaSyncInt8`. Emits
+  `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. Takes the
+  new `FragmentA_BF16` / `FragmentB_BF16` sibling types directly so
+  cross-precision wiring at call sites is a compile error rather
+  than a silent dtype-tag mismatch on the generic `MmaSync` variant.
+- bf16 fragment types + helpers in `kaio-core::fragment` —
+  `FragmentA_BF16`, `FragmentB_BF16`, `alloc_a_bf16`, `alloc_b_bf16`,
+  `load_fragment_a_m16n8k16_shared_row_bf16`,
+  `load_fragment_b_m16n8k16_shared_col_bf16`. `FragmentC` is reused
+  unchanged (accumulator is `.f32` regardless of input precision).
+  The shared-mem loaders share a private `*_impl` with their f16
+  siblings — offset arithmetic and `ld.shared.b32` emit are
+  bit-identical between the precisions, only the typed fragment
+  wrapper differs at the public API.
+- 21-test bf16 correctness suite (`kaio-ops/tests/matmul_tc_bf16_correctness.rs`)
+  covering the full D5 shape × magnitude grid: 32³ + 64³ + 256³ +
+  512³ × {small, medium, large, near-denorm} magnitudes + 2048³
+  small/large + 4096³ small + non-square 64×128×32 + odd-N 65×17×32.
+  Dense f64 CPU reference at small/medium shapes; sampled-cell f64
+  (100 cells, fixed seed via inline LCG — no new dev-dep) at large
+  shapes. Standard tolerance `rel < 1e-2 || abs < 1e-3`; near-denorm
+  uses `rel < 1e-1` only plus a nonzero-output assertion that
+  catches the "kernel returns zero on small inputs" bug class.
+- bf16 vs f16 bench harness (`kaio-ops/tests/matmul_tc_bf16_bench.rs`)
+  with **SC-2 perf-parity gate**: worst-of-10 bf16-sync at 4096³ within
+  ±5% of worst-of-10 f16-sync in the same `cargo xtask bench` run.
+  Hard assertion (with debug-build guard to avoid spurious failures
+  when launch-overhead variance dominates). Registered with
+  `cargo xtask bench`.
+
+### Changed
+
+- **Breaking (kaio-core, pre-v1.0):** `FragmentA` / `FragmentB` /
+  `alloc_a` / `alloc_b` renamed to `FragmentA_F16` / `FragmentB_F16`
+  / `alloc_a_f16` / `alloc_b_f16` for naming symmetry with the new
+  `_BF16` siblings (and the existing `_M16N8K32` INT8 siblings). The
+  rename is mechanical and applies to every call site in `kaio-core`
+  + `kaio-ops`. No known external users of `kaio-core`'s fragment
+  types directly; `kaio-candle` consumes the public host APIs, not
+  the IR-level fragment types. Absorbed in the v0.5.0 minor bump per
+  the master-plan version-semantics decision.
+
+### Notes
+
+- **Bench numbers** (RTX 4090 sm_89, release mode, worst-of-10 at
+  4096³ for the SC-2 gate): bf16 sync = 55.59 median TFLOPS / 59.96
+  worst-of-10 TF; f16 sync = 53.83 / 58.96 TF; bf16/f16 ratio
+  101.70% (+1.70% delta — well inside the ±5% bound). bf16 at 4096³
+  is 91.8% of cuBLAS sgemm — same regime as f16 (82.3% per the
+  existing perf doc). cuBLAS sgemm comparison remains
+  project-local-reference, not apples-to-apples; the
+  `cublasGemmEx`-bf16 future reference is tracked in
+  `docs/development/tech_debt.md`.
+- **D4 cvt-free hot path:** a host-only assertion in the kernel
+  module's tests confirms zero `cvt.*` instructions between any
+  `ld.shared.b32` fragment load and the next `mma.sync.bf16` in the
+  K-loop body — the precision-conversion bug class D4 was written to
+  prevent. Runs in CI as part of `cargo test --workspace` (no GPU
+  required).
+- **No changes to f16 numerical behaviour.** The C0 rename touches
+  type names only; the f16 kernels (`matmul_tc`, `matmul_tc_async`)
+  emit byte-identical PTX before and after the rename.
+- `docs/performance.md` is not updated mid-phase per the master plan
+  — perf table bumps land in one piece at v0.5.0 close.
+
 ## [Unreleased] — Sprint 8.1: PyO3 scaffold
 
 ### Added
