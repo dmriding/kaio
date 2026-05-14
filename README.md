@@ -14,13 +14,15 @@ who need custom GPU kernels today — fused attention variants,
 quantization ops, novel activations — and would otherwise be writing
 CUDA C++ because their framework doesn't support them.
 
+> **Tensor-core matmul reaches 115% of cuBLAS sgemm at 4096³ on RTX 4090** (worst observed across 10 consecutive runs; full distribution in [`docs/performance.md`](docs/performance.md)).
+
 ## Key highlights
 
 - **No CUDA toolkit required** — just the NVIDIA display driver. Build
   in CI on a standard GitHub runner; host tests pass without a GPU.
   This is KAIO's single biggest differentiator vs CUDA C++, `rust-cuda`,
   and Triton.
-- **Meets or beats cuBLAS sgemm at 4096²** — on RTX 4090 across 10
+- **Meets or beats cuBLAS sgemm at 4096³** — on RTX 4090 across 10
   consecutive benchmark runs, KAIO tensor-core matmul (async, fp16
   inputs with fp32 accumulation) reached **58.74 TFLOPS worst
   observed** and **65.12 TFLOPS median**. Against the corresponding
@@ -35,6 +37,27 @@ CUDA C++ because their framework doesn't support them.
   handed to the CUDA driver for JIT compilation. Type-safe kernel
   signatures catch dtype mismatches at compile time, not as silent GPU
   corruption at runtime.
+- **Drops into Candle's tensor graph** via [`kaio-candle`](kaio-candle/) —
+  eight forward `CustomOp` bindings (matmul_tc, matmul_int8, matmul_int4,
+  fused QKV variants, attention) plus matmul backward, with event-based
+  stream sync that's CUDA-Graph compatible.
+
+## The problem KAIO solves
+
+The Rust ML ecosystem can't keep up with Python. Every time a new
+model architecture drops with a custom operation — a novel attention
+variant, a fused activation, a custom quantization kernel — frameworks
+like [candle](https://github.com/huggingface/candle) and
+[burn](https://github.com/tracel-ai/burn) can't support it until
+someone writes the GPU function. Today, that means writing CUDA C++,
+fighting FFI bindings, and giving up on Windows.
+
+Meanwhile, Python developers write a
+[Triton](https://github.com/triton-lang/triton) kernel in an afternoon
+and move on. Triton doesn't support Windows, requires Python, and
+JIT-compiles at runtime — but it works, and Rust has no equivalent.
+
+**KAIO is that equivalent.**
 
 ## Try KAIO in 30 seconds
 
@@ -46,7 +69,7 @@ cd kaio
 cargo xtask showcase
 ```
 
-You'll see `fused_silu_gate`, `gelu_comparison`, `rms_norm`, `layer_norm`, `softmax`, `int8_dequant`, `int8_matmul`, `int4_matmul`, and `quantized_attention` compile, launch, verify correctness against a CPU reference, and report median latency. The nine examples span activations, normalizations, reductions, the quantize → matmul pipeline, and end-to-end quantized attention — the canonical transformer-primitive arc plus the W8A8 / W4A16 / fused-QKV headline ops.
+Nine kernels covering the canonical transformer-primitive arc — activations (`fused_silu_gate`, `gelu_comparison`), normalizations (`rms_norm`, `layer_norm`), reductions (`softmax`), the W8A8 / W4A16 quantization pipeline (`int8_dequant`, `int8_matmul`, `int4_matmul`), and end-to-end `quantized_attention` — each compiles, launches, verifies against a CPU reference, and reports median latency.
 
 Want the performance pitch instead? `cargo xtask bench` runs the tensor-core matmul benchmark against cuBLAS sgemm across five sizes. Or `cargo xtask all` for both. `cargo xtask --help` for the full tooling surface.
 
@@ -179,23 +202,6 @@ when you need more control than they provide.
 | Type-safe kernel signatures | Yes        | No            | N/A           | No              | No       |
 | ML framework integration    | candle (via `kaio-candle`) | Standalone | Built-in | PyTorch      | Manual   |
 
-## What this is not
-
-- **Not compiled Rust.** `#[gpu_kernel]` bodies use Rust syntax but are
-  parsed into KAIO's own IR and lowered directly to PTX. rustc's
-  backend (LLVM, MIR, borrow checker) never sees the kernel body. You
-  cannot call Rust functions declared outside the kernel from inside
-  it.
-- **Not CUDA bindings.** KAIO generates PTX itself. It does not wrap
-  cuDNN, cuBLAS, CUTLASS, or any CUDA C++ library. The comparison to
-  cuBLAS sgemm in this README is a *measurement reference*, not a
-  dependency.
-- **Not a full ML framework.** No autograd (beyond the handful of
-  `kaio-candle` backward bindings), no model zoo, no training loop.
-  KAIO is the layer you use when
-  [Candle](https://github.com/huggingface/candle) or
-  [Burn](https://github.com/tracel-ai/burn) don't have the op you need.
-
 ## Performance
 
 Performance is optimized for large ML workloads (transformer-scale
@@ -236,22 +242,22 @@ Compare these numbers sprint-over-sprint for regression detection; the
 precision-identity claim. See [docs/performance.md](docs/performance.md)
 for the full distribution (min / median / max across all sizes).
 
-## The problem KAIO solves
+## What this is not
 
-The Rust ML ecosystem can't keep up with Python. Every time a new
-model architecture drops with a custom operation — a novel attention
-variant, a fused activation, a custom quantization kernel — frameworks
-like [candle](https://github.com/huggingface/candle) and
-[burn](https://github.com/tracel-ai/burn) can't support it until
-someone writes the GPU function. Today, that means writing CUDA C++,
-fighting FFI bindings, and giving up on Windows.
-
-Meanwhile, Python developers write a
-[Triton](https://github.com/triton-lang/triton) kernel in an afternoon
-and move on. Triton doesn't support Windows, requires Python, and
-JIT-compiles at runtime — but it works, and Rust has no equivalent.
-
-**KAIO is that equivalent.**
+- **Not compiled Rust.** `#[gpu_kernel]` bodies use Rust syntax but are
+  parsed into KAIO's own IR and lowered directly to PTX. rustc's
+  backend (LLVM, MIR, borrow checker) never sees the kernel body. You
+  cannot call Rust functions declared outside the kernel from inside
+  it.
+- **Not CUDA bindings.** KAIO generates PTX itself. It does not wrap
+  cuDNN, cuBLAS, CUTLASS, or any CUDA C++ library. The comparison to
+  cuBLAS sgemm in this README is a *measurement reference*, not a
+  dependency.
+- **Not a full ML framework.** No autograd (beyond the handful of
+  `kaio-candle` backward bindings), no model zoo, no training loop.
+  KAIO is the layer you use when
+  [Candle](https://github.com/huggingface/candle) or
+  [Burn](https://github.com/tracel-ai/burn) don't have the op you need.
 
 ## Patterns
 
@@ -322,8 +328,8 @@ KAIO is pre-1.0 software. Current engineering constraints:
 - **NVIDIA only.** SM 7.0+ (Volta, Turing, Ampere, Ada Lovelace,
   Hopper). No AMD, no Intel, no Apple Silicon.
 - **Matmul performance is size-dependent.** Tensor-core matmul meets
-  or beats cuBLAS sgemm at 4096² on RTX 4090 (worst-of-10: 107% sync /
-  115% async) but lags heavily at ≤1024² (5–17%) because a 64×64
+  or beats cuBLAS sgemm at 4096³ on RTX 4090 (worst-of-10: 107% sync /
+  115% async) but lags heavily at ≤1024³ (5–17%) because a 64×64
   multi-warp block tile doesn't fill the SM array until the grid is
   large. Scalar matmul tops out at 31% of cuBLAS. For small shapes
   prefer cuBLAS or the scalar path. [Details →](docs/performance.md)
@@ -544,8 +550,8 @@ See [CHANGELOG.md](CHANGELOG.md) for per-release detail and
 ## Feedback
 
 If something is confusing, awkward, or broken —
-[open an issue](https://github.com/dmriding/kaio/issues). Even small
-friction matters. This project is actively developed and feedback
+[open an issue](https://github.com/dmriding/kaio/issues). **Even small
+friction matters.** This project is actively developed and feedback
 directly shapes what gets built next.
 
 ## License
