@@ -8,10 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1)
+## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1, 9.1.2)
 
 ### Added
 
+- `kaio_ops::matmul_auto_tc_bf16` + `kaio_ops::tune_matmul_tc_bf16`
+  (Sprint 9.1.2) — 2-way bf16 auto-tuner cache between `matmul_tc_bf16`
+  (sync) and `matmul_tc_bf16_async` (async). Per-shape dispatch from
+  real benchmark data; mirrors the f16 `matmul_auto_tc` + `tune_matmul_tc`
+  shape from Sprint 6.5. Shares the same on-disk JSON cache file via
+  the existing `kernel`-field disambiguation, locked in by the
+  `cache_matmul_tc_and_matmul_tc_bf16_entries_coexist` in-module
+  regression test (sibling of the Sprint 6.5 f16-vs-scalar coexistence
+  test). Cache-miss fallback inherits the f16 size heuristic
+  (`max(m, n, k) >= 3072` → async; else sync), with a separate
+  `ASYNC_FALLBACK_MAX_DIM_THRESHOLD_BF16` symbol so the bf16 threshold
+  can drift independently if future calibration warrants. Requires
+  SM 8.0+ (Ampere) and `K % 16 == 0`; pre-Ampere callers are
+  redirected to `matmul_auto` (f32 scalar), not `matmul_auto_tc`,
+  which has the same SM 8.0+ requirement.
 - `kaio_ops::matmul_tc_bf16_async` (Sprint 9.1.1) — cp.async-pipelined
   tensor-core matmul for bf16 × bf16 → f32. Async sibling of
   `matmul_tc_bf16`; cross-product of (f16 async × bf16 sync) on the

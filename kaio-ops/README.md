@@ -34,9 +34,15 @@ matmul_auto(&device, &a, &b, &mut c, m, n, k)?; // picks best variant from cache
 
 - `matmul_auto` — dispatches across the scalar `matmul` family.
 - `matmul_auto_tc` — dispatches across the f16 tensor-core family
-  (`matmul_tc` vs `matmul_tc_async`, etc.).
-- `tune_matmul` / `tune_matmul_tc` — explicit tuning entry points;
-  results land in the on-disk JSON cache reused by `matmul_auto*`.
+  (`matmul_tc` vs `matmul_tc_async`).
+- `matmul_auto_tc_bf16` — dispatches across the bf16 tensor-core
+  family (`matmul_tc_bf16` vs `matmul_tc_bf16_async`). Shares the
+  same on-disk JSON cache as the f16 path; entries are disambiguated
+  by the `kernel` field so f16-TC and bf16-TC results coexist without
+  collision.
+- `tune_matmul` / `tune_matmul_tc` / `tune_matmul_tc_bf16` — explicit
+  tuning entry points; results land in the on-disk JSON cache reused
+  by `matmul_auto*`.
 
 ## Attention
 
