@@ -84,7 +84,7 @@ Instruction-count per K-tile per block, B-side:
 | Plan: row-major + LDG.128 + fragment rewrite | 640 | 3072 | **3712 ← worse than today** |
 | Actual: col-major + col-stride 36 + D10 hoist (shipped) | 2048 | 1024 | **3072** (same, but conflict-free reads) |
 
-The row-major flip would have been a **net regression** on the fragment-B hot path. Reading the fragment-B layout implementation late in the planning round would have caught this; four reviewer rounds on the plan did not model the fragment-read side in enough detail. This is exactly the kind of discovery the gate structure exists to catch, and the plan-file review trail captures both rounds 5 (design reversal) and 6 (bench discovery) for future-reviewer reference.
+The row-major flip would have been a **net regression** on the fragment-B hot path. Reading the fragment-B layout implementation earlier in planning would have caught this; the upfront design passes did not model the fragment-read side in enough detail. This is exactly the kind of discovery the gate structure exists to catch — the design reversal and the post-bench discovery (below) are captured for future reference.
 
 ### Round 6 (post-bench discovery)
 

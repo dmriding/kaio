@@ -7,7 +7,7 @@
 //! ptxas wasn't in PATH, which meant default CI on Linux without the
 //! CUDA toolkit reported green without doing any actual verification.
 //! Marking them `#[ignore]` aligns the gate with Phase 6's reality:
-//! Dave's Windows dev box with `--ignored` is the canonical verification
+//! a local Windows dev box with `--ignored` is the canonical verification
 //! surface, not the stock GitHub Actions runner. The soft-skip below
 //! stays as a secondary safety for anyone who runs `--ignored` on a
 //! machine without ptxas.

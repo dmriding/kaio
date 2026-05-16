@@ -194,7 +194,7 @@ Bisect-friendly.
   "byte-exact nvcc parity" to "semantically correct PTX accepted by
   ptxas + gate test", recommended fragment.rs internal sectioning,
   bounded `validate()` scope to target-capability-only.
-- **Owner decisions:** committed to pub fragment fields (no
+- **Maintainer decisions:** committed to pub fragment fields (no
   accessor), workflow preference for commit-try-iterate over
   upfront nvcc verification.
 
