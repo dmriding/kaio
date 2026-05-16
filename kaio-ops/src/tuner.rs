@@ -10,13 +10,13 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use half::f16;
+use half::{bf16, f16};
 use kaio::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     attention, attention_causal, attention_flash, attention_flash_causal, matmul, matmul_tc,
-    matmul_tc_async,
+    matmul_tc_async, matmul_tc_bf16, matmul_tc_bf16_async,
 };
 
 // Expose naive kernel for tuning comparison
@@ -55,8 +55,9 @@ impl MatmulVariant {
 
 /// Tensor-core matmul variants dispatched by `matmul_auto_tc`
 /// (Sprint 6.5). Both variants have identical eligibility gates
-/// (SM 8.0+ AND `M%16 = N%8 = K%16 = 0`), so pre-dispatch checks
-/// live at the tuner level rather than per-variant.
+/// (SM 8.0+ AND `K % 16 == 0`; M and N are unconstrained per
+/// Sprint 6.7 Gate C edge-tile predication), so pre-dispatch
+/// checks live at the tuner level rather than per-variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MatmulTcVariant {
     TensorCore,
@@ -75,6 +76,41 @@ impl MatmulTcVariant {
         match s {
             "tensor_core" => Some(Self::TensorCore),
             "tensor_core_async" => Some(Self::TensorCoreAsync),
+            _ => None,
+        }
+    }
+
+    fn all() -> &'static [Self] {
+        &[Self::TensorCore, Self::TensorCoreAsync]
+    }
+}
+
+/// Bf16 tensor-core matmul variants dispatched by `matmul_auto_tc_bf16`
+/// (Sprint 9.1.2). Sibling enum to [`MatmulTcVariant`] for the bf16
+/// precision; the variant strings are precision-tagged
+/// (`tensor_core_bf16` / `tensor_core_bf16_async`) so cache JSON files
+/// containing both f16 and bf16 entries remain immediately legible
+/// when inspected by hand. The cache key already disambiguates by
+/// the `kernel` field; self-identifying variant strings are an
+/// ergonomic choice, not a collision-safety requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatmulTcBf16Variant {
+    TensorCore,
+    TensorCoreAsync,
+}
+
+impl MatmulTcBf16Variant {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TensorCore => "tensor_core_bf16",
+            Self::TensorCoreAsync => "tensor_core_bf16_async",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "tensor_core_bf16" => Some(Self::TensorCore),
+            "tensor_core_bf16_async" => Some(Self::TensorCoreAsync),
             _ => None,
         }
     }
@@ -726,6 +762,252 @@ fn resolve_matmul_tc_variant(device: &KaioDevice, m: u32, n: u32, k: u32) -> Mat
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tensor-core matmul tuner — bf16 (Sprint 9.1.2)
+// ---------------------------------------------------------------------------
+
+/// Pre-dispatch eligibility gate for the bf16 TC tuner. Identical
+/// constraints to the f16 [`check_tc_eligibility`]: SM 8.0+ (Ampere
+/// — required by `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`
+/// AND by `cp.async.ca.shared.global` on the async variant),
+/// `K % 16 == 0` (mma K-tile is structural; the kernel does not
+/// edge-pad K), and non-zero dims. M and N are unconstrained
+/// (Sprint 9.1 / 9.1.1 edge-tile predication).
+///
+/// **Maintainer note — the f32 fallback suggestion is load-bearing.**
+/// The SM-too-low error message recommends "convert inputs to f32 and
+/// use `matmul_auto`" rather than "use `matmul_auto_tc` (f16 TC)
+/// instead", because f16 TC also requires Ampere+. A user reading
+/// "fall back to f16 TC" would hit the same SM-too-low rejection and
+/// lose trust in the error messages. Do not "improve" this message to
+/// suggest the f16 TC path.
+fn check_tc_bf16_eligibility(device: &KaioDevice, m: u32, n: u32, k: u32) -> Result<()> {
+    let info = device.info()?;
+    let (major, minor) = info.compute_capability;
+    if major < 8 {
+        return Err(KaioError::InvalidConfig(format!(
+            "matmul_auto_tc_bf16 requires SM 8.0+ (Ampere). \
+             GPU compute capability is {major}.{minor}. \
+             For pre-Ampere hardware, convert inputs to f32 and use \
+             matmul_auto. (matmul_auto_tc also requires SM 8.0+; it \
+             is not a valid fallback for pre-Ampere devices.)"
+        )));
+    }
+    if m == 0 || n == 0 || k == 0 {
+        return Err(KaioError::InvalidConfig(
+            "matmul_auto_tc_bf16 dimensions must be non-zero".to_string(),
+        ));
+    }
+    if !k.is_multiple_of(TC_K_STEP) {
+        return Err(KaioError::InvalidConfig(format!(
+            "matmul_auto_tc_bf16 requires K%{TC_K_STEP}=0 (got K={k}). \
+             The mma.sync.m16n8k16 instance shape has a fixed K-tile of 16; \
+             the kernel does not edge-pad K. Pad K to the next multiple of 16, \
+             or use the f32 matmul path (matmul_auto)."
+        )));
+    }
+    Ok(())
+}
+
+fn launch_matmul_tc_bf16(
+    device: &KaioDevice,
+    variant: MatmulTcBf16Variant,
+    a: &GpuBuffer<bf16>,
+    b: &GpuBuffer<bf16>,
+    c: &mut GpuBuffer<f32>,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<()> {
+    match variant {
+        MatmulTcBf16Variant::TensorCore => matmul_tc_bf16(device, a, b, c, m, n, k),
+        MatmulTcBf16Variant::TensorCoreAsync => matmul_tc_bf16_async(device, a, b, c, m, n, k),
+    }
+}
+
+fn bench_matmul_tc_bf16_variant(
+    device: &KaioDevice,
+    variant: MatmulTcBf16Variant,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<f64> {
+    let mk = (m as usize) * (k as usize);
+    let kn = (k as usize) * (n as usize);
+    let mn = (m as usize) * (n as usize);
+    let a = device.alloc_zeros::<bf16>(mk)?;
+    let b = device.alloc_zeros::<bf16>(kn)?;
+    let mut c = device.alloc_zeros::<f32>(mn)?;
+
+    for _ in 0..WARMUP {
+        launch_matmul_tc_bf16(device, variant, &a, &b, &mut c, m, n, k)?;
+    }
+    device.stream().synchronize()?;
+
+    let mut times = Vec::with_capacity(ITERS);
+    for _ in 0..ITERS {
+        device.stream().synchronize()?;
+        let start = Instant::now();
+        launch_matmul_tc_bf16(device, variant, &a, &b, &mut c, m, n, k)?;
+        device.stream().synchronize()?;
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Ok(times[ITERS / 2])
+}
+
+/// Benchmark the two bf16 tensor-core matmul variants at the given
+/// dimensions and cache the faster one. Sibling of [`tune_matmul_tc`]
+/// for the bf16 precision.
+///
+/// Requires SM 8.0+ (Ampere) and `K % 16 == 0`. M and N may be any
+/// positive value — edge-tile predication in the kernels handles
+/// non-multiple-of-64 cases.
+///
+/// Cached result key: `(kernel="matmul_tc_bf16", sm_target, [m, n, k])`.
+/// The cache file is shared with [`tune_matmul`] and [`tune_matmul_tc`];
+/// the `kernel` field disambiguates the three entry points without
+/// collision. The in-module `cache_matmul_tc_and_matmul_tc_bf16_entries_coexist`
+/// test locks the f16-TC / bf16-TC coexistence invariant.
+pub fn tune_matmul_tc_bf16(device: &KaioDevice, m: u32, n: u32, k: u32) -> Result<String> {
+    check_tc_bf16_eligibility(device, m, n, k)?;
+
+    let sm = sm_target(device)?;
+    let dims = vec![m, n, k];
+
+    let mut best_variant = MatmulTcBf16Variant::TensorCoreAsync;
+    let mut best_time = f64::MAX;
+
+    for &variant in MatmulTcBf16Variant::all() {
+        let time = bench_matmul_tc_bf16_variant(device, variant, m, n, k)?;
+        eprintln!(
+            "  tune matmul_tc_bf16 {}: {:.3} ms ({m}×{n}×{k})",
+            variant.as_str(),
+            time
+        );
+        if time < best_time {
+            best_time = time;
+            best_variant = variant;
+        }
+    }
+
+    let mut cache = load_cache();
+    cache.upsert(TuneResult {
+        kernel: "matmul_tc_bf16".to_string(),
+        variant: best_variant.as_str().to_string(),
+        sm_target: sm,
+        dims,
+        median_ms: best_time,
+    });
+    save_cache(&cache)?;
+
+    Ok(best_variant.as_str().to_string())
+}
+
+/// Run the bf16 tensor-core matmul using the best tuned variant, or
+/// a size-heuristic default if the cache has no entry for these
+/// dimensions.
+///
+/// # Contract
+///
+/// - **Input type:** `bf16 × bf16 → f32` with fp32 accumulation. f16
+///   callers should use [`matmul_auto_tc`]; f32 callers should use
+///   [`matmul_auto`]. bf16 is a distinct IR boundary — the
+///   dispatched kernels emit
+///   `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`, not the
+///   f16 mma variant.
+/// - **Hardware:** NVIDIA Ampere or newer (SM 8.0+). Pre-Ampere
+///   devices return [`KaioError::InvalidConfig`] suggesting the f32
+///   fallback ([`matmul_auto`]). f16 TC is not a valid fallback
+///   because it also requires Ampere+.
+/// - **Shape:** M and N may be any positive value (edge-tile
+///   predication handles ragged dims). `K % 16 == 0` is required —
+///   the mma.sync.m16n8k16 K-tile is structural and the kernel does
+///   not edge-pad K. Pad K to the next multiple of 16 if needed.
+/// - **Cache-miss dispatch policy:** if `max(M, N, K) >= 3072` the
+///   fallback is the cp.async double-buffered variant
+///   ([`matmul_tc_bf16_async`]); otherwise the sync variant
+///   ([`matmul_tc_bf16`]) is dispatched. The threshold inherits the
+///   f16 measured curve (Sprint 6.7); structural identity between
+///   the bf16 and f16 kernels (same 64×64 tile, 4-warp 32×32
+///   quadrant, 8 mma per K-iter, cp.async pipeline; only the mma
+///   operand dtype tag differs) makes this a safe initial default.
+///   A prior [`tune_matmul_tc_bf16`] call overrides this with the
+///   per-shape measured winner.
+/// - **Per-dispatch cache-lookup cost:** the auto-dispatch path
+///   performs file I/O + JSON parse on EVERY call (the cache is not
+///   amortised in-process across calls). For shapes where launch
+///   overhead already dominates (e.g. 256³), this cost is a
+///   meaningful fraction of total time. Users who know their shape
+///   ahead of time can skip the auto-dispatch by calling
+///   [`matmul_tc_bf16`] or [`matmul_tc_bf16_async`] directly.
+/// - **Performance:** see `docs/performance.md` and the Sprint 9.1 /
+///   9.1.1 bench rows — bf16 sync and bf16 async track their f16
+///   siblings within measurement noise on RTX 4090 sm_89.
+/// - **API stability:** pre-1.0 (overall crate). The signature is
+///   intentionally identical in shape to [`matmul_auto_tc`] so any
+///   future extensions remain additive.
+///
+/// # Errors
+///
+/// Returns [`KaioError::InvalidConfig`] on pre-Ampere hardware,
+/// zero-sized dims, or `K % 16 != 0` — with a message naming the
+/// actionable fallback (pad K, or use the f32 [`matmul_auto`] path
+/// if bf16 precision is not required).
+pub fn matmul_auto_tc_bf16(
+    device: &KaioDevice,
+    a: &GpuBuffer<bf16>,
+    b: &GpuBuffer<bf16>,
+    c: &mut GpuBuffer<f32>,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<()> {
+    check_tc_bf16_eligibility(device, m, n, k)?;
+
+    let variant = resolve_matmul_tc_bf16_variant(device, m, n, k);
+    launch_matmul_tc_bf16(device, variant, a, b, c, m, n, k)
+}
+
+/// Size threshold where the cp.async double-buffered variant overtakes
+/// the sync variant on the bf16 path. Initial value inherits the f16
+/// constant ([`ASYNC_FALLBACK_MAX_DIM_THRESHOLD`] = 3072) — kept as a
+/// separate symbol so the bf16 threshold can drift independently if
+/// a future calibration bench (`bench_bf16_sync_vs_async_curve`) is
+/// added. Structural identity between bf16 and f16 kernels (same
+/// tile, warp layout, mma count, cp.async pipeline; only the mma
+/// operand dtype tag differs) makes the inherit a safe initial
+/// default; existing 9.1 bench data shows bf16_sync within ±10% of
+/// f16_sync at every measured size (256³ → 4096³) and 9.1.1 SC-2
+/// shows bf16_async within +0.72% of f16_async at 4096³.
+const ASYNC_FALLBACK_MAX_DIM_THRESHOLD_BF16: u32 = 3072;
+
+fn cache_miss_default_bf16(m: u32, n: u32, k: u32) -> MatmulTcBf16Variant {
+    if m.max(n).max(k) >= ASYNC_FALLBACK_MAX_DIM_THRESHOLD_BF16 {
+        MatmulTcBf16Variant::TensorCoreAsync
+    } else {
+        MatmulTcBf16Variant::TensorCore
+    }
+}
+
+fn resolve_matmul_tc_bf16_variant(
+    device: &KaioDevice,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> MatmulTcBf16Variant {
+    let sm = match sm_target(device) {
+        Ok(s) => s,
+        Err(_) => return cache_miss_default_bf16(m, n, k),
+    };
+    let cache = load_cache();
+    match cache.lookup("matmul_tc_bf16", &sm, &[m, n, k]) {
+        Some(r) => MatmulTcBf16Variant::from_str(&r.variant)
+            .unwrap_or_else(|| cache_miss_default_bf16(m, n, k)),
+        None => cache_miss_default_bf16(m, n, k),
+    }
+}
+
 #[cfg(test)]
 mod tc_tuner_tests {
     use super::*;
@@ -841,5 +1123,87 @@ mod tc_tuner_tests {
             .lookup("matmul_tc", "sm_89", &[64, 64, 64])
             .expect("TC matmul entry should be findable");
         assert_eq!(tc.variant, "tensor_core");
+    }
+
+    #[test]
+    fn cache_miss_default_bf16_matches_threshold_3072() {
+        // Bf16 inherits the f16 3072 threshold; this test mirrors the
+        // f16 `cache_miss_default_matches_sprint_6_7_bench_curve` shape
+        // so a future drift of one threshold without the other is loud.
+        assert_eq!(
+            cache_miss_default_bf16(256, 256, 256),
+            MatmulTcBf16Variant::TensorCore
+        );
+        assert_eq!(
+            cache_miss_default_bf16(512, 512, 512),
+            MatmulTcBf16Variant::TensorCore
+        );
+        assert_eq!(
+            cache_miss_default_bf16(1024, 1024, 1024),
+            MatmulTcBf16Variant::TensorCore
+        );
+        assert_eq!(
+            cache_miss_default_bf16(2048, 2048, 2048),
+            MatmulTcBf16Variant::TensorCore
+        );
+        assert_eq!(
+            cache_miss_default_bf16(4096, 4096, 4096),
+            MatmulTcBf16Variant::TensorCoreAsync
+        );
+        // Only one dim at or above threshold suffices.
+        assert_eq!(
+            cache_miss_default_bf16(128, 128, 4096),
+            MatmulTcBf16Variant::TensorCoreAsync
+        );
+        // Exact threshold is inclusive.
+        assert_eq!(
+            cache_miss_default_bf16(3072, 64, 64),
+            MatmulTcBf16Variant::TensorCoreAsync
+        );
+    }
+
+    #[test]
+    fn cache_matmul_tc_and_matmul_tc_bf16_entries_coexist() {
+        // Sprint 9.1.2 SC-2 — locks the f16-TC vs bf16-TC coexistence
+        // invariant. Sibling of `cache_matmul_and_matmul_tc_entries_coexist`
+        // (Sprint 6.5 D6); same model — entries share the cache file,
+        // disambiguated by the `kernel` field. This test writes one f16
+        // TC entry and one bf16 TC entry for the same (sm_target, dims)
+        // tuple and verifies:
+        //   1. Both persist (neither overwrites the other).
+        //   2. lookup(kernel="matmul_tc", ...) returns the f16 TC entry.
+        //   3. lookup(kernel="matmul_tc_bf16", ...) returns the bf16 TC entry.
+        let mut cache = TuneCache::empty();
+        cache.upsert(TuneResult {
+            kernel: "matmul_tc".to_string(),
+            variant: "tensor_core".to_string(),
+            sm_target: "sm_89".to_string(),
+            dims: vec![64, 64, 64],
+            median_ms: 0.25,
+        });
+        cache.upsert(TuneResult {
+            kernel: "matmul_tc_bf16".to_string(),
+            variant: "tensor_core_bf16".to_string(),
+            sm_target: "sm_89".to_string(),
+            dims: vec![64, 64, 64],
+            median_ms: 0.27,
+        });
+
+        assert_eq!(
+            cache.results.len(),
+            2,
+            "both entries should persist; got {}",
+            cache.results.len()
+        );
+
+        let f16_tc = cache
+            .lookup("matmul_tc", "sm_89", &[64, 64, 64])
+            .expect("f16 TC entry should be findable");
+        assert_eq!(f16_tc.variant, "tensor_core");
+
+        let bf16_tc = cache
+            .lookup("matmul_tc_bf16", "sm_89", &[64, 64, 64])
+            .expect("bf16 TC entry should be findable");
+        assert_eq!(bf16_tc.variant, "tensor_core_bf16");
     }
 }

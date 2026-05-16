@@ -25,6 +25,15 @@
 //!   fp16 × fp16 → fp32 accumulation vs cuBLAS sgemm f32 × f32 → f32),
 //!   and the rationale for why async benefits more than sync from
 //!   the shared-memory layout improvements.
+//! - [`matmul_auto_tc_bf16`] / [`matmul_tc_bf16`] /
+//!   [`matmul_tc_bf16_async`] — tensor-core bf16 × bf16 → f32 matmul.
+//!   Sibling family to the f16 TC matmul above; same tile shape, warp
+//!   layout, mma count per K-iter, and cp.async pipeline. Uses the
+//!   dedicated `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`
+//!   instance — bf16 is a distinct IR boundary, not a runtime cvt
+//!   from f16. Bf16 sync ≈ f16 sync and bf16 async ≈ f16 async on
+//!   RTX 4090 sm_89 within measurement noise (Sprint 9.1 SC-2 and
+//!   Sprint 9.1.1 SC-2 split-bound gates green).
 //! - [`attention`] / [`attention_auto`] and causal variants —
 //!   fused attention for f32.
 //!
@@ -81,8 +90,8 @@ mod tuner;
 pub use attention_kernel::{attention, attention_causal, attention_flash, attention_flash_causal};
 pub use matmul_kernel::matmul;
 pub use tuner::{
-    attention_auto, attention_auto_causal, matmul_auto, matmul_auto_tc, tune_attention,
-    tune_attention_causal, tune_matmul, tune_matmul_tc,
+    attention_auto, attention_auto_causal, matmul_auto, matmul_auto_tc, matmul_auto_tc_bf16,
+    tune_attention, tune_attention_causal, tune_matmul, tune_matmul_tc, tune_matmul_tc_bf16,
 };
 
 // Expose naive kernel for benchmarking (not public API)
