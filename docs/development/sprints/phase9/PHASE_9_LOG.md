@@ -12,6 +12,7 @@ Master plan: [phase9_master_plan.md](phase9_master_plan.md)
 |---|---|---|---|
 | 9.1 | bf16 TC matmul family (`matmul_tc_bf16` + optional async / auto-tuner / candle bindings) | ✅ Complete (2026-05-14) | bf16 sync ≈ 55–60 median TF at 4096³; SC-2 split-bound gate green (per-iter bf16/f16 median ≈ +0.9% within ±3%, worst ≈ +2–9% within ±15%); 25/25 D5 correctness tests green. [sprint_9_1.md](sprint_9_1.md) |
 | 9.1.1 | bf16 async TC matmul (`matmul_tc_bf16_async`) — cp.async-pipelined sibling | ✅ Complete (2026-05-15) | bf16_async at 4096³ on RTX 4090 sm_89: SC-2 perf-parity gate green vs f16_async (median +0.72% within ±3%, worst +1.55% within ±15%); 25/25 D5 correctness tests green; D6 cvt-free hot-path gate green. [sprint_9_1_1.md](sprint_9_1_1.md) |
+| 9.1.2 | bf16 auto-tuner cache (`matmul_auto_tc_bf16` + `tune_matmul_tc_bf16`) — 2-way dispatch between bf16 sync and async | ✅ Complete (2026-05-16) | Cache coexistence invariant locked: f16-TC and bf16-TC entries share the same JSON file disambiguated by `kernel` field; 6 GPU dispatch / fallback / correctness tests + 2 host unit tests green. Latent `CacheEnvGuard` parallel race fixed in both tuner test files. [sprint_9_1_2.md](sprint_9_1_2.md) |
 | 9.2 | FlashAttention backward (`attention_flash_bwd` + causal, candle bridge integration) | 📝 Planned | — |
 | 9.3 | `ldmatrix.sync.aligned` IR primitive + `matmul_tc` fragment-A loader rewire | 📝 Planned | — |
 | v0.5.0 | Phase 9 aggregate release | 📝 Planned | After 9.2 ships |
@@ -43,6 +44,7 @@ phase but do not bump versions on their own.
 |---|---|---|---|---|
 | `matmul_tc_bf16` | sync | 9.1 | `bf16 × bf16 → f32` | SM 8.0+, K%16==0, edge-tile predication on M/N. ≈ 91.8% of cuBLAS sgemm at 4096³ on sm_89; SC-2 split-bound gate (per-iter bf16/f16 median ±3% + worst ±15%) green. |
 | `matmul_tc_bf16_async` | async | 9.1.1 | `bf16 × bf16 → f32` | SM 8.0+, K%16==0, edge-tile predication on M/N. cp.async-pipelined A staging (double-buffered, size=16 issue); cross-product of (f16 async × bf16 sync). SC-2 split-bound gate (per-iter bf16_async/f16_async median +0.72% within ±3%, worst +1.55% within ±15%) green at 4096³ on sm_89. |
+| `matmul_auto_tc_bf16` + `tune_matmul_tc_bf16` | auto-tuned | 9.1.2 | `bf16 × bf16 → f32` | SM 8.0+, K%16==0. 2-way dispatch cache between `matmul_tc_bf16` (sync) and `matmul_tc_bf16_async` (async). Shares the f16 auto-tuner's on-disk JSON cache (`~/.cache/kaio/tune_cache.json` or `KAIO_TUNE_CACHE` override); entries disambiguated by `kernel` field. Cache-miss fallback inherits the f16 3072 threshold (separate `ASYNC_FALLBACK_MAX_DIM_THRESHOLD_BF16` symbol so it can drift independently). |
 
 ## kaio-candle additions (`kaio-candle` — standalone crate)
 
