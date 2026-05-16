@@ -183,19 +183,15 @@ kernel paths.
 load-bearing test. It proves f16 and bf16 entries persist in the
 same JSON cache file without collision, complementing the existing
 `cache_matmul_and_matmul_tc_entries_coexist` from Sprint 6.5. A
-failure would have falsified the entire multi-precision tune-cache
-architecture, not just 9.1.2's extension — flagged as such in the
-plan-doc rollback section.
+failure here would have falsified the entire multi-precision
+tune-cache architecture, not just 9.1.2's extension.
 
-### SC-3: hygiene
+### SC-3: quality gates
 
-The standard 10-item pre-push gate is green: fmt, clippy with
-`-D warnings`, host tests, GPU ignored sweep, `cargo xtask showcase`,
-`cargo doc --no-deps --workspace`, docs ↔ code parity, no internal-
-doc refs in the commit series, no AI / reviewer-round / personal-
-name leaks in commit messages or public-shipping content, no new
-bench (none expected; 9.1.2 is correctness + cache coexistence,
-not perf).
+`cargo fmt --all -- --check`, `cargo clippy --all-targets --
+-D warnings`, `cargo test --workspace`, `cargo doc --no-deps
+--workspace`, `cargo xtask showcase` — all green. No new bench;
+9.1.2 is correctness + cache coexistence, not perf.
 
 ## What didn't change
 
