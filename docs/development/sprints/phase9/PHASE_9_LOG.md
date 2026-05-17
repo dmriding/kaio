@@ -13,6 +13,7 @@ Master plan: [phase9_master_plan.md](phase9_master_plan.md)
 | 9.1 | bf16 TC matmul family (`matmul_tc_bf16` + optional async / auto-tuner / candle bindings) | ✅ Complete (2026-05-14) | bf16 sync ≈ 55–60 median TF at 4096³; SC-2 split-bound gate green (per-iter bf16/f16 median ≈ +0.9% within ±3%, worst ≈ +2–9% within ±15%); 25/25 D5 correctness tests green. [sprint_9_1.md](sprint_9_1.md) |
 | 9.1.1 | bf16 async TC matmul (`matmul_tc_bf16_async`) — cp.async-pipelined sibling | ✅ Complete (2026-05-15) | bf16_async at 4096³ on RTX 4090 sm_89: SC-2 perf-parity gate green vs f16_async (median +0.72% within ±3%, worst +1.55% within ±15%); 25/25 D5 correctness tests green; D6 cvt-free hot-path gate green. [sprint_9_1_1.md](sprint_9_1_1.md) |
 | 9.1.2 | bf16 auto-tuner cache (`matmul_auto_tc_bf16` + `tune_matmul_tc_bf16`) — 2-way dispatch between bf16 sync and async | ✅ Complete (2026-05-16) | Cache coexistence invariant locked: f16-TC and bf16-TC entries share the same JSON file disambiguated by `kernel` field; 6 GPU dispatch / fallback / correctness tests + 2 host unit tests green. Latent `CacheEnvGuard` parallel race fixed in both tuner test files. [sprint_9_1_2.md](sprint_9_1_2.md) |
+| 9.1.3 | kaio-candle bf16 forward bindings (`matmul_tc_bf16` + `matmul_tc_bf16_async` via `CustomOp2`) | ✅ Complete (2026-05-18) | Bf16 forwards bridged into candle mirroring the f16 binding shape; 12 GPU roundtrip tests green (6 bit-exact + 4 rejection + 2 SC-2 negative-backward). Forward-only — backward in 9.1.4. `.backward()` on a graph containing either op returns an explicit `Err` naming 9.1.4 + workaround paths, not the generic `BackwardNotSupported` default. Bridge primitives are dtype-generic so no `bridge.rs` changes were needed. [sprint_9_1_3.md](sprint_9_1_3.md) |
 | 9.2 | FlashAttention backward (`attention_flash_bwd` + causal, candle bridge integration) | 📝 Planned | — |
 | 9.3 | `ldmatrix.sync.aligned` IR primitive + `matmul_tc` fragment-A loader rewire | 📝 Planned | — |
 | v0.5.0 | Phase 9 aggregate release | 📝 Planned | After 9.2 ships |
@@ -52,3 +53,5 @@ phase but do not bump versions on their own.
 
 | Op | Sprint | Trait | Kernel |
 |---|---|---|---|
+| `matmul_tc_bf16` | 9.1.3 | `CustomOp2` (`MatmulTcBf16Op`) | `kaio_ops::matmul_tc_bf16` (sync). Forward-only — `.backward()` returns explicit `Err` naming Sprint 9.1.4. |
+| `matmul_tc_bf16_async` | 9.1.3 | `CustomOp2` (`MatmulTcBf16AsyncOp`) | `kaio_ops::matmul_tc_bf16_async` (cp.async). Forward-only — `.backward()` returns explicit `Err` naming Sprint 9.1.4. |
