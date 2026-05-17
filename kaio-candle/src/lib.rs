@@ -130,6 +130,11 @@ mod matmul_tc_async;
 pub use matmul_tc_async::{MatmulTcAsyncOp, matmul_tc_async};
 
 #[cfg(feature = "cuda")]
+mod matmul_tc_bf16_async;
+#[cfg(feature = "cuda")]
+pub use matmul_tc_bf16_async::{MatmulTcBf16AsyncOp, matmul_tc_bf16_async};
+
+#[cfg(feature = "cuda")]
 mod matmul_int4;
 #[cfg(feature = "cuda")]
 pub use matmul_int4::{MatmulInt4Op, matmul_int4};
