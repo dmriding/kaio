@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use candle_core::{Device, Tensor};
-use half::f16;
+use half::{bf16, f16};
 use kaio::prelude::KaioDevice;
 
 // ---------------------------------------------------------------------------
@@ -196,6 +196,291 @@ fn matmul_tc_rejects_nonzero_offset() -> anyhow::Result<()> {
     assert!(
         msg.contains("contiguous") || msg.contains("offset"),
         "expected contiguity or offset rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// matmul_tc_bf16 / matmul_tc_bf16_async (Sprint 9.1.3 — bf16 forwards)
+// ---------------------------------------------------------------------------
+//
+// CROSS-PRECISION ISOLATION CONTRACT (per 9.1.3 plan C3 isolation note):
+// tests in this section share `Arc<KaioDevice>` and Allocator state with
+// the f16 tests above. Bridge primitives are dtype-generic; the existing
+// `#[ignore]` GPU sweep isolation handles concurrency. NO MUTABLE STATE
+// is shared between bf16 and f16 tests beyond device creation — each
+// test allocates its own GpuBuffers and constructs its own Tensors. A
+// future contributor reading only this section does not need to grep
+// the f16 section above to understand the invariant.
+//
+// Forward-only — backward arrives in Sprint 9.1.4. The two negative
+// tests at the bottom assert calling `.backward()` on a graph containing
+// a bf16 op surfaces the explicit Err naming sprint 9.1.4.
+
+fn bit_exact_matmul_tc_bf16(m: usize, n: usize, k: usize) -> anyhow::Result<()> {
+    let a_host: Vec<bf16> = (0..m * k)
+        .map(|i| bf16::from_f32(((i % 31) as f32) * 0.1 - 1.5))
+        .collect();
+    let b_host: Vec<bf16> = (0..k * n)
+        .map(|i| bf16::from_f32(((i % 17) as f32) * 0.05 - 0.4))
+        .collect();
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a_candle = Tensor::from_vec(a_host.clone(), (m, k), &candle_dev)?;
+    let b_candle = Tensor::from_vec(b_host.clone(), (k, n), &candle_dev)?;
+    let c_candle = kaio_candle::matmul_tc_bf16(&kaio_dev, &a_candle, &b_candle)?;
+    let c_candle_host: Vec<f32> = c_candle.flatten_all()?.to_vec1::<f32>()?;
+
+    let a_buf = kaio_dev.alloc_from(&a_host)?;
+    let b_buf = kaio_dev.alloc_from(&b_host)?;
+    let mut c_buf = kaio_dev.alloc_zeros::<f32>(m * n)?;
+    kaio_ops::matmul_tc_bf16(
+        &kaio_dev, &a_buf, &b_buf, &mut c_buf, m as u32, n as u32, k as u32,
+    )?;
+    let c_kaio_host: Vec<f32> = c_buf.to_host(&kaio_dev)?;
+
+    assert_eq!(
+        c_candle_host.len(),
+        c_kaio_host.len(),
+        "output length mismatch"
+    );
+    for (i, (cc, ck)) in c_candle_host.iter().zip(c_kaio_host.iter()).enumerate() {
+        assert_eq!(
+            cc.to_bits(),
+            ck.to_bits(),
+            "bit mismatch at element {i}: candle={cc} kaio={ck} (shapes {m}x{n}x{k})"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_bit_exact_64() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16(64, 64, 64)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_bit_exact_256() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16(256, 256, 256)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_bit_exact_1024() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16(1024, 1024, 1024)
+}
+
+fn bit_exact_matmul_tc_bf16_async(m: usize, n: usize, k: usize) -> anyhow::Result<()> {
+    let a_host: Vec<bf16> = (0..m * k)
+        .map(|i| bf16::from_f32(((i % 31) as f32) * 0.1 - 1.5))
+        .collect();
+    let b_host: Vec<bf16> = (0..k * n)
+        .map(|i| bf16::from_f32(((i % 17) as f32) * 0.05 - 0.4))
+        .collect();
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a_candle = Tensor::from_vec(a_host.clone(), (m, k), &candle_dev)?;
+    let b_candle = Tensor::from_vec(b_host.clone(), (k, n), &candle_dev)?;
+    let c_candle = kaio_candle::matmul_tc_bf16_async(&kaio_dev, &a_candle, &b_candle)?;
+    let c_candle_host: Vec<f32> = c_candle.flatten_all()?.to_vec1::<f32>()?;
+
+    let a_buf = kaio_dev.alloc_from(&a_host)?;
+    let b_buf = kaio_dev.alloc_from(&b_host)?;
+    let mut c_buf = kaio_dev.alloc_zeros::<f32>(m * n)?;
+    kaio_ops::matmul_tc_bf16_async(
+        &kaio_dev, &a_buf, &b_buf, &mut c_buf, m as u32, n as u32, k as u32,
+    )?;
+    let c_kaio_host: Vec<f32> = c_buf.to_host(&kaio_dev)?;
+
+    assert_eq!(c_candle_host.len(), c_kaio_host.len());
+    for (i, (cc, ck)) in c_candle_host.iter().zip(c_kaio_host.iter()).enumerate() {
+        assert_eq!(
+            cc.to_bits(),
+            ck.to_bits(),
+            "bit mismatch at element {i}: candle={cc} kaio={ck} (shapes {m}x{n}x{k})"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_bit_exact_64() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16_async(64, 64, 64)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_bit_exact_256() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16_async(256, 256, 256)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_bit_exact_1024() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16_async(1024, 1024, 1024)
+}
+
+// bf16 rejection-path tests (4 — 2 per binding).
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_rejects_noncontiguous() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+    let b = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+
+    let a_nc = a.t()?;
+    assert!(
+        !a_nc.is_contiguous(),
+        "setup sanity: .t() should be non-contiguous"
+    );
+
+    let err = kaio_candle::matmul_tc_bf16(&kaio_dev, &a_nc, &b).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous"),
+        "expected contiguity rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_rejects_nonzero_offset() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let base = Tensor::ones((128, 64), candle_core::DType::BF16, &candle_dev)?;
+    let a_off = base.narrow(0, 64, 64)?;
+    let b = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+
+    let err = kaio_candle::matmul_tc_bf16(&kaio_dev, &a_off, &b).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous") || msg.contains("offset"),
+        "expected contiguity or offset rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_rejects_noncontiguous() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+    let b = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+
+    let a_nc = a.t()?;
+    assert!(
+        !a_nc.is_contiguous(),
+        "setup sanity: .t() should be non-contiguous"
+    );
+
+    let err = kaio_candle::matmul_tc_bf16_async(&kaio_dev, &a_nc, &b).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous"),
+        "expected contiguity rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_rejects_nonzero_offset() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let base = Tensor::ones((128, 64), candle_core::DType::BF16, &candle_dev)?;
+    let a_off = base.narrow(0, 64, 64)?;
+    let b = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+
+    let err = kaio_candle::matmul_tc_bf16_async(&kaio_dev, &a_off, &b).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous") || msg.contains("offset"),
+        "expected contiguity or offset rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+// SC-3 negative-backward tests (2 — 1 per binding).
+// Asserts the FIRST `.backward()` traversal surfaces the explicit Err
+// naming sprint 9.1.4, not silent no-gradient and not delayed iteration-N.
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_backward_errors_explicitly() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a_data: Vec<bf16> = (0..32 * 32)
+        .map(|i| bf16::from_f32((i as f32) * 0.001))
+        .collect();
+    let b_data: Vec<bf16> = (0..32 * 32)
+        .map(|i| bf16::from_f32((i as f32) * 0.001))
+        .collect();
+    let a = candle_core::Var::from_vec(a_data, (32, 32), &candle_dev)?;
+    let b = candle_core::Var::from_vec(b_data, (32, 32), &candle_dev)?;
+
+    let c = kaio_candle::matmul_tc_bf16(&kaio_dev, a.as_tensor(), b.as_tensor())?;
+    let loss = c.sum_all()?;
+    let err = loss
+        .backward()
+        .expect_err("bf16 backward must error explicitly");
+    let msg = format!("{err}");
+
+    assert!(
+        msg.contains("sprint 9.1.4"),
+        "expected 'sprint 9.1.4' anchor, got: {msg}"
+    );
+    assert!(
+        msg.contains("not yet implemented"),
+        "expected 'not yet implemented' anchor, got: {msg}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_backward_errors_explicitly() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a_data: Vec<bf16> = (0..32 * 32)
+        .map(|i| bf16::from_f32((i as f32) * 0.001))
+        .collect();
+    let b_data: Vec<bf16> = (0..32 * 32)
+        .map(|i| bf16::from_f32((i as f32) * 0.001))
+        .collect();
+    let a = candle_core::Var::from_vec(a_data, (32, 32), &candle_dev)?;
+    let b = candle_core::Var::from_vec(b_data, (32, 32), &candle_dev)?;
+
+    let c = kaio_candle::matmul_tc_bf16_async(&kaio_dev, a.as_tensor(), b.as_tensor())?;
+    let loss = c.sum_all()?;
+    let err = loss
+        .backward()
+        .expect_err("bf16 async backward must error explicitly");
+    let msg = format!("{err}");
+
+    assert!(
+        msg.contains("sprint 9.1.4"),
+        "expected 'sprint 9.1.4' anchor, got: {msg}"
+    );
+    assert!(
+        msg.contains("not yet implemented"),
+        "expected 'not yet implemented' anchor, got: {msg}"
     );
     Ok(())
 }
