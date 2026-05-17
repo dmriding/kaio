@@ -335,10 +335,12 @@ KAIO is pre-1.0 software. Current engineering constraints:
   large. Scalar matmul tops out at 31% of cuBLAS. For small shapes
   prefer cuBLAS or the scalar path. [Details →](docs/performance.md)
 - **Mostly inference.** The [`kaio-candle`](kaio-candle/) bridge ships
-  8 forward ops; `matmul_tc` and `matmul_tc_async` support backward
+  10 forward ops; `matmul_tc` and `matmul_tc_async` support backward
   via mixed-precision autograd (gradients are computed in f16, matching
-  the forward-pass precision). Attention and quantized-op backward are
-  not yet implemented.
+  the forward-pass precision). `matmul_tc_bf16` and
+  `matmul_tc_bf16_async` are forward-only (backward in Sprint 9.1.4
+  via the same forward-reuse pattern). Attention and quantized-op
+  backward are not yet implemented.
 - **DSL is a Rust subset, not compiled Rust.** `#[gpu_kernel]` function
   bodies use Rust syntax but are parsed into KAIO's own IR and lowered
   directly to PTX. The kernel body **never reaches rustc's backend** —
@@ -390,12 +392,12 @@ Four layers, bottom to top:
 | `kaio-core`    | PTX IR, instruction emitters, fragment containers, zero external deps   |
 | `kaio-runtime` | CUDA driver wrapper via [cudarc](https://github.com/coreylowman/cudarc) |
 | `kaio-ops`     | Pre-built GPU operations (matmul, attention, TC matmul, auto-tuner)     |
-| `kaio-candle`  | [candle](https://github.com/huggingface/candle) bridge — 8 forward ops + 2 backward (matmul_tc, matmul_tc_async), event-based stream sync. Standalone crate at [`kaio-candle/`](kaio-candle/) |
+| `kaio-candle`  | [candle](https://github.com/huggingface/candle) bridge — 10 forward ops + 2 backward (matmul_tc, matmul_tc_async), event-based stream sync. Standalone crate at [`kaio-candle/`](kaio-candle/) |
 
 ## Candle integration
 
 The [`kaio-candle`](kaio-candle/) crate bridges KAIO's GPU kernels into
-[candle](https://github.com/huggingface/candle)'s tensor graph. 8 forward
+[candle](https://github.com/huggingface/candle)'s tensor graph. 10 forward
 ops + 2 backward ops, event-based stream sync (CUDA Graph compatible).
 
 ```rust

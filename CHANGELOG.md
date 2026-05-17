@@ -8,10 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1, 9.1.2)
+## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1, 9.1.2, 9.1.3)
 
 ### Added
 
+- `kaio_candle::matmul_tc_bf16` + `kaio_candle::matmul_tc_bf16_async`
+  (Sprint 9.1.3) — bf16 forward bindings into candle for the
+  tensor-core matmul family. Bridges `kaio_ops::matmul_tc_bf16` and
+  `kaio_ops::matmul_tc_bf16_async` (from Sprints 9.1 and 9.1.1) onto
+  candle's `CustomOp2` API; mirrors the f16 `matmul_tc` /
+  `matmul_tc_async` binding shape with bf16 inputs and f32 outputs.
+  Forward-only — backward via forward-reuse arrives in Sprint 9.1.4
+  (mirror of `MatmulTcOp::bwd`). Calling `.backward()` on a graph
+  containing either op returns an explicit `Err` naming Sprint 9.1.4
+  with concrete workaround paths (`kaio_ops` direct call, downcast to
+  f16), not the generic `BackwardNotSupported` candle default. 12 new
+  GPU tests in `kaio-candle/tests/candle_gpu_roundtrip.rs` (6 bit-exact
+  shape tests + 4 rejection-path tests + 2 SC-3 negative-backward
+  tests). Bridge primitives are dtype-generic so no `bridge.rs`
+  changes were needed. Requires SM 8.0+ for bf16 mma. **kaio-candle
+  is outside the root workspace** — build via `cd kaio-candle && cargo
+  build --features cuda` (the `-p kaio-candle` flag from root fails
+  because the crate is intentionally excluded per `Cargo.toml:12`).
 - `kaio_ops::matmul_auto_tc_bf16` + `kaio_ops::tune_matmul_tc_bf16`
   (Sprint 9.1.2) — 2-way bf16 auto-tuner cache between `matmul_tc_bf16`
   (sync) and `matmul_tc_bf16_async` (async). Per-shape dispatch from
