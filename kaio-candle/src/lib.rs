@@ -4,13 +4,15 @@
 //! [candle](https://github.com/huggingface/candle) and the
 //! [KAIO](https://github.com/dmriding/kaio) GPU kernel library.
 //!
-//! ## Status — v0.1.0 (Sprint 7.4a–7.4d)
+//! ## Status — v0.1.0 (initial release)
 //!
-//! Bridges 8 ops across two patterns:
+//! Bridges 10 ops across two patterns:
 //!
 //! **CustomOp-based** (single-output, return `f32`):
 //! - `matmul_tc` — f16 × f16 → f32 matmul via KAIO tensor-core kernel. **Backward supported.**
-//! - `matmul_tc_async` — same, `cp.async` variant (92.5% cuBLAS sgemm at 4096² on sm_89). **Backward supported.**
+//! - `matmul_tc_bf16` — bf16 × bf16 → f32 matmul via KAIO tensor-core kernel. Forward-only (backward in Sprint 9.1.4). _(Sprint 9.1.3)_
+//! - `matmul_tc_async` — same as `matmul_tc`, `cp.async` variant (92.5% cuBLAS sgemm at 4096² on sm_89). **Backward supported.**
+//! - `matmul_tc_bf16_async` — bf16 × bf16 → f32 matmul, `cp.async` variant. Forward-only (backward in Sprint 9.1.4). _(Sprint 9.1.3)_
 //! - `matmul_int4` — GPTQ-style INT4 dequantize-matmul with f16 group scales. Forward-only.
 //! - `matmul_int8` — W8A8 symmetric-quant matmul with scalar f32 scale (80–94 TOPS at 4096³ on sm_89). Forward-only.
 //! - `attention_tc` — fused tensor-core scaled-dot-product attention. Forward-only.
@@ -26,10 +28,14 @@
 //!
 //! ## Backward support
 //!
-//! `matmul_tc` and `matmul_tc_async` implement `CustomOp2::bwd()` for
-//! candle autograd integration. The backward pass computes
-//! `dA = grad @ B^T` and `dB = A^T @ grad` by reusing the same
-//! forward kernel — no new PTX.
+//! `matmul_tc` (f16) and `matmul_tc_async` (f16) implement
+//! `CustomOp2::bwd()` for candle autograd integration. The backward
+//! pass computes `dA = grad @ B^T` and `dB = A^T @ grad` by reusing
+//! the same forward kernel — no new PTX. **The bf16 forwards
+//! (`matmul_tc_bf16`, `matmul_tc_bf16_async`) are forward-only in
+//! Sprint 9.1.3; backward lands in 9.1.4 via the same forward-reuse
+//! pattern.** Calling `.backward()` on a graph containing a bf16
+//! forward returns an explicit error pointing at 9.1.4.
 //!
 //! **Numerically approximate:** the f32 upstream gradient is downcast to
 //! f16 before the tensor-core matmul, and output gradients are cast back
