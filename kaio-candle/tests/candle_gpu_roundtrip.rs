@@ -415,42 +415,6 @@ fn matmul_tc_bf16_async_rejects_nonzero_offset() -> anyhow::Result<()> {
     Ok(())
 }
 
-// (9.1.4 C0/C1: SC-2 negative-backward tests removed — bwd is now
-// implemented; positive gradient-correctness tests live at end of file.)
-
-#[test]
-#[ignore = "requires NVIDIA GPU"]
-fn matmul_tc_bf16_async_backward_errors_explicitly() -> anyhow::Result<()> {
-    let candle_dev = Device::new_cuda(0)?;
-    let kaio_dev = Arc::new(KaioDevice::new(0)?);
-
-    let a_data: Vec<bf16> = (0..32 * 32)
-        .map(|i| bf16::from_f32((i as f32) * 0.001))
-        .collect();
-    let b_data: Vec<bf16> = (0..32 * 32)
-        .map(|i| bf16::from_f32((i as f32) * 0.001))
-        .collect();
-    let a = candle_core::Var::from_vec(a_data, (32, 32), &candle_dev)?;
-    let b = candle_core::Var::from_vec(b_data, (32, 32), &candle_dev)?;
-
-    let c = kaio_candle::matmul_tc_bf16_async(&kaio_dev, a.as_tensor(), b.as_tensor())?;
-    let loss = c.sum_all()?;
-    let err = loss
-        .backward()
-        .expect_err("bf16 async backward must error explicitly");
-    let msg = format!("{err}");
-
-    assert!(
-        msg.contains("sprint 9.1.4"),
-        "expected 'sprint 9.1.4' anchor, got: {msg}"
-    );
-    assert!(
-        msg.contains("not yet implemented"),
-        "expected 'not yet implemented' anchor, got: {msg}"
-    );
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // matmul_int4 bit-exact cross-check (INT4 GPTQ-style, group_size=128)
 // ---------------------------------------------------------------------------
@@ -1735,4 +1699,28 @@ fn gradient_check_matmul_bf16_weighted(
 #[ignore = "requires NVIDIA GPU"]
 fn matmul_tc_bf16_backward_weighted_64x32x128() -> anyhow::Result<()> {
     gradient_check_matmul_bf16_weighted(64, 32, 128, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_backward_32x32x32() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(32, 32, 32, true)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_backward_128x128x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(128, 128, 128, true)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_backward_64x32x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(64, 32, 128, true)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_backward_weighted_64x32x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16_weighted(64, 32, 128, true)
 }

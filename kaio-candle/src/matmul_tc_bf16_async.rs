@@ -4,8 +4,9 @@
 //! sibling to [`matmul_tc_bf16`](super::matmul_tc_bf16::matmul_tc_bf16).
 //! See [crate-level docs](crate) for limitations.
 //!
-//! **Forward-only in Sprint 9.1.3.** Backward arrives in Sprint 9.1.4 via
-//! forward-reuse (mirror of `MatmulTcAsyncOp::bwd`).
+//! Backward via forward-reuse pattern (mirror of `MatmulTcAsyncOp::bwd`):
+//! `dA = grad @ B^T`, `dB = A^T @ grad`, both via this kernel — no new
+//! PTX. See `MatmulTcBf16AsyncOp::bwd` for the precision note.
 //!
 //! For the bf16 precision contract and the `bf16 mma requires sm_80+` gate
 //! rationale, see [`MatmulTcBf16Op`](super::matmul_tc_bf16::MatmulTcBf16Op)
@@ -14,7 +15,9 @@
 
 use std::sync::Arc;
 
-use candle_core::{CpuStorage, CudaStorage, CustomOp2, Error, Layout, Result, Shape, Tensor};
+use candle_core::{
+    CpuStorage, CudaStorage, CustomOp2, DType, Error, Layout, Result, Shape, Tensor,
+};
 use half::bf16;
 use kaio::prelude::{GpuBuffer, KaioDevice};
 use kaio_ops::matmul_tc_bf16_async as kaio_matmul_tc_bf16_async;
@@ -26,8 +29,7 @@ use crate::bridge;
 /// Users call the free function [`matmul_tc_bf16_async`] rather than
 /// constructing this directly.
 ///
-/// **Forward-only in Sprint 9.1.3.** The `bwd()` override returns an
-/// explicit `Err` naming Sprint 9.1.4.
+/// Backward via forward-reuse — see [`MatmulTcBf16AsyncOp::bwd`].
 pub struct MatmulTcBf16AsyncOp {
     /// The KAIO device this op launches on. Must have the same CUDA
     /// ordinal as the input tensors' candle device.
@@ -113,25 +115,36 @@ impl CustomOp2 for MatmulTcBf16AsyncOp {
         Ok((out_storage, Shape::from_dims(&[m_a, n_b])))
     }
 
-    /// Backward pass: explicit `Err` naming Sprint 9.1.4.
+    /// Backward pass: dA = grad @ B^T, dB = A^T @ grad.
     ///
-    /// Sprint 9.1.3 ships forward-only. 9.1.4 adds backward via the same
-    /// forward-reuse pattern used by `MatmulTcAsyncOp::bwd` (the async
-    /// kernel for both directions for consistent perf).
-    ///
-    /// See [`MatmulTcBf16Op::bwd`](super::matmul_tc_bf16::MatmulTcBf16Op)
-    /// for the rationale on explicit-`Err` vs default `BackwardNotSupported`.
+    /// Reuses the forward `matmul_tc_bf16_async` kernel for both
+    /// directions for consistent perf — no new PTX. See
+    /// [`MatmulTcBf16Op::bwd`](super::matmul_tc_bf16::MatmulTcBf16Op)
+    /// for the full precision + memory documentation; the bf16 precision
+    /// note (double bf16 cast, ~7-bit mantissa vs f16's 10-bit, 8-bit
+    /// exponent range advantage) applies identically.
     fn bwd(
         &self,
-        _a: &Tensor,
-        _b: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
         _res: &Tensor,
-        _grad_res: &Tensor,
+        grad_res: &Tensor,
     ) -> Result<(Option<Tensor>, Option<Tensor>)> {
-        Err(Error::Msg(
-            "matmul_tc_bf16_async backward is sprint 9.1.4; not yet implemented — \
-             use kaio_ops::matmul_tc_bf16_async directly or downcast to f16"
-                .to_string(),
+        // grad_res is f32 [M, N]; matmul_tc_bf16_async needs bf16 inputs.
+        let grad_bf16 = grad_res.to_dtype(DType::BF16)?;
+
+        // dA = grad @ B^T → f32 [M, K]
+        let b_t = b.t()?.contiguous()?;
+        let grad_a = matmul_tc_bf16_async(&self.device, &grad_bf16, &b_t)?;
+
+        // dB = A^T @ grad → f32 [K, N]
+        let a_t = a.t()?.contiguous()?;
+        let grad_b = matmul_tc_bf16_async(&self.device, &a_t, &grad_bf16)?;
+
+        // Cast output gradients to bf16 to match input dtypes.
+        Ok((
+            Some(grad_a.to_dtype(DType::BF16)?),
+            Some(grad_b.to_dtype(DType::BF16)?),
         ))
     }
 }
@@ -144,8 +157,9 @@ impl CustomOp2 for MatmulTcBf16AsyncOp {
 /// [`matmul_tc_bf16`](super::matmul_tc_bf16::matmul_tc_bf16): rank-2,
 /// contiguous, zero-offset, `K % 16 == 0`, SM 8.0+.
 ///
-/// **Forward-only in Sprint 9.1.3.** Calling `.backward()` on a graph
-/// containing this op returns an explicit error pointing at Sprint 9.1.4.
+/// **Backward supported** via the forward-reuse pattern in
+/// [`MatmulTcBf16AsyncOp::bwd`] (no new PTX; mirrors the f16 async
+/// sibling from Sprint 7.4d).
 ///
 /// See [crate-level docs](crate) for the full list of limitations.
 pub fn matmul_tc_bf16_async(device: &Arc<KaioDevice>, a: &Tensor, b: &Tensor) -> Result<Tensor> {
