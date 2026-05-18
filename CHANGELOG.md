@@ -8,10 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1, 9.1.2, 9.1.3)
+## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1, 9.1.2, 9.1.3, 9.1.4)
 
 ### Added
 
+- `MatmulTcBf16Op::bwd` + `MatmulTcBf16AsyncOp::bwd` (Sprint 9.1.4)
+  — backward implementations for the two bf16 candle forwards from
+  Sprint 9.1.3. Forward-reuse pattern: `dA = grad @ B^T`, `dB = A^T
+  @ grad`, both computed via the same forward kernel (no new PTX,
+  mirrors the f16 sibling pattern from Sprint 7.4d). The f32 upstream
+  gradient is downcast to bf16 before the matmul, and output gradients
+  are cast back to bf16 to satisfy candle's dtype-matching constraint.
+  After 9.1.4 the bf16 candle surface has full parity with f16:
+  forward + backward for both sync and async variants. 8 new gradient-
+  correctness GPU tests (`matmul_tc_bf16_backward_*`,
+  `matmul_tc_bf16_async_backward_*`) in
+  `kaio-candle/tests/candle_gpu_roundtrip.rs` mirroring the f16
+  coverage (3 shapes × 2 bindings + 1 weighted-loss per binding).
+  Dual-tolerance assertion (`rel < 1e-2 || abs < 1e-3`) identical to
+  f16 — bf16's 7-bit mantissa is lower precision than f16's 10-bit,
+  but the dual-tolerance "OR" structure absorbs small-magnitude
+  values via the absolute bound; bf16's 8-bit exponent gives values
+  representable at scales where f16 would overflow or underflow.
 - `kaio_candle::matmul_tc_bf16` + `kaio_candle::matmul_tc_bf16_async`
   (Sprint 9.1.3) — bf16 forward bindings into candle for the
   tensor-core matmul family. Bridges `kaio_ops::matmul_tc_bf16` and

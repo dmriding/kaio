@@ -6,7 +6,7 @@
 
 **Candle bridge for [KAIO](https://github.com/dmriding/kaio) — `CustomOp` bindings that let you call KAIO's tensor-core GPU kernels directly on `candle_core::Tensor`.**
 
-Ships ten ops: `matmul_tc`, `matmul_tc_bf16`, `matmul_tc_async`, `matmul_tc_bf16_async`, `matmul_int4`, `matmul_int8`, `attention_tc`, `attention_tc_causal`, `qkv_project_int8`, `qkv_project_int4`. `matmul_tc` and `matmul_tc_async` support backward (autograd). `matmul_tc_bf16` and `matmul_tc_bf16_async` ship forward-only — backward arrives in Sprint 9.1.4 via the same forward-reuse pattern; calling `.backward()` on the bf16 ops returns an explicit `Err` naming 9.1.4. All other ops are forward-only.
+Ships ten ops: `matmul_tc`, `matmul_tc_bf16`, `matmul_tc_async`, `matmul_tc_bf16_async`, `matmul_int4`, `matmul_int8`, `attention_tc`, `attention_tc_causal`, `qkv_project_int8`, `qkv_project_int4`. All four matmul TC variants (f16 + bf16, sync + async) support backward (autograd) via the forward-reuse pattern — no new PTX in either precision. Attention and quantized ops are forward-only.
 
 ## Status — v0.1.0 (initial release)
 
