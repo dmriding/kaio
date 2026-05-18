@@ -415,42 +415,8 @@ fn matmul_tc_bf16_async_rejects_nonzero_offset() -> anyhow::Result<()> {
     Ok(())
 }
 
-// SC-3 negative-backward tests (2 — 1 per binding).
-// Asserts the FIRST `.backward()` traversal surfaces the explicit Err
-// naming sprint 9.1.4, not silent no-gradient and not delayed iteration-N.
-
-#[test]
-#[ignore = "requires NVIDIA GPU"]
-fn matmul_tc_bf16_backward_errors_explicitly() -> anyhow::Result<()> {
-    let candle_dev = Device::new_cuda(0)?;
-    let kaio_dev = Arc::new(KaioDevice::new(0)?);
-
-    let a_data: Vec<bf16> = (0..32 * 32)
-        .map(|i| bf16::from_f32((i as f32) * 0.001))
-        .collect();
-    let b_data: Vec<bf16> = (0..32 * 32)
-        .map(|i| bf16::from_f32((i as f32) * 0.001))
-        .collect();
-    let a = candle_core::Var::from_vec(a_data, (32, 32), &candle_dev)?;
-    let b = candle_core::Var::from_vec(b_data, (32, 32), &candle_dev)?;
-
-    let c = kaio_candle::matmul_tc_bf16(&kaio_dev, a.as_tensor(), b.as_tensor())?;
-    let loss = c.sum_all()?;
-    let err = loss
-        .backward()
-        .expect_err("bf16 backward must error explicitly");
-    let msg = format!("{err}");
-
-    assert!(
-        msg.contains("sprint 9.1.4"),
-        "expected 'sprint 9.1.4' anchor, got: {msg}"
-    );
-    assert!(
-        msg.contains("not yet implemented"),
-        "expected 'not yet implemented' anchor, got: {msg}"
-    );
-    Ok(())
-}
+// (9.1.4 C0/C1: SC-2 negative-backward tests removed — bwd is now
+// implemented; positive gradient-correctness tests live at end of file.)
 
 #[test]
 #[ignore = "requires NVIDIA GPU"]
@@ -1541,4 +1507,232 @@ fn matmul_tc_backward_weighted_64x32x128() -> anyhow::Result<()> {
 #[ignore = "requires NVIDIA GPU"]
 fn matmul_tc_async_backward_weighted_64x32x128() -> anyhow::Result<()> {
     gradient_check_matmul_weighted(64, 32, 128, true)
+}
+
+// ---------------------------------------------------------------------------
+// matmul_tc_bf16 / matmul_tc_bf16_async backward (gradient correctness,
+// Sprint 9.1.4)
+//
+// Mirrors the f16 gradient-check helpers above. Per 9.1.4 plan D2/Opus R0
+// correction: helpers are NOT precision-generic at the host-data level
+// (f16 helpers use `Vec<f16>` / `kaio_candle::matmul_tc[_async]`); 9.1.4
+// ships parallel bf16 helpers rather than trying to generalize. Dual
+// tolerance `rel < 1e-2 || abs < 1e-3` identical to f16 (per D1 — empirical
+// fallback to looser bound only if these tests fail on RTX 4090 sm_89).
+// ---------------------------------------------------------------------------
+
+/// Analytical gradient check for C = A @ B with loss = C.sum() (bf16
+/// variant). Same shape as `gradient_check_matmul` but typed for bf16
+/// inputs + bf16 candle ops.
+fn gradient_check_matmul_bf16(m: usize, k: usize, n: usize, use_async: bool) -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // Small-magnitude patterned data in [-0.1, 0.1] for bf16 stability.
+    let a_data: Vec<bf16> = (0..m * k)
+        .map(|i| bf16::from_f32(((i % 19) as f32 - 9.0) * 0.01))
+        .collect();
+    let b_data: Vec<bf16> = (0..k * n)
+        .map(|i| bf16::from_f32(((i % 23) as f32 - 11.0) * 0.01))
+        .collect();
+
+    let a = candle_core::Var::from_vec(a_data.clone(), (m, k), &candle_dev)?;
+    let b = candle_core::Var::from_vec(b_data.clone(), (k, n), &candle_dev)?;
+
+    let c = if use_async {
+        kaio_candle::matmul_tc_bf16_async(&kaio_dev, a.as_tensor(), b.as_tensor())?
+    } else {
+        kaio_candle::matmul_tc_bf16(&kaio_dev, a.as_tensor(), b.as_tensor())?
+    };
+
+    let loss = c.sum_all()?;
+    let grads = loss.backward()?;
+
+    let grad_a = grads.get(a.as_tensor()).expect("a should have gradient");
+    let grad_b = grads.get(b.as_tensor()).expect("b should have gradient");
+
+    let grad_a_host: Vec<bf16> = grad_a.flatten_all()?.to_vec1::<bf16>()?;
+    let grad_b_host: Vec<bf16> = grad_b.flatten_all()?.to_vec1::<bf16>()?;
+
+    // Analytical: dA[i,j] = sum_l B[j,l]; dB[i,j] = sum_l A[l,i].
+    let mut expected_grad_a = vec![0.0f32; m * k];
+    for i in 0..m {
+        for j in 0..k {
+            let mut sum = 0.0f32;
+            for l in 0..n {
+                sum += b_data[j * n + l].to_f32();
+            }
+            expected_grad_a[i * k + j] = sum;
+        }
+    }
+    let mut expected_grad_b = vec![0.0f32; k * n];
+    for i in 0..k {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for l in 0..m {
+                sum += a_data[l * k + i].to_f32();
+            }
+            expected_grad_b[i * n + j] = sum;
+        }
+    }
+
+    let variant = if use_async {
+        "matmul_tc_bf16_async"
+    } else {
+        "matmul_tc_bf16"
+    };
+    for (idx, (got, expected)) in grad_a_host.iter().zip(expected_grad_a.iter()).enumerate() {
+        let got_f32 = got.to_f32();
+        let exp = *expected;
+        let abs_err = (got_f32 - exp).abs();
+        let rel_err = if exp.abs() > 1e-6 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{variant} grad_a mismatch at [{idx}]: got={got_f32}, expected={expected}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e} (M={m} K={k} N={n})"
+        );
+    }
+    for (idx, (got, expected)) in grad_b_host.iter().zip(expected_grad_b.iter()).enumerate() {
+        let got_f32 = got.to_f32();
+        let exp = *expected;
+        let abs_err = (got_f32 - exp).abs();
+        let rel_err = if exp.abs() > 1e-6 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{variant} grad_b mismatch at [{idx}]: got={got_f32}, expected={expected}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e} (M={m} K={k} N={n})"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_backward_32x32x32() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(32, 32, 32, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_backward_128x128x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(128, 128, 128, false)
+}
+
+/// Non-square shape catches transposition bugs where M=K=N would mask a swap.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_backward_64x32x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(64, 32, 128, false)
+}
+
+/// Weighted-loss gradient check for the bf16 path. Same analytical shape as
+/// `gradient_check_matmul_weighted` (loss = sum(W * C); dA = W @ B^T;
+/// dB = A^T @ W) but typed for bf16 inputs.
+fn gradient_check_matmul_bf16_weighted(
+    m: usize,
+    k: usize,
+    n: usize,
+    use_async: bool,
+) -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a_data: Vec<bf16> = (0..m * k)
+        .map(|i| bf16::from_f32(((i % 19) as f32 - 9.0) * 0.01))
+        .collect();
+    let b_data: Vec<bf16> = (0..k * n)
+        .map(|i| bf16::from_f32(((i % 23) as f32 - 11.0) * 0.01))
+        .collect();
+    let w_data: Vec<f32> = (0..m * n).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
+
+    let a = candle_core::Var::from_vec(a_data.clone(), (m, k), &candle_dev)?;
+    let b = candle_core::Var::from_vec(b_data.clone(), (k, n), &candle_dev)?;
+
+    let c = if use_async {
+        kaio_candle::matmul_tc_bf16_async(&kaio_dev, a.as_tensor(), b.as_tensor())?
+    } else {
+        kaio_candle::matmul_tc_bf16(&kaio_dev, a.as_tensor(), b.as_tensor())?
+    };
+
+    let w = Tensor::from_vec(w_data.clone(), (m, n), &candle_dev)?;
+    let loss = (c * w)?.sum_all()?;
+
+    let grads = loss.backward()?;
+    let grad_a = grads.get(a.as_tensor()).expect("a should have gradient");
+    let grad_b = grads.get(b.as_tensor()).expect("b should have gradient");
+
+    let grad_a_host: Vec<bf16> = grad_a.flatten_all()?.to_vec1::<bf16>()?;
+    let grad_b_host: Vec<bf16> = grad_b.flatten_all()?.to_vec1::<bf16>()?;
+
+    let mut expected_grad_a = vec![0.0f32; m * k];
+    for i in 0..m {
+        for j in 0..k {
+            let mut sum = 0.0f32;
+            for l in 0..n {
+                sum += w_data[i * n + l] * b_data[j * n + l].to_f32();
+            }
+            expected_grad_a[i * k + j] = sum;
+        }
+    }
+    let mut expected_grad_b = vec![0.0f32; k * n];
+    for i in 0..k {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for l in 0..m {
+                sum += a_data[l * k + i].to_f32() * w_data[l * n + j];
+            }
+            expected_grad_b[i * n + j] = sum;
+        }
+    }
+
+    let variant = if use_async {
+        "matmul_tc_bf16_async"
+    } else {
+        "matmul_tc_bf16"
+    };
+    for (idx, (got, expected)) in grad_a_host.iter().zip(expected_grad_a.iter()).enumerate() {
+        let got_f32 = got.to_f32();
+        let exp = *expected;
+        let abs_err = (got_f32 - exp).abs();
+        let rel_err = if exp.abs() > 1e-6 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{variant} weighted grad_a mismatch at [{idx}]: got={got_f32}, expected={expected}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e} (M={m} K={k} N={n})"
+        );
+    }
+    for (idx, (got, expected)) in grad_b_host.iter().zip(expected_grad_b.iter()).enumerate() {
+        let got_f32 = got.to_f32();
+        let exp = *expected;
+        let abs_err = (got_f32 - exp).abs();
+        let rel_err = if exp.abs() > 1e-6 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{variant} weighted grad_b mismatch at [{idx}]: got={got_f32}, expected={expected}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e} (M={m} K={k} N={n})"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_backward_weighted_64x32x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16_weighted(64, 32, 128, false)
 }

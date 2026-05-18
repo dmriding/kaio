@@ -4,12 +4,15 @@
 //! `kaio_ops::matmul_tc_bf16`. See [crate-level docs](crate) for limitations
 //! (contiguity, offset, rank-2, CUDA Graphs).
 //!
-//! **Forward-only in Sprint 9.1.3.** Backward arrives in Sprint 9.1.4 via
-//! forward-reuse (mirror of `MatmulTcOp::bwd`).
+//! Backward via forward-reuse pattern (mirror of `MatmulTcOp::bwd`):
+//! `dA = grad @ B^T`, `dB = A^T @ grad`, both via this kernel — no new
+//! PTX. See `MatmulTcBf16Op::bwd` for the precision note.
 
 use std::sync::Arc;
 
-use candle_core::{CpuStorage, CudaStorage, CustomOp2, Error, Layout, Result, Shape, Tensor};
+use candle_core::{
+    CpuStorage, CudaStorage, CustomOp2, DType, Error, Layout, Result, Shape, Tensor,
+};
 use half::bf16;
 use kaio::prelude::{GpuBuffer, KaioDevice};
 use kaio_ops::matmul_tc_bf16 as kaio_matmul_tc_bf16;
@@ -21,9 +24,7 @@ use crate::bridge;
 /// Users call the free function [`matmul_tc_bf16`] rather than constructing
 /// this directly. Carries the `Arc<KaioDevice>` into `cuda_fwd`.
 ///
-/// **Forward-only in Sprint 9.1.3.** The `bwd()` override returns an
-/// explicit `Err` naming Sprint 9.1.4 (which adds backward via the
-/// forward-reuse pattern used by `MatmulTcOp`).
+/// Backward via forward-reuse — see [`MatmulTcBf16Op::bwd`].
 pub struct MatmulTcBf16Op {
     /// The KAIO device this op launches on. Must have the same CUDA
     /// ordinal as the input tensors' candle device (checked per-call via
@@ -114,26 +115,52 @@ impl CustomOp2 for MatmulTcBf16Op {
         Ok((out_storage, Shape::from_dims(&[m_a, n_b])))
     }
 
-    /// Backward pass: explicit `Err` naming Sprint 9.1.4.
+    /// Backward pass: dA = grad @ B^T, dB = A^T @ grad.
     ///
-    /// Sprint 9.1.3 ships forward-only. 9.1.4 adds backward via the same
-    /// forward-reuse pattern used by `MatmulTcOp::bwd` (no new PTX needed —
-    /// `dA = grad @ B^T`, `dB = A^T @ grad`, both via this kernel).
+    /// Reuses the forward `matmul_tc_bf16` kernel — no new PTX. The f32
+    /// `grad_res` is downcast to bf16 before each matmul call, and the
+    /// f32 output gradients are cast back to bf16 to match the input
+    /// dtypes (candle's gradient accumulator requires matching dtypes —
+    /// verified in `backprop.rs:672`).
     ///
-    /// Returning an explicit `Err` instead of falling through to the
-    /// default `BackwardNotSupported` makes the diagnostic actionable:
-    /// the user sees the sprint that fills the gap AND concrete workarounds.
+    /// **Precision note:** the double bf16 cast (input grad + output
+    /// grad) is a known approximation. bf16's 7-bit mantissa is lower
+    /// precision than f16's 10-bit, so per-element quantization noise
+    /// from this round-trip is higher in absolute terms; bf16's 8-bit
+    /// exponent gives values representable at scales where f16 would
+    /// overflow or underflow. The dual-tolerance gradient check
+    /// (`rel < 1e-2 || abs < 1e-3`, identical to f16) covers the
+    /// shapes tested in `candle_gpu_roundtrip.rs`; larger shapes or
+    /// different magnitude regimes may require recalibration.
+    ///
+    /// **Memory:** allocates two materialized transposes (`.t()?.contiguous()?`)
+    /// plus the casted `grad_res`. Peak backward memory ≈ 2-3× forward
+    /// input size.
     fn bwd(
         &self,
-        _a: &Tensor,
-        _b: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
         _res: &Tensor,
-        _grad_res: &Tensor,
+        grad_res: &Tensor,
     ) -> Result<(Option<Tensor>, Option<Tensor>)> {
-        Err(Error::Msg(
-            "matmul_tc_bf16 backward is sprint 9.1.4; not yet implemented — \
-             use kaio_ops::matmul_tc_bf16 directly or downcast to f16"
-                .to_string(),
+        // grad_res is f32 [M, N]; matmul_tc_bf16 needs bf16 inputs.
+        let grad_bf16 = grad_res.to_dtype(DType::BF16)?;
+
+        // dA = grad @ B^T → f32 [M, K]
+        let b_t = b.t()?.contiguous()?;
+        let grad_a = matmul_tc_bf16(&self.device, &grad_bf16, &b_t)?;
+
+        // dB = A^T @ grad → f32 [K, N]
+        let a_t = a.t()?.contiguous()?;
+        let grad_b = matmul_tc_bf16(&self.device, &a_t, &grad_bf16)?;
+
+        // Cast output gradients to bf16 to match input dtypes.
+        // Candle's gradient accumulation (backprop.rs:672) uses
+        // sum_grad.add(&arg_grad) without auto-casting — dtype
+        // mismatch would error.
+        Ok((
+            Some(grad_a.to_dtype(DType::BF16)?),
+            Some(grad_b.to_dtype(DType::BF16)?),
         ))
     }
 }
@@ -148,9 +175,9 @@ impl CustomOp2 for MatmulTcBf16Op {
 /// Requires SM 8.0+ (Ampere or newer; bf16 mma is sm_80+) and
 /// `K % 16 == 0`.
 ///
-/// **Forward-only in Sprint 9.1.3.** Calling `.backward()` on a graph
-/// containing this op returns an explicit error pointing at Sprint 9.1.4
-/// (which adds backward via forward-reuse).
+/// **Backward supported** via the forward-reuse pattern in
+/// [`MatmulTcBf16Op::bwd`] (no new PTX; mirrors the f16 sibling from
+/// Sprint 7.4d).
 ///
 /// See [crate-level docs](crate) for the full list of limitations
 /// (contiguity/offset rejection, rank-2 only, CUDA Graph incompatibility,
