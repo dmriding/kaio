@@ -1477,12 +1477,11 @@ fn matmul_tc_async_backward_weighted_64x32x128() -> anyhow::Result<()> {
 // matmul_tc_bf16 / matmul_tc_bf16_async backward (gradient correctness,
 // Sprint 9.1.4)
 //
-// Mirrors the f16 gradient-check helpers above. Per 9.1.4 plan D2/Opus R0
-// correction: helpers are NOT precision-generic at the host-data level
-// (f16 helpers use `Vec<f16>` / `kaio_candle::matmul_tc[_async]`); 9.1.4
-// ships parallel bf16 helpers rather than trying to generalize. Dual
-// tolerance `rel < 1e-2 || abs < 1e-3` identical to f16 (per D1 — empirical
-// fallback to looser bound only if these tests fail on RTX 4090 sm_89).
+// Parallel to the f16 gradient-check helpers above. These are not
+// precision-generic at the host-data level (f16 helpers use `Vec<f16>` /
+// `kaio_candle::matmul_tc[_async]`); the bf16 path ships parallel helpers
+// rather than generalizing. Dual tolerance `rel < 1e-2 || abs < 1e-3` is
+// identical to f16 and held in practice for the shapes tested below.
 // ---------------------------------------------------------------------------
 
 /// Analytical gradient check for C = A @ B with loss = C.sum() (bf16
