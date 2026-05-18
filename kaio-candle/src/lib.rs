@@ -10,9 +10,9 @@
 //!
 //! **CustomOp-based** (single-output, return `f32`):
 //! - `matmul_tc` — f16 × f16 → f32 matmul via KAIO tensor-core kernel. **Backward supported.**
-//! - `matmul_tc_bf16` — bf16 × bf16 → f32 matmul via KAIO tensor-core kernel. Forward-only (backward in Sprint 9.1.4). _(Sprint 9.1.3)_
+//! - `matmul_tc_bf16` — bf16 × bf16 → f32 matmul via KAIO tensor-core kernel. **Backward supported.** _(Sprint 9.1.3 fwd, 9.1.4 bwd)_
 //! - `matmul_tc_async` — same as `matmul_tc`, `cp.async` variant (92.5% cuBLAS sgemm at 4096² on sm_89). **Backward supported.**
-//! - `matmul_tc_bf16_async` — bf16 × bf16 → f32 matmul, `cp.async` variant. Forward-only (backward in Sprint 9.1.4). _(Sprint 9.1.3)_
+//! - `matmul_tc_bf16_async` — bf16 × bf16 → f32 matmul, `cp.async` variant. **Backward supported.** _(Sprint 9.1.3 fwd, 9.1.4 bwd)_
 //! - `matmul_int4` — GPTQ-style INT4 dequantize-matmul with f16 group scales. Forward-only.
 //! - `matmul_int8` — W8A8 symmetric-quant matmul with scalar f32 scale (80–94 TOPS at 4096³ on sm_89). Forward-only.
 //! - `attention_tc` — fused tensor-core scaled-dot-product attention. Forward-only.
@@ -28,20 +28,29 @@
 //!
 //! ## Backward support
 //!
-//! `matmul_tc` (f16) and `matmul_tc_async` (f16) implement
-//! `CustomOp2::bwd()` for candle autograd integration. The backward
-//! pass computes `dA = grad @ B^T` and `dB = A^T @ grad` by reusing
-//! the same forward kernel — no new PTX. **The bf16 forwards
-//! (`matmul_tc_bf16`, `matmul_tc_bf16_async`) are forward-only in
-//! Sprint 9.1.3; backward lands in 9.1.4 via the same forward-reuse
-//! pattern.** Calling `.backward()` on a graph containing a bf16
-//! forward returns an explicit error pointing at 9.1.4.
+//! `matmul_tc`, `matmul_tc_bf16`, `matmul_tc_async`, and
+//! `matmul_tc_bf16_async` all implement `CustomOp2::bwd()` for candle
+//! autograd integration. The backward pass computes `dA = grad @ B^T`
+//! and `dB = A^T @ grad` by reusing the same forward kernel — no new
+//! PTX in either precision. The f16 backward shipped in Sprint 7.4d;
+//! the bf16 backward shipped in Sprint 9.1.4.
 //!
-//! **Numerically approximate:** the f32 upstream gradient is downcast to
-//! f16 before the tensor-core matmul, and output gradients are cast back
-//! to f16 to satisfy candle's dtype-matching constraint. This is an
-//! initial autograd integration, not a final mixed-precision training
+//! **Numerically approximate (f16):** the f32 upstream gradient is
+//! downcast to f16 before the tensor-core matmul, and output gradients
+//! are cast back to f16 to satisfy candle's dtype-matching constraint.
+//! Initial autograd integration; not a final mixed-precision training
 //! stack.
+//!
+//! **Numerically approximate (bf16):** same shape of cast (f32 → bf16
+//! → matmul → f32 → bf16). bf16's 8-bit exponent gives values
+//! representable at scales where f16 would overflow or underflow;
+//! bf16's 7-bit mantissa is lower precision than f16's 10-bit, so
+//! per-element quantization noise from the round-trip is higher in
+//! absolute terms. The dual-tolerance gradient check
+//! (`rel < 1e-2 || abs < 1e-3`, identical to f16) covers both
+//! precisions in the shapes tested in
+//! `kaio-candle/tests/candle_gpu_roundtrip.rs`; larger shapes or
+//! different magnitude regimes may require recalibration.
 //!
 //! Remaining ops are forward-only: attention backward requires new PTX
 //! kernels (Phase 8); quantized ops are inference-only by design.
