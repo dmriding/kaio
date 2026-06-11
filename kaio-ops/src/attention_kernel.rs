@@ -451,6 +451,185 @@ fn flash_attn_causal_kernel(
     }
 }
 
+// ---------------------------------------------------------------------------
+// FlashAttention `_with_stats` forward variants (Sprint 9.2)
+// ---------------------------------------------------------------------------
+// Identical computation to the kernels above plus one extra store: the
+// per-row softmax logsumexp L = m + log(l), written once per block by
+// thread 0. The backward kernels rebuild P_ij = exp(S_ij - L_i) from L
+// instead of re-tracking the online-softmax max/sum.
+//
+// Separate kernel functions (not a flag) so the shipped forward kernels
+// stay untouched; copy-per-variant matches the causal/non-causal split
+// above. l >= 1 whenever the row has at least one valid key (the max
+// entry contributes exp(0) = 1), so log(l) >= 0 is well-defined — same
+// at-least-one-valid-key assumption documented at the top of this
+// section.
+
+#[allow(clippy::too_many_arguments)]
+#[gpu_kernel(block_size = (256, 1))]
+fn flash_attn_with_stats_kernel(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    out: &mut [f32],
+    stats: &mut [f32],
+    seq_len: u32,
+    d_k: u32,
+    inv_sqrt_dk: f32,
+) {
+    let tid = thread_idx_x();
+    let q_row = block_idx_x();
+    let q_base = q_row * d_k;
+
+    let tile = shared_mem![f32; 256];
+
+    let mut o_acc = 0.0f32;
+    let mut m = -3.402823e+38f32;
+    let mut l = 0.0f32;
+
+    let mut kv_start = 0u32;
+    while kv_start < seq_len {
+        let j = kv_start + tid;
+        let mut score = -3.402823e+38f32;
+        if j < seq_len {
+            score = 0.0f32;
+            let mut d = 0u32;
+            while d < d_k {
+                score = fma(q[q_base + d], k[j * d_k + d], score);
+                d += 1;
+            }
+            score = score * inv_sqrt_dk;
+        }
+        tile[tid] = score;
+        bar_sync();
+
+        let tile_max = block_reduce_max(tile[tid]);
+        let mut m_new = m;
+        if tile_max > m {
+            m_new = tile_max;
+        }
+        let old_scale = exp(m - m_new);
+        tile[tid] = exp(tile[tid] - m_new);
+        bar_sync();
+        let tile_sum = block_reduce_sum(tile[tid]);
+
+        if tid < d_k {
+            o_acc = o_acc * old_scale;
+        }
+        l = old_scale * l + tile_sum;
+        m = m_new;
+
+        if tid < d_k {
+            let mut jj = 0u32;
+            while jj < 256 {
+                if kv_start + jj < seq_len {
+                    let v_val = v[(kv_start + jj) * d_k + tid];
+                    o_acc = fma(tile[jj], v_val, o_acc);
+                }
+                jj += 1;
+            }
+        }
+        bar_sync();
+
+        kv_start += 256;
+    }
+
+    if tid < d_k {
+        out[q_row * d_k + tid] = o_acc / l;
+    }
+
+    // m and l are block-uniform (both reduction-derived), so one thread
+    // writes the row's logsumexp.
+    if tid == 0 {
+        stats[q_row] = m + log(l);
+    }
+}
+
+// Causal `_with_stats` variant: same mask predicate as
+// flash_attn_causal_kernel, same stats tail as above.
+#[allow(clippy::too_many_arguments)]
+#[gpu_kernel(block_size = (256, 1))]
+fn flash_attn_causal_with_stats_kernel(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    out: &mut [f32],
+    stats: &mut [f32],
+    seq_len: u32,
+    d_k: u32,
+    inv_sqrt_dk: f32,
+) {
+    let tid = thread_idx_x();
+    let q_row = block_idx_x();
+    let q_base = q_row * d_k;
+
+    let tile = shared_mem![f32; 256];
+
+    let mut o_acc = 0.0f32;
+    let mut m = -3.402823e+38f32;
+    let mut l = 0.0f32;
+
+    let mut kv_start = 0u32;
+    while kv_start < seq_len {
+        let j = kv_start + tid;
+        let mut score = -3.402823e+38f32;
+        if j < seq_len {
+            if j <= q_row {
+                score = 0.0f32;
+                let mut d = 0u32;
+                while d < d_k {
+                    score = fma(q[q_base + d], k[j * d_k + d], score);
+                    d += 1;
+                }
+                score = score * inv_sqrt_dk;
+            }
+        }
+        tile[tid] = score;
+        bar_sync();
+
+        let tile_max = block_reduce_max(tile[tid]);
+        let mut m_new = m;
+        if tile_max > m {
+            m_new = tile_max;
+        }
+        let old_scale = exp(m - m_new);
+        tile[tid] = exp(tile[tid] - m_new);
+        bar_sync();
+        let tile_sum = block_reduce_sum(tile[tid]);
+
+        if tid < d_k {
+            o_acc = o_acc * old_scale;
+        }
+        l = old_scale * l + tile_sum;
+        m = m_new;
+
+        if tid < d_k {
+            let mut jj = 0u32;
+            while jj < 256 {
+                if kv_start + jj < seq_len {
+                    if kv_start + jj <= q_row {
+                        let v_val = v[(kv_start + jj) * d_k + tid];
+                        o_acc = fma(tile[jj], v_val, o_acc);
+                    }
+                }
+                jj += 1;
+            }
+        }
+        bar_sync();
+
+        kv_start += 256;
+    }
+
+    if tid < d_k {
+        out[q_row * d_k + tid] = o_acc / l;
+    }
+
+    if tid == 0 {
+        stats[q_row] = m + log(l);
+    }
+}
+
 /// FlashAttention: single-head attention without materializing the
 /// O(seq_len^2) attention matrix. O(d_k) memory per query position.
 ///
@@ -498,6 +677,103 @@ pub fn attention_flash_causal(
     let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
     let grid = (seq_len, 1, 1);
     flash_attn_causal_kernel::launch(device, q, k, v, out, seq_len, d_k, inv_sqrt_dk, grid)?;
+    Ok(())
+}
+
+/// FlashAttention forward that additionally saves per-row softmax
+/// statistics for a subsequent backward pass.
+///
+/// Identical computation and output to [`attention_flash()`], plus one
+/// extra write per query row: `stats[i] = L_i = m_i + log(l_i)` — the
+/// row-wise logsumexp of the scaled attention scores. A backward pass
+/// rebuilds `P_ij = exp(S_ij − L_i)` from `L` instead of re-tracking
+/// the online-softmax max/sum, at the cost of one extra
+/// `seq_len × f32` buffer.
+///
+/// The stats contract is one `f32` per (batch item, head, query row).
+/// With this op's single-head self-attention scope that collapses to a
+/// flat `[seq_len]` buffer, which is all the validation requires.
+///
+/// # Constraints
+///
+/// Same as [`attention_flash()`], plus `stats` must hold at least
+/// `seq_len` elements. Every query row attends to at least one key
+/// (nothing is masked in this variant), so `l ≥ 1` and `log(l)` is
+/// well-defined.
+pub fn attention_flash_with_stats(
+    device: &KaioDevice,
+    q: &GpuBuffer<f32>,
+    k: &GpuBuffer<f32>,
+    v: &GpuBuffer<f32>,
+    out: &mut GpuBuffer<f32>,
+    stats: &mut GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+) -> Result<()> {
+    validate_attention_dims(q, k, v, out, seq_len, d_k)?;
+    validate_flash_dk(d_k)?;
+    validate_flash_stats(stats, seq_len)?;
+
+    let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
+    let grid = (seq_len, 1, 1);
+    flash_attn_with_stats_kernel::launch(
+        device,
+        q,
+        k,
+        v,
+        out,
+        stats,
+        seq_len,
+        d_k,
+        inv_sqrt_dk,
+        grid,
+    )?;
+    Ok(())
+}
+
+/// Causal-mask sibling of [`attention_flash_with_stats()`]. See
+/// [`attention_flash_causal()`] for the mask semantics.
+///
+/// The causal diagonal guarantees every query row attends to at least
+/// its own position, so `l ≥ 1` and `log(l)` is well-defined here too.
+pub fn attention_flash_causal_with_stats(
+    device: &KaioDevice,
+    q: &GpuBuffer<f32>,
+    k: &GpuBuffer<f32>,
+    v: &GpuBuffer<f32>,
+    out: &mut GpuBuffer<f32>,
+    stats: &mut GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+) -> Result<()> {
+    validate_attention_dims(q, k, v, out, seq_len, d_k)?;
+    validate_flash_dk(d_k)?;
+    validate_flash_stats(stats, seq_len)?;
+
+    let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
+    let grid = (seq_len, 1, 1);
+    flash_attn_causal_with_stats_kernel::launch(
+        device,
+        q,
+        k,
+        v,
+        out,
+        stats,
+        seq_len,
+        d_k,
+        inv_sqrt_dk,
+        grid,
+    )?;
+    Ok(())
+}
+
+fn validate_flash_stats(stats: &GpuBuffer<f32>, seq_len: u32) -> Result<()> {
+    if stats.len() < seq_len as usize {
+        return Err(KaioError::InvalidConfig(format!(
+            "stats buffer too small: need seq_len = {seq_len} elements (one logsumexp per query row), got {}",
+            stats.len()
+        )));
+    }
     Ok(())
 }
 

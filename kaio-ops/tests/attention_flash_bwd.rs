@@ -30,6 +30,12 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use kaio::prelude::*;
+use kaio_ops::{
+    attention_flash, attention_flash_causal, attention_flash_causal_with_stats,
+    attention_flash_with_stats,
+};
+
 // --- CPU f64 analytical reference ---
 
 /// f64 attention forward. Returns `(O, P)` — backward needs both.
@@ -320,4 +326,201 @@ fn oracle_seq1_closed_form() {
         }
         assert_close_f64(&dv, &w, 1e-15, 1e-15, "seq1/dV");
     }
+}
+
+// ---------------------------------------------------------------------------
+// GPU: `_with_stats` forward variants — L-stats gate (Sprint 9.2)
+// ---------------------------------------------------------------------------
+
+/// Deterministic f32 inputs for the GPU tests (house pattern).
+fn gpu_inputs_f32(seq_len: usize, d_k: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let n = seq_len * d_k;
+    let q: Vec<f32> = (0..n).map(|i| ((i % 17) as f32 - 8.0) * 0.1).collect();
+    let k: Vec<f32> = (0..n).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+    let v: Vec<f32> = (0..n).map(|i| ((i % 19) as f32 - 9.0) * 0.1).collect();
+    (q, k, v)
+}
+
+/// f64 row-wise logsumexp of the scaled score matrix, computed on host
+/// from the same f32 inputs the GPU sees.
+fn cpu_logsumexp_rows_f64(
+    q: &[f32],
+    k: &[f32],
+    seq_len: usize,
+    d_k: usize,
+    causal: bool,
+) -> Vec<f64> {
+    let scale = 1.0f64 / (d_k as f64).sqrt();
+    let mut l_ref = vec![0.0f64; seq_len];
+    for i in 0..seq_len {
+        let lim = if causal { i + 1 } else { seq_len };
+        let mut scores = Vec::with_capacity(lim);
+        for j in 0..lim {
+            let mut dot = 0.0f64;
+            for d in 0..d_k {
+                dot += q[i * d_k + d] as f64 * k[j * d_k + d] as f64;
+            }
+            scores.push(dot * scale);
+        }
+        let max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let sum: f64 = scores.iter().map(|&s| (s - max).exp()).sum();
+        l_ref[i] = max + sum.ln();
+    }
+    l_ref
+}
+
+fn check_with_stats(seq_len: usize, d_k: usize, causal: bool) {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let (q_h, k_h, v_h) = gpu_inputs_f32(seq_len, d_k);
+
+    let q = device.alloc_from(&q_h).unwrap();
+    let k = device.alloc_from(&k_h).unwrap();
+    let v = device.alloc_from(&v_h).unwrap();
+    let mut out_plain = device.alloc_zeros::<f32>(seq_len * d_k).unwrap();
+    let mut out_stats = device.alloc_zeros::<f32>(seq_len * d_k).unwrap();
+    let mut stats = device.alloc_zeros::<f32>(seq_len).unwrap();
+
+    let sl = seq_len as u32;
+    let dk_u = d_k as u32;
+    if causal {
+        attention_flash_causal(&device, &q, &k, &v, &mut out_plain, sl, dk_u).unwrap();
+        attention_flash_causal_with_stats(
+            &device,
+            &q,
+            &k,
+            &v,
+            &mut out_stats,
+            &mut stats,
+            sl,
+            dk_u,
+        )
+        .unwrap();
+    } else {
+        attention_flash(&device, &q, &k, &v, &mut out_plain, sl, dk_u).unwrap();
+        attention_flash_with_stats(&device, &q, &k, &v, &mut out_stats, &mut stats, sl, dk_u)
+            .unwrap();
+    }
+
+    let label = if causal { "causal" } else { "plain" };
+
+    // Contract: the stats variant must not change the numerical output.
+    // The zero-diff (bit-level) assertion holds today because both
+    // kernels are built by the same toolchain in the same run; if a
+    // toolchain or lowering change ever fails it, re-evaluate numerical
+    // equivalence rather than blindly loosening.
+    let plain_h = out_plain.to_host(&device).unwrap();
+    let stats_out_h = out_stats.to_host(&device).unwrap();
+    for idx in 0..seq_len * d_k {
+        assert_eq!(
+            plain_h[idx].to_bits(),
+            stats_out_h[idx].to_bits(),
+            "{label} {seq_len}x{d_k}: with_stats out differs from plain forward at {idx}"
+        );
+    }
+
+    // L vs f64 logsumexp, dual tolerance — L can sit near zero (e.g.
+    // seq_len = 1 with q·k ≈ 0) where pure relative error is undefined.
+    let l_gpu = stats.to_host(&device).unwrap();
+    let l_ref = cpu_logsumexp_rows_f64(&q_h, &k_h, seq_len, d_k, causal);
+    let mut max_abs = 0.0f64;
+    let mut max_rel = 0.0f64;
+    for i in 0..seq_len {
+        let got = l_gpu[i] as f64;
+        let expected = l_ref[i];
+        let abs_err = (got - expected).abs();
+        let rel_err = if expected.abs() > 1e-12 {
+            abs_err / expected.abs()
+        } else {
+            abs_err
+        };
+        max_abs = max_abs.max(abs_err);
+        max_rel = max_rel.max(rel_err);
+        assert!(
+            abs_err < 1e-5 || rel_err < 1e-5,
+            "{label} {seq_len}x{d_k}: L[{i}] got {got}, expected {expected}, abs={abs_err:.2e}, rel={rel_err:.2e}"
+        );
+    }
+    eprintln!("{label} {seq_len}x{d_k}: L max_abs={max_abs:.2e}, max_rel={max_rel:.2e}");
+
+    // Property: Σ_j exp(S_ij − L_i) = 1 per row — the definition of the
+    // normalizer, with S recomputed on host in f64.
+    let scale = 1.0f64 / (d_k as f64).sqrt();
+    for i in 0..seq_len {
+        let lim = if causal { i + 1 } else { seq_len };
+        let mut sum = 0.0f64;
+        for j in 0..lim {
+            let mut dot = 0.0f64;
+            for d in 0..d_k {
+                dot += q_h[i * d_k + d] as f64 * k_h[j * d_k + d] as f64;
+            }
+            sum += (dot * scale - l_gpu[i] as f64).exp();
+        }
+        assert!(
+            (sum - 1.0).abs() < 1e-3,
+            "{label} {seq_len}x{d_k}: rowsum property failed at row {i}: {sum}"
+        );
+    }
+
+    // Determinism canary: identical inputs must produce bit-identical
+    // stats (no atomics, fixed reduction order). The candle backward
+    // recovers L by re-running this kernel, so its correctness rests on
+    // exactly this property.
+    let mut out2 = device.alloc_zeros::<f32>(seq_len * d_k).unwrap();
+    let mut stats2 = device.alloc_zeros::<f32>(seq_len).unwrap();
+    if causal {
+        attention_flash_causal_with_stats(&device, &q, &k, &v, &mut out2, &mut stats2, sl, dk_u)
+            .unwrap();
+    } else {
+        attention_flash_with_stats(&device, &q, &k, &v, &mut out2, &mut stats2, sl, dk_u).unwrap();
+    }
+    let stats2_h = stats2.to_host(&device).unwrap();
+    for i in 0..seq_len {
+        assert_eq!(
+            l_gpu[i].to_bits(),
+            stats2_h[i].to_bits(),
+            "{label} {seq_len}x{d_k}: stats not deterministic at row {i}"
+        );
+    }
+}
+
+#[test]
+#[ignore] // GPU required
+fn with_stats_1x8() {
+    check_with_stats(1, 8, false);
+    check_with_stats(1, 8, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn with_stats_32x32() {
+    check_with_stats(32, 32, false);
+    check_with_stats(32, 32, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn with_stats_64x64() {
+    check_with_stats(64, 64, false);
+    check_with_stats(64, 64, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn with_stats_128x128() {
+    check_with_stats(128, 128, false);
+    check_with_stats(128, 128, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn with_stats_non_aligned_17x19() {
+    check_with_stats(17, 19, false);
+    check_with_stats(17, 19, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn with_stats_tile_boundary_257x32() {
+    check_with_stats(257, 32, false);
+    check_with_stats(257, 32, true);
 }

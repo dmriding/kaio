@@ -87,7 +87,10 @@ mod store_out;
 mod qkv_skeleton;
 mod tuner;
 
-pub use attention_kernel::{attention, attention_causal, attention_flash, attention_flash_causal};
+pub use attention_kernel::{
+    attention, attention_causal, attention_flash, attention_flash_causal,
+    attention_flash_causal_with_stats, attention_flash_with_stats,
+};
 pub use matmul_kernel::matmul;
 pub use tuner::{
     attention_auto, attention_auto_causal, matmul_auto, matmul_auto_tc, matmul_auto_tc_bf16,
