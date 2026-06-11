@@ -145,6 +145,14 @@ unless noted:
   loss × plain/causal × shapes to 128²), seq=1 graph closed form.
 - Full workspace + kaio-candle suites green; no regression in the
   78-test combined GPU sweep.
+- A post-delivery review pass added 3 path-equivalence tests
+  (candle suite now 22 GPU tests): the candle `.backward()`
+  gradients must be bit-exact against the direct kaio-ops
+  `_with_stats` → `attention_flash_bwd` pipeline on the same input
+  bits. The two paths were previously pinned only transitively
+  through the shared oracle; the direct pin is an
+  orchestration-bug tripwire (e.g. a wrong buffer wired as `out`
+  or `stats` in the binding's backward call).
 
 Quality gates per commit: `cargo fmt --all -- --check`, `cargo clippy
 --all-targets -- -D warnings`, `cargo test --workspace`, kaio-candle
