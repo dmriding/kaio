@@ -90,7 +90,7 @@ use kaio_core::ir::{
 use kaio_core::types::PtxType;
 
 use crate::matmul_tc_kernel::{
-    emit_mw_load_tile_b_16x64, emit_pre_zero_shared_tiles, emit_warp_quadrant_mma,
+    FragALoaderKind, emit_mw_load_tile_b_16x64, emit_pre_zero_shared_tiles, emit_warp_quadrant_mma,
     emit_warp_quadrant_store, validate_dims_tc,
 };
 
@@ -859,7 +859,11 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         ty: PtxType::U32,
     }));
 
-    // Per-warp 8-mma accumulation. Same helper as Gate A.
+    // Per-warp 8-mma accumulation. Same helper as Gate A. The async
+    // path stays on the ld.shared A loader this sprint — the ldmatrix
+    // migration (Sprint 9.3) covered the sync kernel only; this call
+    // site is the scheduled second consumer if/when the async path
+    // follows.
     emit_warp_quadrant_mma(
         &mut alloc,
         &mut kernel,
@@ -867,6 +871,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         r_tile_b_warp_cur,
         r_tid_x,
         (r_hoisted_group_id, r_hoisted_tig),
+        FragALoaderKind::LdShared,
         &mut accs,
     );
 

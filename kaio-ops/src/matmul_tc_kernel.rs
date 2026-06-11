@@ -60,8 +60,8 @@
 use half::f16;
 use kaio::prelude::*;
 use kaio_core::fragment::{
-    FragmentA_F16, FragmentB_F16, FragmentC, alloc_c, load_fragment_a_m16n8k16_shared_row,
-    load_fragment_b_m16n8k16_shared_col,
+    FragmentA_F16, FragmentB_F16, FragmentC, alloc_c, load_fragment_a_m16n8k16_ldmatrix,
+    load_fragment_a_m16n8k16_shared_row, load_fragment_b_m16n8k16_shared_col,
 };
 use kaio_core::instr::control::{CmpOp, ControlOp};
 use kaio_core::instr::memory::MemoryOp;
@@ -513,6 +513,28 @@ pub(crate) fn emit_mw_load_tile_b_16x64(
     kernel.push(PtxInstruction::Label(skip_label));
 }
 
+/// Which instruction sequence loads the A fragments inside
+/// [`emit_warp_quadrant_mma`] (Sprint 9.3).
+///
+/// The helper is shared by the sync and async kernels; the loader
+/// choice is per-call-site so the two paths can migrate independently:
+/// the sync `matmul_tc` uses [`LdMatrix`](Self::LdMatrix), the async
+/// kernel stays on [`LdShared`](Self::LdShared) this sprint, and the
+/// `matmul_tc_ldshared` bench sibling keeps the old path alive for the
+/// interleaved A/B regression bench. Fragment-register contents are
+/// bit-identical between the two (locked by the
+/// `ldmatrix_fragment_contract` GPU gate) — only the instruction mix
+/// differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FragALoaderKind {
+    /// Four per-thread `ld.shared.b32` with hand-computed offsets
+    /// (the pre-9.3 path; ~9 ALU + 4 loads per stripe).
+    LdShared,
+    /// One warp-collective `ldmatrix.m8n8.x4` (4 ALU + 1 load per
+    /// stripe). Requires the A tile declared `align: 16`.
+    LdMatrix,
+}
+
 /// Per-warp accumulation of one K-tile: 8 mma.sync.m16n8k16 calls in a
 /// 2 (m_stripe) × 4 (n_stripe) grid. Each mma covers a 16×8 sub-tile of
 /// the warp's 32×32 quadrant. Loads 2 distinct A fragments (one per
@@ -521,6 +543,7 @@ pub(crate) fn emit_mw_load_tile_b_16x64(
 ///
 /// The accumulator slice `&mut [FragmentC; 8]` is indexed as
 /// `accs[m_stripe * MMAS_PER_WARP_N + n_stripe]`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_warp_quadrant_mma(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
@@ -528,6 +551,7 @@ pub(crate) fn emit_warp_quadrant_mma(
     tile_b_warp_base_shared: Register, // u32 — tile_b + warp_col_quad * 32 * TILE_B_COL_STRIDE_BYTES
     warp_lane: Register,               // u32 — tid_x ∈ [0, 32)
     warp_group_tig: (Register, Register), // Sprint 6.7b D10 hoist: (group_id, tig) for this warp lane
+    frag_a_loader: FragALoaderKind,       // Sprint 9.3: A-fragment load path
     accs: &mut [FragmentC; 8],
 ) {
     // Load 2 FragmentA_F16's, one per m_stripe.
@@ -546,14 +570,26 @@ pub(crate) fn emit_warp_quadrant_mma(
             }));
             r
         };
-        let frag = load_fragment_a_m16n8k16_shared_row(
-            alloc,
-            kernel,
-            a_stripe_base,
-            warp_lane,
-            TILE_A_ROW_STRIDE_BYTES,
-            Some(warp_group_tig),
-        );
+        let frag = match frag_a_loader {
+            FragALoaderKind::LdShared => load_fragment_a_m16n8k16_shared_row(
+                alloc,
+                kernel,
+                a_stripe_base,
+                warp_lane,
+                TILE_A_ROW_STRIDE_BYTES,
+                Some(warp_group_tig),
+            ),
+            // The (group, tig) hoist stays alive for the B loaders and
+            // the output store — ldmatrix addressing consumes the full
+            // lane id instead.
+            FragALoaderKind::LdMatrix => load_fragment_a_m16n8k16_ldmatrix(
+                alloc,
+                kernel,
+                a_stripe_base,
+                warp_lane,
+                TILE_A_ROW_STRIDE_BYTES,
+            ),
+        };
         frags_a[m_stripe as usize] = Some(frag);
     }
 
@@ -1021,7 +1057,7 @@ pub(crate) fn emit_pre_zero_shared_tiles(
 /// target (e.g. `sm_70`) is legal at build time; `PtxModule::validate()`
 /// inside `KaioDevice::load_module` then rejects the module cleanly with
 /// `ValidationError::SmTooLow`.
-pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
+pub(crate) fn build_matmul_tc_module(sm: &str, frag_a_loader: FragALoaderKind) -> PtxModule {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("matmul_tc");
 
@@ -1034,7 +1070,12 @@ pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
 
     kernel.add_shared_decl(SharedDecl {
         name: "tile_a".to_string(),
-        align: 4,
+        // 16 since Sprint 9.3: ldmatrix row addresses must be 16-byte
+        // aligned at runtime (not statically checked by ptxas) — the
+        // declaration alignment guarantees the tile base; all intra-tile
+        // offsets are already 16-byte multiples. Harmless for the
+        // LdShared build (alignment is a minimum).
+        align: 16,
         size_bytes: TILE_A_BYTES,
     });
     kernel.add_shared_decl(SharedDecl {
@@ -1467,6 +1508,7 @@ pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
         r_tile_b_warp,
         r_tid_x,
         (r_hoisted_group_id, r_hoisted_tig),
+        frag_a_loader,
         &mut accs,
     );
 
@@ -1580,6 +1622,13 @@ pub(crate) fn build_matmul_tc_module(sm: &str) -> PtxModule {
 /// A is M×K row-major, B is K×N row-major, D is M×N row-major. B is
 /// transposed on the way into shared memory (column-major) so the B
 /// fragment loader can use single-half2 loads per K stripe.
+///
+/// Since Sprint 9.3 the A fragments load via `ldmatrix.m8n8.x4`
+/// (warp-collective, one instruction per stripe) instead of four
+/// per-thread `ld.shared.b32` — bit-identical fragment contents (locked
+/// by the `ldmatrix_fragment_contract` GPU gate), fewer issue slots.
+/// The previous load path stays available as [`matmul_tc_ldshared`]
+/// for the interleaved A/B regression bench.
 pub fn matmul_tc(
     device: &KaioDevice,
     a: &GpuBuffer<f16>,
@@ -1589,6 +1638,41 @@ pub fn matmul_tc(
     n: u32,
     k: u32,
 ) -> Result<()> {
+    launch_matmul_tc(device, a, b, c, m, n, k, FragALoaderKind::LdMatrix)
+}
+
+/// Bench-only sibling of [`matmul_tc`] that keeps the pre-9.3
+/// `ld.shared` fragment-A path: byte-identical kernel except the
+/// A-fragment load instructions. Exists so the ldmatrix A/B regression
+/// bench can interleave both variants in one process (the only honest
+/// timing methodology — see the SC-2 notes in the bf16 bench).
+/// Not public API; exported `#[doc(hidden)]` like `matmul_naive`.
+/// Scheduled for removal together with the `FragALoaderKind::LdShared`
+/// arm when the async kernel migrates to ldmatrix.
+#[doc(hidden)]
+pub fn matmul_tc_ldshared(
+    device: &KaioDevice,
+    a: &GpuBuffer<f16>,
+    b: &GpuBuffer<f16>,
+    c: &mut GpuBuffer<f32>,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<()> {
+    launch_matmul_tc(device, a, b, c, m, n, k, FragALoaderKind::LdShared)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_matmul_tc(
+    device: &KaioDevice,
+    a: &GpuBuffer<f16>,
+    b: &GpuBuffer<f16>,
+    c: &mut GpuBuffer<f32>,
+    m: u32,
+    n: u32,
+    k: u32,
+    frag_a_loader: FragALoaderKind,
+) -> Result<()> {
     use cudarc::driver::{LaunchConfig, PushKernelArg};
 
     validate_dims_tc(a, b, c, m, n, k)?;
@@ -1596,7 +1680,7 @@ pub fn matmul_tc(
     let info = device.info()?;
     let (major, minor) = info.compute_capability;
     let sm = format!("sm_{major}{minor}");
-    let module = build_matmul_tc_module(&sm);
+    let module = build_matmul_tc_module(&sm, frag_a_loader);
 
     let kmodule = device.load_module(&module)?;
     let func = kmodule.function("matmul_tc")?;
@@ -1730,16 +1814,17 @@ mod tests {
     fn build_matmul_tc_module_produces_valid_structure() {
         // Sprint 6.7 multi-warp: 64×64 block tile, 4 warps, 8 mma per warp
         // per K-tile (2 m_stripes × 4 n_stripes). Tile A = 2048 B (64×16
-        // fp16, row-major). Tile B = 2560 B per Sprint 6.7b (64×36 data
+        // fp16, row-major; align 16 since Sprint 9.3 for ldmatrix row
+        // addressing). Tile B = 2560 B per Sprint 6.7b (64×36 data
         // with col-stride padding for bank-conflict relief, rounded up to
         // next multiple of THREADS_PER_BLOCK*4 for cooperative-zero).
-        let module = build_matmul_tc_module("sm_89");
+        let module = build_matmul_tc_module("sm_89", FragALoaderKind::LdMatrix);
         let ptx = emit_module_to_string(&module);
 
         assert!(ptx.contains(".visible .entry matmul_tc("));
         assert!(
-            ptx.contains(".shared .align 4 .b8 tile_a[2048]"),
-            "tile_a should be 2048 B (64×16 fp16)"
+            ptx.contains(".shared .align 16 .b8 tile_a[2048]"),
+            "tile_a should be 2048 B (64×16 fp16), align 16 for ldmatrix"
         );
         assert!(
             ptx.contains(".shared .align 4 .b8 tile_b[2560]"),
@@ -1752,6 +1837,15 @@ mod tests {
         assert_eq!(
             mma_count, 8,
             "expected 8 mma.sync emits per K-iter (2 m_stripes × 4 n_stripes per warp)"
+        );
+
+        // Sprint 9.3: the two A stripes load via ldmatrix.
+        let ldmatrix_count = ptx
+            .matches("ldmatrix.sync.aligned.m8n8.x4.shared.b16")
+            .count();
+        assert_eq!(
+            ldmatrix_count, 2,
+            "expected 2 ldmatrix.x4 emits per K-iter (one per m_stripe)"
         );
 
         // Edge-tile predication uses setp.lt.and.u32 and predicated stores.
@@ -1767,16 +1861,56 @@ mod tests {
         );
     }
 
+    /// Sprint 9.3: the two loader builds differ exactly by the
+    /// A-fragment load path — ldmatrix drops the 8 per-thread
+    /// `ld.shared.b32` (4 per stripe × 2 stripes) in favor of 2
+    /// warp-collective ldmatrix ops, and nothing else moves.
+    #[test]
+    fn build_matmul_tc_module_loader_kinds_differ_only_in_a_path() {
+        let ptx_new =
+            emit_module_to_string(&build_matmul_tc_module("sm_89", FragALoaderKind::LdMatrix));
+        let ptx_old =
+            emit_module_to_string(&build_matmul_tc_module("sm_89", FragALoaderKind::LdShared));
+
+        // The packed-pair loads emit as `ld.shared.u32` (the .b32-class
+        // register carries a .u32 memory suffix); count the generic
+        // mnemonic so the assertion tracks instruction count, not
+        // suffix spelling.
+        let ld_shared = |ptx: &str| ptx.matches("ld.shared").count();
+        let ldmatrix = |ptx: &str| ptx.matches("ldmatrix.sync.aligned").count();
+        let mma = |ptx: &str| ptx.matches("mma.sync.aligned.m16n8k16").count();
+
+        assert_eq!(
+            ldmatrix(&ptx_old),
+            0,
+            "LdShared build must not emit ldmatrix"
+        );
+        assert_eq!(ldmatrix(&ptx_new), 2, "LdMatrix build: one per m_stripe");
+        assert!(
+            ld_shared(&ptx_old) > 8,
+            "sanity: LdShared build must contain A-fragment shared loads"
+        );
+        assert_eq!(
+            ld_shared(&ptx_old) - ld_shared(&ptx_new),
+            8,
+            "ldmatrix replaces exactly the 8 A-fragment ld.shared (4 regs × 2 stripes)"
+        );
+        assert_eq!(mma(&ptx_old), mma(&ptx_new), "mma mix must be identical");
+        // Both keep the old kernel symbol — separate driver modules.
+        assert!(ptx_old.contains(".visible .entry matmul_tc("));
+        assert!(ptx_new.contains(".visible .entry matmul_tc("));
+    }
+
     #[test]
     fn build_matmul_tc_module_declares_requested_sm_target() {
-        let module_70 = build_matmul_tc_module("sm_70");
+        let module_70 = build_matmul_tc_module("sm_70", FragALoaderKind::LdMatrix);
         let ptx_70 = emit_module_to_string(&module_70);
         assert!(
             ptx_70.contains(".target sm_70"),
             "sm_70 should round-trip verbatim (no flooring)"
         );
 
-        let module_89 = build_matmul_tc_module("sm_89");
+        let module_89 = build_matmul_tc_module("sm_89", FragALoaderKind::LdMatrix);
         let ptx_89 = emit_module_to_string(&module_89);
         assert!(ptx_89.contains(".target sm_89"));
     }
@@ -1785,7 +1919,11 @@ mod tests {
     fn matmul_tc_module_rejects_sm_70_via_validate() {
         use kaio_core::ir::ValidationError;
 
-        let module = build_matmul_tc_module("sm_70");
+        // LdMatrix build: at sm_70 the FIRST offending instruction in
+        // body order is now the ldmatrix A-load (requires 75), which
+        // precedes the mma (requires 80) — updated deliberately in
+        // Sprint 9.3. The LdShared build still reports the mma gate.
+        let module = build_matmul_tc_module("sm_70", FragALoaderKind::LdMatrix);
         let err = module
             .validate()
             .expect_err("matmul_tc module at sm_70 must fail validation");
@@ -1795,12 +1933,50 @@ mod tests {
                 actual,
                 feature,
             } => {
-                assert_eq!(required, 80, "mma.sync.m16n8k16 requires sm_80");
+                assert_eq!(required, 75, "ldmatrix gate fires first at sm_70");
                 assert_eq!(actual, 70);
                 assert!(
-                    feature.contains("mma.sync"),
-                    "feature string should name mma.sync; got: {feature}"
+                    feature.contains("ldmatrix"),
+                    "feature string should name ldmatrix; got: {feature}"
                 );
+            }
+            other => panic!("expected SmTooLow, got {other:?}"),
+        }
+
+        let module_old = build_matmul_tc_module("sm_70", FragALoaderKind::LdShared);
+        let err_old = module_old
+            .validate()
+            .expect_err("LdShared matmul_tc module at sm_70 must fail validation");
+        match err_old {
+            ValidationError::SmTooLow {
+                required, feature, ..
+            } => {
+                assert_eq!(required, 80, "mma.sync.m16n8k16 requires sm_80");
+                assert!(feature.contains("mma.sync"));
+            }
+            other => panic!("expected SmTooLow, got {other:?}"),
+        }
+    }
+
+    /// The kernel's effective floor is still sm_80 (the mma gate):
+    /// ldmatrix passing at sm_75 must not loosen anything.
+    #[test]
+    fn matmul_tc_module_rejects_sm_75_via_mma_gate() {
+        use kaio_core::ir::ValidationError;
+
+        let module = build_matmul_tc_module("sm_75", FragALoaderKind::LdMatrix);
+        let err = module
+            .validate()
+            .expect_err("matmul_tc module at sm_75 must still fail on the mma gate");
+        match err {
+            ValidationError::SmTooLow {
+                required,
+                actual,
+                feature,
+            } => {
+                assert_eq!(required, 80);
+                assert_eq!(actual, 75);
+                assert!(feature.contains("mma.sync"));
             }
             other => panic!("expected SmTooLow, got {other:?}"),
         }
@@ -1809,10 +1985,12 @@ mod tests {
     #[test]
     fn matmul_tc_module_validates_at_sm_80_and_above() {
         for sm in ["sm_80", "sm_89", "sm_90"] {
-            let module = build_matmul_tc_module(sm);
-            module
-                .validate()
-                .unwrap_or_else(|e| panic!("{sm} should validate; got error: {e}"));
+            for loader in [FragALoaderKind::LdMatrix, FragALoaderKind::LdShared] {
+                let module = build_matmul_tc_module(sm, loader);
+                module.validate().unwrap_or_else(|e| {
+                    panic!("{sm} ({loader:?}) should validate; got error: {e}")
+                });
+            }
         }
     }
 }

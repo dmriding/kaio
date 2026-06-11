@@ -101,6 +101,13 @@ pub use tuner::{
 #[doc(hidden)]
 pub use matmul_kernel::matmul_naive;
 
+// Pre-9.3 ld.shared fragment-A variant of matmul_tc — exists solely so
+// the ldmatrix A/B regression bench can interleave old and new load
+// paths in one process (not public API). Retires with the
+// FragALoaderKind::LdShared arm when the async kernel migrates.
+#[doc(hidden)]
+pub use matmul_tc_kernel::matmul_tc_ldshared;
+
 // FlashAttention backward building blocks — exposed for the per-kernel
 // correctness tests; the public API is the orchestrating
 // attention_flash_bwd / attention_flash_bwd_causal functions.
