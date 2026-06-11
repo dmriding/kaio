@@ -149,7 +149,11 @@ unless noted:
 Quality gates per commit: `cargo fmt --all -- --check`, `cargo clippy
 --all-targets -- -D warnings`, `cargo test --workspace`, kaio-candle
 fmt + clippy + no-CUDA build + `cargo doc`; GPU sweeps at each
-kernel-bearing commit.
+kernel-bearing commit. One sequencing note for the audit trail: the
+C4 commit's chained gate command short-circuited before `cargo fmt`
+ran (clippy and tests had passed separately), so a formatting-only
+follow-up commit landed later in the sprint and every gate was
+re-verified individually at close.
 
 ## What didn't change
 

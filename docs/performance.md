@@ -535,14 +535,18 @@ Two cost tiers, by design:
   between the two columns is exactly one forward.
 
 The bwd/fwd ratio grows with `seq_len` (2.5× at `n128` up to ~10.6×
-median at `n2048` plain). This is a property of the current
-block-per-row backward structure, not hidden recomputation: each
-backward block performs roughly twice the forward block's serial
-per-tile work (two dot products per score plus two accumulation
-streams), and the forward gains occupancy efficiency at scale that
-the heavier backward blocks cannot match. The backward is
-correctness-first; a tiled rework (FA2-style BLOCK_M > 1) is the
-named follow-up if training-loop throughput demands it. The causal
+median at `n2048` plain). Two structural causes, both by design.
+First, the backward recomputes scores rather than materializing
+them: the flash formulation never stores the attention matrix, so
+the dK/dV and dQ kernels each rebuild `S` and `dP` from Q/K/V and
+the saved logsumexp — two dot products per score pair where the
+forward pays one. That recomputation is the no-materialization
+tradeoff, not an inefficiency to hunt down. Second, the forward
+gains occupancy efficiency at scale that the heavier backward
+blocks cannot match. The backward is correctness-first; a tiled
+rework (FA2-style BLOCK_M > 1, sharing recomputed scores within a
+tile) is the named follow-up if training-loop throughput demands
+it. The causal
 variant runs ~2× faster than plain at large `seq` on both fwd and
 bwd, matching the halved score-matrix work.
 
