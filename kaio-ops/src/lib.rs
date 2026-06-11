@@ -101,6 +101,12 @@ pub use tuner::{
 #[doc(hidden)]
 pub use matmul_kernel::matmul_naive;
 
+// FlashAttention backward building blocks — exposed for the per-kernel
+// correctness tests; the public API is the orchestrating
+// attention_flash_bwd / attention_flash_bwd_causal functions.
+#[doc(hidden)]
+pub use attention_kernel::{attention_flash_bwd_dkdv, attention_flash_bwd_preprocess};
+
 // Sprint 6.7 D7 promotion (multi-warp restructure + edge tiles +
 // benchmark) + Sprint 6.7b (bank-conflict padding + D10 hoist,
 // 82.3% sync / 92.5% async cuBLAS sgemm at 4096²). Stable public

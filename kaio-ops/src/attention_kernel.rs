@@ -630,6 +630,191 @@ fn flash_attn_causal_with_stats_kernel(
     }
 }
 
+// ---------------------------------------------------------------------------
+// FlashAttention backward kernels (Sprint 9.2)
+// ---------------------------------------------------------------------------
+// Standard attention-backward identities with P rebuilt from the saved
+// logsumexp L (no online max/sum re-tracking):
+//
+//   P_ij  = exp(S_ij - L_i)            S = scale * Q K^T
+//   dV_j  = sum_i P_ij * dO_i
+//   dP_ij = dO_i . V_j
+//   D_i   = sum_d dO[i,d] * O[i,d]     (preprocess kernel, one pass)
+//   dS_ij = P_ij * (dP_ij - D_i)
+//   dQ_i  = scale * sum_j dS_ij * K_j
+//   dK_j  = scale * sum_i dS_ij * Q_i
+//
+// Three kernels, all block-per-output-row with 256 threads (the same
+// proven structure as the forward): a tiny preprocess computing D, a
+// dK/dV kernel (one block per key row, streaming query rows), and a dQ
+// kernel (one block per query row, streaming key rows). The loop-nest
+// swap between the dK/dV and dQ kernels gives every output row exactly
+// one owning block — no atomics, no cross-block reductions.
+
+// D_i = sum_d dO[i,d] * O[i,d]. One block per row; threads cover the
+// d_k dims (d_k <= 256), block-reduce, thread 0 stores. Mask-independent
+// (only dO and O are involved), so one kernel serves both variants.
+#[gpu_kernel(block_size = (256, 1))]
+fn flash_attn_bwd_preprocess_kernel(d_out: &[f32], o: &[f32], d_buf: &mut [f32], d_k: u32) {
+    let tid = thread_idx_x();
+    let row = block_idx_x();
+
+    let mut prod = 0.0f32;
+    if tid < d_k {
+        prod = d_out[row * d_k + tid] * o[row * d_k + tid];
+    }
+    let total = block_reduce_sum(prod);
+    if tid == 0 {
+        d_buf[row] = total;
+    }
+}
+
+// dK_j / dV_j: one block per key row j, threads stream query rows i in
+// 256-tiles. Phase 1: thread tid owns query row i = q_start + tid and
+// computes P_ij and dS_ij into two shared tiles. Phase 2: the first d_k
+// threads serially accumulate the tile into per-dim dK/dV registers
+// (same accumulation shape as the forward's P*V phase).
+#[allow(clippy::too_many_arguments)]
+#[gpu_kernel(block_size = (256, 1))]
+fn flash_attn_bwd_dkdv_kernel(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    d_out: &[f32],
+    stats: &[f32],
+    d_buf: &[f32],
+    dk: &mut [f32],
+    dv: &mut [f32],
+    seq_len: u32,
+    d_k: u32,
+    inv_sqrt_dk: f32,
+) {
+    let tid = thread_idx_x();
+    let key_row = block_idx_x();
+
+    let tile_p = shared_mem![f32; 256];
+    let tile_ds = shared_mem![f32; 256];
+
+    let mut dk_acc = 0.0f32;
+    let mut dv_acc = 0.0f32;
+
+    let mut q_start = 0u32;
+    while q_start < seq_len {
+        let i = q_start + tid;
+        let mut p_val = 0.0f32;
+        let mut ds_val = 0.0f32;
+        if i < seq_len {
+            let mut s = 0.0f32;
+            let mut dp = 0.0f32;
+            let mut d = 0u32;
+            while d < d_k {
+                s = fma(q[i * d_k + d], k[key_row * d_k + d], s);
+                dp = fma(d_out[i * d_k + d], v[key_row * d_k + d], dp);
+                d += 1;
+            }
+            s = s * inv_sqrt_dk;
+            p_val = exp(s - stats[i]);
+            ds_val = p_val * (dp - d_buf[i]);
+        }
+        tile_p[tid] = p_val;
+        tile_ds[tid] = ds_val;
+        bar_sync();
+
+        if tid < d_k {
+            let mut ii = 0u32;
+            while ii < 256 {
+                if q_start + ii < seq_len {
+                    let row = q_start + ii;
+                    dv_acc = fma(tile_p[ii], d_out[row * d_k + tid], dv_acc);
+                    dk_acc = fma(tile_ds[ii], q[row * d_k + tid], dk_acc);
+                }
+                ii += 1;
+            }
+        }
+        bar_sync();
+
+        q_start += 256;
+    }
+
+    if tid < d_k {
+        dk[key_row * d_k + tid] = dk_acc * inv_sqrt_dk;
+        dv[key_row * d_k + tid] = dv_acc;
+    }
+}
+
+// Causal dK/dV: key row j only receives gradient from query rows
+// i >= j (the forward masked j > i). Invalid rows park zeros in the
+// shared tiles, mirroring the forward's mask-then-accumulate shape.
+#[allow(clippy::too_many_arguments)]
+#[gpu_kernel(block_size = (256, 1))]
+fn flash_attn_bwd_dkdv_causal_kernel(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    d_out: &[f32],
+    stats: &[f32],
+    d_buf: &[f32],
+    dk: &mut [f32],
+    dv: &mut [f32],
+    seq_len: u32,
+    d_k: u32,
+    inv_sqrt_dk: f32,
+) {
+    let tid = thread_idx_x();
+    let key_row = block_idx_x();
+
+    let tile_p = shared_mem![f32; 256];
+    let tile_ds = shared_mem![f32; 256];
+
+    let mut dk_acc = 0.0f32;
+    let mut dv_acc = 0.0f32;
+
+    let mut q_start = 0u32;
+    while q_start < seq_len {
+        let i = q_start + tid;
+        let mut p_val = 0.0f32;
+        let mut ds_val = 0.0f32;
+        if i < seq_len {
+            if i >= key_row {
+                let mut s = 0.0f32;
+                let mut dp = 0.0f32;
+                let mut d = 0u32;
+                while d < d_k {
+                    s = fma(q[i * d_k + d], k[key_row * d_k + d], s);
+                    dp = fma(d_out[i * d_k + d], v[key_row * d_k + d], dp);
+                    d += 1;
+                }
+                s = s * inv_sqrt_dk;
+                p_val = exp(s - stats[i]);
+                ds_val = p_val * (dp - d_buf[i]);
+            }
+        }
+        tile_p[tid] = p_val;
+        tile_ds[tid] = ds_val;
+        bar_sync();
+
+        if tid < d_k {
+            let mut ii = 0u32;
+            while ii < 256 {
+                if q_start + ii < seq_len {
+                    let row = q_start + ii;
+                    dv_acc = fma(tile_p[ii], d_out[row * d_k + tid], dv_acc);
+                    dk_acc = fma(tile_ds[ii], q[row * d_k + tid], dk_acc);
+                }
+                ii += 1;
+            }
+        }
+        bar_sync();
+
+        q_start += 256;
+    }
+
+    if tid < d_k {
+        dk[key_row * d_k + tid] = dk_acc * inv_sqrt_dk;
+        dv[key_row * d_k + tid] = dv_acc;
+    }
+}
+
 /// FlashAttention: single-head attention without materializing the
 /// O(seq_len^2) attention matrix. O(d_k) memory per query position.
 ///
@@ -764,6 +949,81 @@ pub fn attention_flash_causal_with_stats(
         inv_sqrt_dk,
         grid,
     )?;
+    Ok(())
+}
+
+/// Backward preprocess: `D[i] = Σ_d dO[i,d] · O[i,d]`, one f32 per
+/// query row. Internal building block of `attention_flash_bwd`;
+/// exposed for the per-kernel correctness tests only.
+#[doc(hidden)]
+pub fn attention_flash_bwd_preprocess(
+    device: &KaioDevice,
+    grad_out: &GpuBuffer<f32>,
+    out: &GpuBuffer<f32>,
+    d_buf: &mut GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+) -> Result<()> {
+    let grid = (seq_len, 1, 1);
+    flash_attn_bwd_preprocess_kernel::launch(device, grad_out, out, d_buf, d_k, grid)?;
+    Ok(())
+}
+
+/// Backward dK/dV accumulation. Internal building block of
+/// `attention_flash_bwd`; exposed for the per-kernel correctness tests
+/// only. Callers are responsible for `stats` and `d_buf` provenance
+/// (same q/k/v, same mask mode).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn attention_flash_bwd_dkdv(
+    device: &KaioDevice,
+    grad_out: &GpuBuffer<f32>,
+    q: &GpuBuffer<f32>,
+    k: &GpuBuffer<f32>,
+    v: &GpuBuffer<f32>,
+    stats: &GpuBuffer<f32>,
+    d_buf: &GpuBuffer<f32>,
+    dk: &mut GpuBuffer<f32>,
+    dv: &mut GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+    causal: bool,
+) -> Result<()> {
+    let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
+    let grid = (seq_len, 1, 1); // one block per key row
+    if causal {
+        flash_attn_bwd_dkdv_causal_kernel::launch(
+            device,
+            q,
+            k,
+            v,
+            grad_out,
+            stats,
+            d_buf,
+            dk,
+            dv,
+            seq_len,
+            d_k,
+            inv_sqrt_dk,
+            grid,
+        )?;
+    } else {
+        flash_attn_bwd_dkdv_kernel::launch(
+            device,
+            q,
+            k,
+            v,
+            grad_out,
+            stats,
+            d_buf,
+            dk,
+            dv,
+            seq_len,
+            d_k,
+            inv_sqrt_dk,
+            grid,
+        )?;
+    }
     Ok(())
 }
 

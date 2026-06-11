@@ -32,8 +32,8 @@
 
 use kaio::prelude::*;
 use kaio_ops::{
-    attention_flash, attention_flash_causal, attention_flash_causal_with_stats,
-    attention_flash_with_stats,
+    attention_flash, attention_flash_bwd_dkdv, attention_flash_bwd_preprocess,
+    attention_flash_causal, attention_flash_causal_with_stats, attention_flash_with_stats,
 };
 
 // --- CPU f64 analytical reference ---
@@ -523,4 +523,131 @@ fn with_stats_non_aligned_17x19() {
 fn with_stats_tile_boundary_257x32() {
     check_with_stats(257, 32, false);
     check_with_stats(257, 32, true);
+}
+
+// ---------------------------------------------------------------------------
+// GPU: backward dK/dV kernel vs the f64 oracle (Sprint 9.2)
+// ---------------------------------------------------------------------------
+
+/// Upstream-gradient pattern for the GPU backward tests.
+fn gpu_grad_f32(seq_len: usize, d_k: usize) -> Vec<f32> {
+    (0..seq_len * d_k)
+        .map(|i| ((i % 11) as f32 - 5.0) * 0.2)
+        .collect()
+}
+
+/// Tolerance gate for GPU f32 gradients vs the f64 oracle.
+fn assert_grads_close(got: &[f32], expected: &[f64], label: &str) {
+    let got_f64: Vec<f64> = got.iter().map(|&x| x as f64).collect();
+    assert_close_f64(&got_f64, expected, 1e-3, 1e-2, label);
+}
+
+/// Runs the real GPU pipeline (forward `_with_stats` → preprocess →
+/// dkdv) and compares dK/dV against the all-f64 analytical oracle.
+fn check_dkdv(seq_len: usize, d_k: usize, causal: bool) {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let (q_h, k_h, v_h) = gpu_inputs_f32(seq_len, d_k);
+    let g_h = gpu_grad_f32(seq_len, d_k);
+
+    let sl = seq_len as u32;
+    let dk_u = d_k as u32;
+    let n = seq_len * d_k;
+
+    let q = device.alloc_from(&q_h).unwrap();
+    let k = device.alloc_from(&k_h).unwrap();
+    let v = device.alloc_from(&v_h).unwrap();
+    let g = device.alloc_from(&g_h).unwrap();
+    let mut out = device.alloc_zeros::<f32>(n).unwrap();
+    let mut stats = device.alloc_zeros::<f32>(seq_len).unwrap();
+    let mut d_buf = device.alloc_zeros::<f32>(seq_len).unwrap();
+    let mut dk_gpu = device.alloc_zeros::<f32>(n).unwrap();
+    let mut dv_gpu = device.alloc_zeros::<f32>(n).unwrap();
+
+    if causal {
+        attention_flash_causal_with_stats(&device, &q, &k, &v, &mut out, &mut stats, sl, dk_u)
+            .unwrap();
+    } else {
+        attention_flash_with_stats(&device, &q, &k, &v, &mut out, &mut stats, sl, dk_u).unwrap();
+    }
+    attention_flash_bwd_preprocess(&device, &g, &out, &mut d_buf, sl, dk_u).unwrap();
+    attention_flash_bwd_dkdv(
+        &device,
+        &g,
+        &q,
+        &k,
+        &v,
+        &stats,
+        &d_buf,
+        &mut dk_gpu,
+        &mut dv_gpu,
+        sl,
+        dk_u,
+        causal,
+    )
+    .unwrap();
+
+    let label = if causal { "causal" } else { "plain" };
+
+    // Intermediate diagnostic: the preprocess D buffer vs an f64 host
+    // recompute from the GPU's own out — isolates preprocess bugs from
+    // dkdv bugs when bisecting a failure.
+    let out_h = out.to_host(&device).unwrap();
+    let d_gpu_h = d_buf.to_host(&device).unwrap();
+    let d_ref: Vec<f64> = (0..seq_len)
+        .map(|i| {
+            (0..d_k)
+                .map(|d| g_h[i * d_k + d] as f64 * out_h[i * d_k + d] as f64)
+                .sum()
+        })
+        .collect();
+    let d_gpu_f64: Vec<f64> = d_gpu_h.iter().map(|&x| x as f64).collect();
+    assert_close_f64(
+        &d_gpu_f64,
+        &d_ref,
+        1e-4,
+        1e-4,
+        &format!("dkdv_{label}_{seq_len}x{d_k}/D"),
+    );
+
+    // Primary gate: dK/dV vs the all-f64 analytical oracle.
+    let q64: Vec<f64> = q_h.iter().map(|&x| x as f64).collect();
+    let k64: Vec<f64> = k_h.iter().map(|&x| x as f64).collect();
+    let v64: Vec<f64> = v_h.iter().map(|&x| x as f64).collect();
+    let g64: Vec<f64> = g_h.iter().map(|&x| x as f64).collect();
+    let (o_ref, p_ref) = cpu_attention_fwd_f64(&q64, &k64, &v64, seq_len, d_k, causal);
+    let (_, dk_ref, dv_ref) =
+        cpu_attention_bwd_f64(&q64, &k64, &v64, &o_ref, &p_ref, &g64, seq_len, d_k);
+
+    let dk_h = dk_gpu.to_host(&device).unwrap();
+    let dv_h = dv_gpu.to_host(&device).unwrap();
+    assert_grads_close(&dk_h, &dk_ref, &format!("dkdv_{label}_{seq_len}x{d_k}/dK"));
+    assert_grads_close(&dv_h, &dv_ref, &format!("dkdv_{label}_{seq_len}x{d_k}/dV"));
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dkdv_32x32() {
+    check_dkdv(32, 32, false);
+    check_dkdv(32, 32, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dkdv_64x64() {
+    check_dkdv(64, 64, false);
+    check_dkdv(64, 64, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dkdv_128x128() {
+    check_dkdv(128, 128, false);
+    check_dkdv(128, 128, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dkdv_non_aligned_17x19() {
+    check_dkdv(17, 19, false);
+    check_dkdv(17, 19, true);
 }
