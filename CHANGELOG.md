@@ -8,10 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1, 9.1.2, 9.1.3, 9.1.4, 9.2)
+## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1, 9.1.2, 9.1.3, 9.1.4, 9.2, 9.3)
 
 ### Added
 
+- `ldmatrix.sync.aligned` IR primitive (Sprint 9.3) —
+  `TensorCoreOp::LdMatrix` in kaio-core: `m8n8` `.b16` warp-collective
+  fragment loads, `.x2`/`.x4` widths (register count bound to the
+  width by construction via `LdMatrixDst`), optional `.trans`.
+  `min_sm() = 75` (Turing) — the first sub-Ampere tensor-core op;
+  audited against the PTX ISA plus per-variant `ptxas --verify` probes
+  at sm_75/sm_80, with module-load validation extended to reject
+  mis-typed destination/address registers
+  (`ValidationError::LdMatrixBadRegType`) and new ptxas-verify gates
+  for both emitted forms on both targets.
+  - `load_fragment_a_m16n8k16_ldmatrix` — fragment-A loader emitting
+    4 ALU + 1 `ldmatrix.x4` per stripe (vs ~9 ALU + 4 `ld.shared.b32`),
+    proven **bit-identical** to the shipped `ld.shared` loader by a
+    GPU contract gate (both A stripes, distinct-element tile data,
+    staging self-check) before any kernel integration.
+  - `matmul_tc` loader A/B measurement: interleaved per-iter ratios
+    (SC-2 methodology) put the ldmatrix path at the ±3% structural
+    noise floor at 4096³ (102.75/104.49/102.82% across three release
+    runs), flat at smaller shapes, no regression anywhere — at the A
+    tile's 32-B row stride the bank-conflict pattern is unchanged by
+    ldmatrix, so issue-count reduction alone doesn't move the
+    global-load-bound sync path. The production default stays on the
+    proven `ld.shared` loader; the ldmatrix path ships built-and-parked
+    behind `FragALoaderKind` + a hidden `matmul_tc_ldmatrix` sibling,
+    guarded by a permanent A/B regression bench
+    (`matmul_tc_ldmatrix_bench`, one-sided non-regression gates +
+    bit-exact pre-gate), ready for the XOR-swizzle follow-up that
+    makes the collective load pay.
 - FlashAttention backward (Sprint 9.2) — the Phase 9 headline.
   Three layers in one sprint:
   - `kaio_ops::attention_flash_with_stats` +

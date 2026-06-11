@@ -325,6 +325,35 @@ pipeline already saturates load bandwidth; its remaining bottleneck
 was shared-memory contention at fragment-read time, which is exactly
 what the padding fixes. Sync is still global-memory-latency-bound.
 
+### ldmatrix fragment-A loader: measured, parked (Sprint 9.3)
+
+Sprint 9.3 built the `ldmatrix.sync.aligned.m8n8.x4` warp-collective
+fragment-A loader for the sync kernel — bit-identical fragment
+contents to the per-thread `ld.shared` path (locked by a GPU contract
+gate), 4 ALU + 1 load per stripe instead of ~9 ALU + 4 loads — and
+measured it with an interleaved A/B bench (SC-2 methodology: per-iter
+ratios, alternating launch order, both kernels in one process). RTX
+4090 sm_89, three release runs, 4096³ interleaved median
+(ldmatrix/ld.shared): **102.75% / 104.49% / 102.82%** — at the ±3%
+structural noise floor, flat at smaller shapes, no regression at any
+measured shape.
+
+The mechanism behind the flat result: at the A tile's 32-byte row
+stride, the shared-memory bank-conflict pattern is **unchanged** by
+ldmatrix, and the sync path is global-load bound — so an
+instruction-issue reduction alone doesn't move wall-clock. The
+production default therefore stays on the proven `ld.shared` path,
+and the ldmatrix loader ships **built and parked** (a deferred win,
+not a null result): the IR primitive, loader, contract gate, and A/B
+regression bench are all in place, and the default flip is one line
+when an XOR-swizzle tile layout removes the bank conflicts and lets
+the collective load pay.
+
+(The A/B bench's absolute TF columns run below this document's
+worst-of-10 tables — short-burst runs without a sustained clock ramp.
+The interleaved per-iter ratios are thermal-invariant, so the verdict
+holds; the absolutes are not comparable.)
+
 ### Path to higher throughput (future work)
 
 Above the current worst-of-10 ceiling (115% async / 107% sync of
@@ -343,11 +372,14 @@ choices this kernel hasn't yet made:
   creep against 6.7b's D10 orthogonality requirement. A future
   sprint can design that primitive properly and then use the
   LDG.128 variant cleanly.
-- **bf16 TC matmul / larger mma shapes** — deferred from Phase 7;
-  tracked under Phase 9 kernel deepening.
-- **ldmatrix.sync.aligned** — deferred from Phase 7; tracked under
-  Phase 9 kernel deepening. The real path to closing the remaining
-  sync-path gap.
+- **XOR-swizzle shared-tile layout + ldmatrix default flip.** The
+  Sprint 9.3 measurement above localized the sync path's shared-side
+  cost in the bank-conflict pattern, not instruction issue. A
+  swizzled A-tile layout that de-conflicts the 32-B row stride is the
+  lever that makes the already-built ldmatrix loader pay; the flip
+  itself is one line.
+- **Larger mma shapes** — deferred from Phase 7; tracked under Phase
+  9 kernel deepening (bf16 TC matmul shipped in Sprints 9.1–9.1.4).
 
 ## Quantized Matmul Performance (Sprints 7.1 + 7.2)
 
