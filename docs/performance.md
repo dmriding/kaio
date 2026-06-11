@@ -504,6 +504,48 @@ comparisons are apples-to-apples. Across the two tables, prefer
 wall-clock at matched `seq_len` as the primary axis — dtypes
 differ, so TOPS-style throughput would mislead.
 
+### FlashAttention backward (Sprint 9.2)
+
+`attention_flash_bwd` / `attention_flash_bwd_causal` — three-kernel
+backward (D-preprocess + dK/dV + dQ) consuming the logsumexp stats
+saved by the `_with_stats` forward variants. RTX 4090 (sm_89),
+release build, 5 warm-ups + 20 timed iterations per run, worst /
+median over 10 runs, `d_k = 128`:
+
+| Shape | Variant | fwd ms (w/m) | bwd ms (w/m) | bwd/fwd (w/m) | bwd+recompute/fwd (w/m) |
+|---|---|---:|---:|---:|---:|
+| `n128` | plain | 0.314 / 0.301 | 0.783 / 0.754 | 2.57 / 2.51 | 4.12 / 3.58 |
+| `n128` | causal | 0.314 / 0.297 | 0.796 / 0.761 | 2.62 / 2.54 | 3.81 / 3.62 |
+| `n512` | plain | 0.458 / 0.424 | 2.267 / 1.982 | 5.22 / 4.72 | 6.91 / 5.79 |
+| `n512` | causal | 0.441 / 0.401 | 1.526 / 1.268 | 3.46 / 3.19 | 4.83 / 4.18 |
+| `n1024` | plain | 1.120 / 1.019 | 9.760 / 7.657 | 8.74 / 7.44 | 9.01 / 8.20 |
+| `n1024` | causal | 0.686 / 0.673 | 3.506 / 3.181 | 5.20 / 4.74 | 6.43 / 5.86 |
+| `n2048` | plain | 2.846 / 2.535 | 29.840 / 26.956 | 10.80 / 10.63 | 13.01 / 11.66 |
+| `n2048` | causal | 1.609 / 1.598 | 12.857 / 11.685 | 8.04 / 7.35 | 9.54 / 8.59 |
+
+Two cost tiers, by design:
+
+- **`bwd/fwd`** — the backward kernels alone. This is what a direct
+  kaio-ops caller pays when it kept the stats buffer from
+  `attention_flash_with_stats`.
+- **`bwd+recompute/fwd`** — backward plus a `_with_stats` re-run to
+  recover the stats. This is what the `kaio-candle` autograd binding
+  pays per backward call: candle's `CustomOp3` has no fwd→bwd
+  saved-intermediate channel, so the binding recomputes. The gap
+  between the two columns is exactly one forward.
+
+The bwd/fwd ratio grows with `seq_len` (2.5× at `n128` up to ~10.6×
+median at `n2048` plain). This is a property of the current
+block-per-row backward structure, not hidden recomputation: each
+backward block performs roughly twice the forward block's serial
+per-tile work (two dot products per score plus two accumulation
+streams), and the forward gains occupancy efficiency at scale that
+the heavier backward blocks cannot match. The backward is
+correctness-first; a tiled rework (FA2-style BLOCK_M > 1) is the
+named follow-up if training-loop throughput demands it. The causal
+variant runs ~2× faster than plain at large `seq` on both fwd and
+bwd, matching the halved score-matrix work.
+
 ## Norm + Activation Kernel Performance (Sprint 3 + Sprint 6.8)
 
 Six showcase-example kernels benched under a unified harness with
@@ -598,7 +640,7 @@ watch; the 262K and 1M rows are dispatch-overhead-bound.
 - `matmul_int4_bench` — W4A16 GPTQ-style INT4 matmul
 - `qkv_project_bench` — fused INT4 vs 3× `matmul_int4`; INT8 absolute TOPS
 - `attention_tc_bench` — `attention_tc` + `attention_tc_causal` (short-seq TC)
-- `attention_flash_bench` — `attention_flash` + `attention_flash_causal` (long-seq)
+- `attention_flash_bench` — `attention_flash` + `attention_flash_causal` (long-seq) + the Sprint 9.2 backward benchmark (`benchmark_attention_flash_backward`)
 - `norm_activation_bench` — rms_norm / layer_norm / softmax (reductions) +
   fused_silu_gate / gelu_exact / gelu_fast (elementwise sweep)
 
