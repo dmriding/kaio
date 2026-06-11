@@ -160,6 +160,11 @@ mod attention_tc;
 pub use attention_tc::{AttentionTcOp, attention_tc, attention_tc_causal};
 
 #[cfg(feature = "cuda")]
+mod attention_flash;
+#[cfg(feature = "cuda")]
+pub use attention_flash::{AttentionFlashOp, attention_flash, attention_flash_causal};
+
+#[cfg(feature = "cuda")]
 mod matmul_int8;
 #[cfg(feature = "cuda")]
 pub use matmul_int8::{MatmulInt8Op, matmul_int8};
