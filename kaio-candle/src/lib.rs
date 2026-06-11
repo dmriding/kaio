@@ -6,7 +6,7 @@
 //!
 //! ## Status — v0.1.0 (initial release)
 //!
-//! Bridges 10 ops across two patterns:
+//! Bridges 12 ops across two patterns:
 //!
 //! **CustomOp-based** (single-output, return `f32`):
 //! - `matmul_tc` — f16 × f16 → f32 matmul via KAIO tensor-core kernel. **Backward supported.**
@@ -17,6 +17,8 @@
 //! - `matmul_int8` — W8A8 symmetric-quant matmul with scalar f32 scale (80–94 TOPS at 4096³ on sm_89). Forward-only.
 //! - `attention_tc` — fused tensor-core scaled-dot-product attention. Forward-only.
 //! - `attention_tc_causal` — same, with decoder causal mask. Forward-only.
+//! - `attention_flash` — FlashAttention, f32 single-head self-attention, no O(seq²) memory and no seq cap. **Backward supported.** _(Sprint 9.2, dedicated backward PTX kernels)_
+//! - `attention_flash_causal` — same, with decoder causal mask. **Backward supported.** _(Sprint 9.2)_
 //!
 //! **Direct-call** (multi-output, return `f16`, forward-only):
 //! - `qkv_project_int8` — W8A16 fused tri-output QKV projection (4 inputs → 3 f16 outputs).
@@ -28,12 +30,28 @@
 //!
 //! ## Backward support
 //!
-//! `matmul_tc`, `matmul_tc_bf16`, `matmul_tc_async`, and
-//! `matmul_tc_bf16_async` all implement `CustomOp2::bwd()` for candle
-//! autograd integration. The backward pass computes `dA = grad @ B^T`
+//! Two backward families ship:
+//!
+//! **Forward-reuse (matmul TC):** `matmul_tc`, `matmul_tc_bf16`,
+//! `matmul_tc_async`, and `matmul_tc_bf16_async` all implement
+//! `CustomOp2::bwd()`. The backward pass computes `dA = grad @ B^T`
 //! and `dB = A^T @ grad` by reusing the same forward kernel — no new
 //! PTX in either precision. The f16 backward shipped in Sprint 7.4d;
 //! the bf16 backward shipped in Sprint 9.1.4.
+//!
+//! **Dedicated backward kernels (FlashAttention):** `attention_flash`
+//! and `attention_flash_causal` implement `CustomOp3::bwd()` backed by
+//! three purpose-built PTX kernels in kaio-ops (a D-term preprocess,
+//! a dK/dV kernel, and a dQ kernel) — attention backward has no
+//! forward-reuse identity. The kernels rebuild the softmax from a
+//! per-row logsumexp rather than materializing the O(seq²) probability
+//! matrix, preserving FlashAttention's memory profile through the
+//! backward pass. Because candle's `CustomOp3` has no fwd→bwd
+//! saved-intermediate channel, each backward call re-runs the
+//! stats-saving forward once to recover the logsumexp (the forward is
+//! deterministic, so the recomputed stats are bit-identical); direct
+//! kaio-ops callers can keep the stats buffer and skip that cost.
+//! Gradients are f32 end-to-end — no dtype casts.
 //!
 //! **Numerically approximate (f16):** the f32 upstream gradient is
 //! downcast to f16 before the tensor-core matmul, and output gradients
@@ -52,8 +70,10 @@
 //! `kaio-candle/tests/candle_gpu_roundtrip.rs`; larger shapes or
 //! different magnitude regimes may require recalibration.
 //!
-//! Remaining ops are forward-only: attention backward requires new PTX
-//! kernels (Phase 8); quantized ops are inference-only by design.
+//! Remaining ops are forward-only: `attention_tc` / `attention_tc_causal`
+//! are short-sequence inference ops (training users route to
+//! `attention_flash`, which has backward and no `seq_k` cap); quantized
+//! ops are inference-only by design.
 //!
 //! ## Build requirements
 //!
@@ -107,9 +127,10 @@
 //!   sides, which is not yet verified. Default-stream users should not
 //!   attempt graph capture.
 //! - **f32 output contract (CustomOp ops).** `matmul_tc`, `matmul_int4`,
-//!   `matmul_int8`, and `attention_tc` return `DType::F32` matching the
-//!   kaio-ops accumulator. Direct-call ops (`qkv_project_int{4,8}`) return
-//!   `DType::F16` because the fused kernel converts internally.
+//!   `matmul_int8`, `attention_tc`, and `attention_flash` return
+//!   `DType::F32` matching the kaio-ops accumulator. Direct-call ops
+//!   (`qkv_project_int{4,8}`) return `DType::F16` because the fused
+//!   kernel converts internally.
 //! - **Bench numbers vs direct-call gap.** Each bridge call issues event-
 //!   based stream sync (two `join()` calls — `cuEventRecord` +
 //!   `cuStreamWaitEvent` per sync point). This replaced the heavier
