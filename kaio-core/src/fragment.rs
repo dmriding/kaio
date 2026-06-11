@@ -1074,6 +1074,109 @@ fn load_fragment_a_m16n8k16_shared_row_impl(
     }
 }
 
+/// Load one A-fragment for `mma.sync.m16n8k16.f16` from a 16×16
+/// row-major fp16 tile in **shared** memory via a single
+/// `ldmatrix.sync.aligned.m8n8.x4.shared.b16` (Sprint 9.3).
+///
+/// Produces a [`FragmentA_F16`] whose per-thread register contents are
+/// **bit-identical** to [`load_fragment_a_m16n8k16_shared_row`] on the
+/// same tile data — the warp-collective hardware load replaces the four
+/// per-thread `ld.shared.b32` plus most of the offset arithmetic
+/// (4 ALU + 1 ldmatrix here vs ~9 ALU + 4 loads there). The equivalence
+/// is locked by a GPU contract test, not assumed.
+///
+/// ## Per-lane address derivation
+///
+/// `ldmatrix.x4` consumes one row address from **every** lane: lanes
+/// `8i..8i+7` supply rows 0..7 of matrix `i`, and matrix `i` lands in
+/// fragment register `i`. To reproduce the hand-rolled loader's
+/// register meanings (reg0/reg1 = rows g/g+8 of the low column half,
+/// reg2/reg3 = the high column half), the four 8×8 quadrants of the
+/// 16×16 tile must be supplied in **[top-left, bottom-left, top-right,
+/// bottom-right]** order. In closed form per lane:
+///
+/// ```text
+/// row      = lane & 15      // bit 3 → +8 rows for matrices 1 and 3
+/// col_byte = lane & 16      // bit 4 → +16 bytes (8 cols) for 2 and 3
+/// addr     = tile_base + row * row_stride_bytes + col_byte
+/// ```
+///
+/// Within each loaded 8×8, the hardware distributes lane `t` the `.b32`
+/// word holding (row `t/4`, cols `2(t%4)..2(t%4)+1`) — exactly the
+/// mma A-quadrant layout (PTX ISA §9.7.13.5.8.1).
+///
+/// ## Requirements
+///
+/// - SM 7.5+ (validated at module load via the `LdMatrix` SM gate).
+/// - Every supplied row address must be **16-byte aligned** at runtime
+///   (ptxas does not statically check this): the tile's shared
+///   declaration must use `align: 16` and `row_stride_bytes` must be a
+///   multiple of 16.
+/// - All 32 lanes converged (same rule as `mma.sync`), each holding a
+///   valid in-bounds address.
+///
+/// # Parameters
+///
+/// - `tile_base_shared` — `.u32` register holding the shared-memory
+///   offset of the tile's row-0 column-0 element (same convention as
+///   the `ld.shared` loader).
+/// - `lane_id` — `.u32` register holding `%tid.x` in `[0, 32)`. Unlike
+///   the `ld.shared` loader there is no `(group, tig)` override — the
+///   address derivation consumes the full lane id directly.
+/// - `row_stride_bytes` — bytes between consecutive tile rows
+///   (multiple of 16; `32` for the matmul_tc `tile_a`).
+pub fn load_fragment_a_m16n8k16_ldmatrix(
+    alloc: &mut RegisterAllocator,
+    kernel: &mut PtxKernel,
+    tile_base_shared: Register,
+    lane_id: Register,
+    row_stride_bytes: u32,
+) -> FragmentA_F16 {
+    let frag = alloc_a_f16(alloc);
+
+    // row = lane & 15
+    let r_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::And {
+        dst: r_row,
+        lhs: Operand::Reg(lane_id),
+        rhs: Operand::ImmU32(15),
+        ty: PtxType::U32,
+    }));
+
+    // col_byte = lane & 16
+    let r_colb = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::And {
+        dst: r_colb,
+        lhs: Operand::Reg(lane_id),
+        rhs: Operand::ImmU32(16),
+        ty: PtxType::U32,
+    }));
+
+    // off = row * row_stride_bytes + col_byte
+    let r_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: r_off,
+        a: Operand::Reg(r_row),
+        b: Operand::ImmU32(row_stride_bytes),
+        c: Operand::Reg(r_colb),
+        ty: PtxType::U32,
+        mode: crate::instr::MadMode::Lo,
+    }));
+
+    // addr = tile_base + off
+    let r_addr = u32_shared_addr_from_offset(alloc, kernel, tile_base_shared, r_off, 0);
+
+    kernel.push(PtxInstruction::TensorCore(
+        crate::instr::TensorCoreOp::LdMatrix {
+            dst: crate::instr::LdMatrixDst::X4(frag.regs),
+            addr: r_addr,
+            trans: false,
+        },
+    ));
+
+    frag
+}
+
 /// Load one B-fragment for `mma.sync.m16n8k16.f16` from a 16×8
 /// column-major fp16 tile in **shared** memory.
 ///
