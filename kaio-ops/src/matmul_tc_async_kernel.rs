@@ -859,11 +859,11 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         ty: PtxType::U32,
     }));
 
-    // Per-warp 8-mma accumulation. Same helper as Gate A. The async
-    // path stays on the ld.shared A loader this sprint — the ldmatrix
-    // migration (Sprint 9.3) covered the sync kernel only; this call
-    // site is the scheduled second consumer if/when the async path
-    // follows.
+    // Per-warp 8-mma accumulation. Same helper as Gate A. Both
+    // production kernels use the ld.shared A loader — Sprint 9.3 built
+    // the ldmatrix alternative but parked it at the measured noise
+    // floor (D6); this call site is a scheduled consumer if the
+    // XOR-swizzle follow-up makes the collective load pay.
     emit_warp_quadrant_mma(
         &mut alloc,
         &mut kernel,

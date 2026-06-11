@@ -517,14 +517,15 @@ pub(crate) fn emit_mw_load_tile_b_16x64(
 /// [`emit_warp_quadrant_mma`] (Sprint 9.3).
 ///
 /// The helper is shared by the sync and async kernels; the loader
-/// choice is per-call-site so the two paths can migrate independently:
-/// the sync `matmul_tc` uses [`LdMatrix`](Self::LdMatrix), the async
-/// kernel stays on [`LdShared`](Self::LdShared) this sprint, and the
-/// `matmul_tc_ldshared` bench sibling keeps the old path alive for the
-/// interleaved A/B regression bench. Fragment-register contents are
-/// bit-identical between the two (locked by the
-/// `ldmatrix_fragment_contract` GPU gate) — only the instruction mix
-/// differs.
+/// choice is per-call-site so the paths can migrate independently.
+/// Both production kernels currently use [`LdShared`](Self::LdShared):
+/// the [`LdMatrix`](Self::LdMatrix) path is built and validated but
+/// parked — its measured uplift sat at the bench noise floor (see the
+/// `matmul_tc_ldmatrix_bench` D6 record), so it ships behind the
+/// `matmul_tc_ldmatrix` bench sibling pending the XOR-swizzle
+/// follow-up. Fragment-register contents are bit-identical between the
+/// two (locked by the `ldmatrix_fragment_contract` GPU gate) — only
+/// the instruction mix differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FragALoaderKind {
     /// Four per-thread `ld.shared.b32` with hand-computed offsets
@@ -1623,12 +1624,17 @@ pub(crate) fn build_matmul_tc_module(sm: &str, frag_a_loader: FragALoaderKind) -
 /// transposed on the way into shared memory (column-major) so the B
 /// fragment loader can use single-half2 loads per K stripe.
 ///
-/// Since Sprint 9.3 the A fragments load via `ldmatrix.m8n8.x4`
-/// (warp-collective, one instruction per stripe) instead of four
-/// per-thread `ld.shared.b32` — bit-identical fragment contents (locked
-/// by the `ldmatrix_fragment_contract` GPU gate), fewer issue slots.
-/// The previous load path stays available as [`matmul_tc_ldshared`]
-/// for the interleaved A/B regression bench.
+/// The A fragments load via the per-thread `ld.shared` path. Sprint 9.3
+/// built a warp-collective `ldmatrix.m8n8.x4` alternative with
+/// bit-identical fragment contents (locked by the
+/// `ldmatrix_fragment_contract` GPU gate) and fewer issue slots, but
+/// the measured uplift sat at the bench noise floor — at the tile's
+/// 32-byte row stride the shared-memory bank-conflict pattern is
+/// unchanged by ldmatrix, and the sync path is global-load bound — so
+/// the production-proven path stays default. The built-and-validated
+/// ldmatrix path is [`matmul_tc_ldmatrix`]; the default flip is one
+/// line here once an XOR-swizzle tile layout makes the collective load
+/// pay (tracked follow-up).
 pub fn matmul_tc(
     device: &KaioDevice,
     a: &GpuBuffer<f16>,
@@ -1638,19 +1644,21 @@ pub fn matmul_tc(
     n: u32,
     k: u32,
 ) -> Result<()> {
-    launch_matmul_tc(device, a, b, c, m, n, k, FragALoaderKind::LdMatrix)
+    launch_matmul_tc(device, a, b, c, m, n, k, FragALoaderKind::LdShared)
 }
 
-/// Bench-only sibling of [`matmul_tc`] that keeps the pre-9.3
-/// `ld.shared` fragment-A path: byte-identical kernel except the
-/// A-fragment load instructions. Exists so the ldmatrix A/B regression
-/// bench can interleave both variants in one process (the only honest
-/// timing methodology — see the SC-2 notes in the bf16 bench).
+/// Sibling of [`matmul_tc`] that uses the Sprint 9.3 `ldmatrix`
+/// fragment-A path: byte-identical kernel except the A-fragment load
+/// instructions. Built, validated (contract gate + full suite), and
+/// **parked**: the measured uplift was at the bench noise floor, so the
+/// default stays on the proven `ld.shared` path. Exists so the
+/// ldmatrix A/B regression bench can interleave both variants in one
+/// process (the only honest timing methodology — see the SC-2 notes in
+/// the bf16 bench), and as the ready-made entry point when the
+/// XOR-swizzle follow-up revisits the default.
 /// Not public API; exported `#[doc(hidden)]` like `matmul_naive`.
-/// Scheduled for removal together with the `FragALoaderKind::LdShared`
-/// arm when the async kernel migrates to ldmatrix.
 #[doc(hidden)]
-pub fn matmul_tc_ldshared(
+pub fn matmul_tc_ldmatrix(
     device: &KaioDevice,
     a: &GpuBuffer<f16>,
     b: &GpuBuffer<f16>,
@@ -1659,7 +1667,7 @@ pub fn matmul_tc_ldshared(
     n: u32,
     k: u32,
 ) -> Result<()> {
-    launch_matmul_tc(device, a, b, c, m, n, k, FragALoaderKind::LdShared)
+    launch_matmul_tc(device, a, b, c, m, n, k, FragALoaderKind::LdMatrix)
 }
 
 #[allow(clippy::too_many_arguments)]
