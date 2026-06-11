@@ -1,12 +1,17 @@
 //! Tensor-core PTX operations.
 //!
-//! This module hosts the warp-collective tensor-core instructions. Phase 6
-//! supports a single shape — `m16n8k16` with fp16 inputs and fp32
-//! accumulation — which is the Ampere+ (SM 8.0) shape used by CUTLASS,
-//! cuBLAS, and every production fp16 matmul since 2020.
+//! This module hosts the warp-collective tensor-core instructions. The
+//! `mma.sync` compute variants all use Ampere+ (SM 8.0) shapes —
+//! `m16n8k16` (fp16/bf16 × fp32 accumulate, the shape used by CUTLASS,
+//! cuBLAS, and every production fp16 matmul since 2020) and `m16n8k32`
+//! (s8 × s32 accumulate). The `ldmatrix` fragment loader is the one
+//! Turing-capable (SM 7.5) op in the file — it is a memory-side
+//! primitive that predates the Ampere mma shapes, so a module using
+//! `ldmatrix` alone validates at sm_75 while any kernel that feeds it
+//! into an mma still requires sm_80 via the mma's own gate.
 //!
-//! Earlier shapes (Volta `m8n8k4`, Turing `m16n8k8`) have different
-//! fragment layouts and are out of scope for Phase 6.
+//! Earlier mma shapes (Volta `m8n8k4`, Turing `m16n8k8`) have different
+//! fragment layouts and are out of scope.
 
 use std::fmt;
 
@@ -56,11 +61,46 @@ impl MmaShape {
     }
 }
 
+/// Destination registers for [`TensorCoreOp::LdMatrix`] — the `.num`
+/// qualifier and the register count are inseparable by construction, so
+/// a register-count/qualifier mismatch is unrepresentable.
+///
+/// Each destination register receives one 8×8 `.b16` matrix distributed
+/// across the warp (per lane: one `.b32` word = two 16-bit elements).
+/// No `.x1` arm yet — add it when a consumer exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LdMatrixDst {
+    /// `.x2` — two 8×8 matrices into two `.b32` registers per thread.
+    X2([crate::ir::Register; 2]),
+    /// `.x4` — four 8×8 matrices into four `.b32` registers per thread.
+    X4([crate::ir::Register; 4]),
+}
+
+impl LdMatrixDst {
+    /// PTX `.num` token (`"x2"` / `"x4"`).
+    pub fn num_token(&self) -> &'static str {
+        match self {
+            Self::X2(_) => "x2",
+            Self::X4(_) => "x4",
+        }
+    }
+
+    /// The destination registers as a slice, in matrix order.
+    pub fn regs(&self) -> &[crate::ir::Register] {
+        match self {
+            Self::X2(regs) => regs,
+            Self::X4(regs) => regs,
+        }
+    }
+}
+
 /// Tensor-core PTX instruction variants.
 ///
 /// Warp-collective operations — `mma.sync` is executed cooperatively by
-/// all 32 threads in a warp with a rigid NVIDIA-defined register layout.
-/// See [`crate::fragment`] for the per-thread register distribution.
+/// all 32 threads in a warp with a rigid NVIDIA-defined register layout,
+/// and `ldmatrix` cooperatively loads fragment registers in that same
+/// layout. See [`crate::fragment`] for the per-thread register
+/// distribution.
 #[derive(Debug, Clone)]
 pub enum TensorCoreOp {
     /// Synchronous matrix-multiply-accumulate:
@@ -189,6 +229,58 @@ pub enum TensorCoreOp {
         /// Input C fragment — `.f32` accumulator input.
         c: FragmentC,
     },
+    /// Warp-collective fragment load from shared memory:
+    /// `ldmatrix.sync.aligned.m8n8.{num}{.trans}.shared.b16`
+    /// `{d_regs}, [addr];`
+    ///
+    /// Cooperatively loads 2 or 4 (per `.num`) 8×8 matrices of 16-bit
+    /// elements from shared memory, distributing them across the warp in
+    /// exactly the per-thread layout `mma.sync.m16n8k16` expects for its
+    /// fragment operands: within each loaded matrix, lane `t` receives
+    /// the `.b32` word holding (row `t/4`, columns `2(t%4)..2(t%4)+1`).
+    ///
+    /// **Address-supply rule (per-lane operand):** every lane passes its
+    /// own `addr` — the shared-space byte address of one 16-byte matrix
+    /// row. Lanes `8i..8i+7` supply the row addresses of matrix `i`
+    /// (rows 0..7 in order), and matrix `i` lands in destination
+    /// register `i`. For `.x4` all 32 lanes' addresses are consumed; for
+    /// `.x2` only lanes 0–15 (remaining lanes' operands are ignored).
+    /// Each row address must be **16-byte aligned** — a runtime rule
+    /// that ptxas does not statically check, so shared tiles feeding
+    /// `ldmatrix` should declare `align: 16`.
+    ///
+    /// `.b16` is the element size, not a dtype — f16 and bf16 tiles load
+    /// identically (the dtype distinction lives at the mma operand
+    /// level). Future `.b8` / `.m16n16` forms have different geometry
+    /// and get sibling variants, per the house specialized-variant
+    /// style.
+    ///
+    /// Requires SM 7.5+ (Turing) — the one sub-Ampere tensor-core op;
+    /// see the module docs. Introduced in Sprint 9.3.
+    ///
+    /// Example emission:
+    /// ```text
+    /// ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%r4];
+    /// ```
+    LdMatrix {
+        /// Destination registers — the `.num` qualifier and register
+        /// count are bound together by [`LdMatrixDst`]. Registers must
+        /// be `.b32`-class (`PtxType::U32`, the packed-pair convention
+        /// of [`alloc_packed_half2`](crate::ir::RegisterAllocator::alloc_packed_half2));
+        /// enforced at module-load by
+        /// [`PtxModule::validate`](crate::ir::PtxModule::validate) with
+        /// [`ValidationError::LdMatrixBadRegType`](crate::ir::ValidationError::LdMatrixBadRegType),
+        /// matching the `MmaSync` bf16-rejection convention (raw
+        /// `Emit::emit()` below the module boundary is unchecked).
+        dst: LdMatrixDst,
+        /// Per-lane shared-space byte address of this lane's matrix row
+        /// (`.u32`, same addressing convention as `MemoryOp::LdShared`).
+        /// Type enforced at module-load alongside `dst`.
+        addr: crate::ir::Register,
+        /// `.trans` — transpose each 8×8 matrix during the load (the
+        /// fragment-B / column-major form).
+        trans: bool,
+    },
 }
 
 impl TensorCoreOp {
@@ -198,6 +290,13 @@ impl TensorCoreOp {
             Self::MmaSync { shape, .. } => shape.min_sm(),
             Self::MmaSyncInt8 { .. } => MmaShape::M16N8K32.min_sm(),
             Self::MmaSyncBf16 { .. } => MmaShape::M16N8K16.min_sm(),
+            // 75 flat across all m8n8.b16 forms (x1/x2/x4, ±trans) —
+            // confirmed against the PTX ISA docs plus ptxas probes at
+            // the Sprint 9.3 audit gate (`ptxas` itself reports
+            // "Feature 'ldmatrix' requires .target sm_75 or higher").
+            // The first sub-80 entry in this file; deliberate, see the
+            // module docs.
+            Self::LdMatrix { .. } => 75,
         }
     }
 
@@ -211,6 +310,13 @@ impl TensorCoreOp {
             }
             Self::MmaSyncBf16 { .. } => {
                 format!("mma.sync.{}.bf16.bf16.f32", MmaShape::M16N8K16.ptx_token())
+            }
+            Self::LdMatrix { dst, trans, .. } => {
+                format!(
+                    "ldmatrix.m8n8.{}{}",
+                    dst.num_token(),
+                    if *trans { ".trans" } else { "" }
+                )
             }
         }
     }
@@ -292,6 +398,20 @@ impl Emit for TensorCoreOp {
                     mnemonic,
                     &[&d_list as &dyn fmt::Display, &a_list, &b_list, &c_list],
                 )
+            }
+            TensorCoreOp::LdMatrix { dst, addr, trans } => {
+                // Qualifier order per PTX ISA: .num before .trans before
+                // .shared; `.b16` element size is the only supported form
+                // at m8n8 (it is bits, not a dtype — serves f16 and bf16
+                // alike).
+                let mnemonic = format!(
+                    "ldmatrix.sync.aligned.m8n8.{}{}.shared.b16",
+                    dst.num_token(),
+                    if *trans { ".trans" } else { "" },
+                );
+                let d_list = format_reg_list(dst.regs());
+                let addr_operand = format!("[{addr}]");
+                w.instruction(&mnemonic, &[&d_list as &dyn fmt::Display, &addr_operand])
             }
         }
     }
@@ -448,6 +568,108 @@ mod tests {
         };
         assert_eq!(op.min_sm(), 80);
         assert_eq!(op.feature_label(), "mma.sync.m16n8k32.s8.s8.s32");
+    }
+
+    #[test]
+    fn emit_ldmatrix_x4_shared_b16() {
+        let mut alloc = RegisterAllocator::new();
+        let dst = LdMatrixDst::X4([
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+        ]);
+        let addr = alloc.alloc(PtxType::U32);
+
+        let op = TensorCoreOp::LdMatrix {
+            dst,
+            addr,
+            trans: false,
+        };
+
+        let mut w = PtxWriter::new();
+        w.indent();
+        op.emit(&mut w).unwrap();
+        let out = w.finish();
+
+        // Locked emission string (Sprint 9.3 D1) — destination list in
+        // matrix order, bracketed per-lane shared address.
+        let expected = concat!(
+            "    ldmatrix.sync.aligned.m8n8.x4.shared.b16 ",
+            "{%r0,%r1,%r2,%r3}, [%r4];\n",
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn emit_ldmatrix_x2_trans_shared_b16() {
+        let mut alloc = RegisterAllocator::new();
+        let dst = LdMatrixDst::X2([alloc.alloc_packed_half2(), alloc.alloc_packed_half2()]);
+        let addr = alloc.alloc(PtxType::U32);
+
+        let op = TensorCoreOp::LdMatrix {
+            dst,
+            addr,
+            trans: true,
+        };
+
+        let mut w = PtxWriter::new();
+        w.indent();
+        op.emit(&mut w).unwrap();
+        let out = w.finish();
+
+        // Locked emission string (Sprint 9.3 D1) — .trans sits between
+        // .num and .shared per the ISA qualifier order.
+        let expected = concat!(
+            "    ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 ",
+            "{%r0,%r1}, [%r2];\n",
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn ldmatrix_min_sm_and_feature_label() {
+        let mut alloc = RegisterAllocator::new();
+        let x4 = TensorCoreOp::LdMatrix {
+            dst: LdMatrixDst::X4([
+                alloc.alloc_packed_half2(),
+                alloc.alloc_packed_half2(),
+                alloc.alloc_packed_half2(),
+                alloc.alloc_packed_half2(),
+            ]),
+            addr: alloc.alloc(PtxType::U32),
+            trans: false,
+        };
+        // Deliberate pin on 75 — the first sub-80 tensor-core op
+        // (Sprint 9.3 audit: ptxas reports "requires .target sm_75 or
+        // higher"). A later change "normalizing" this to 80 should have
+        // to confront this assertion.
+        assert_eq!(x4.min_sm(), 75);
+        assert_eq!(x4.feature_label(), "ldmatrix.m8n8.x4");
+
+        let x2t = TensorCoreOp::LdMatrix {
+            dst: LdMatrixDst::X2([alloc.alloc_packed_half2(), alloc.alloc_packed_half2()]),
+            addr: alloc.alloc(PtxType::U32),
+            trans: true,
+        };
+        assert_eq!(x2t.min_sm(), 75);
+        assert_eq!(x2t.feature_label(), "ldmatrix.m8n8.x2.trans");
+    }
+
+    #[test]
+    fn ldmatrix_dst_accessors() {
+        let mut alloc = RegisterAllocator::new();
+        let r0 = alloc.alloc_packed_half2();
+        let r1 = alloc.alloc_packed_half2();
+        let x2 = LdMatrixDst::X2([r0, r1]);
+        assert_eq!(x2.num_token(), "x2");
+        assert_eq!(x2.regs(), &[r0, r1]);
+
+        let r2 = alloc.alloc_packed_half2();
+        let r3 = alloc.alloc_packed_half2();
+        let x4 = LdMatrixDst::X4([r0, r1, r2, r3]);
+        assert_eq!(x4.num_token(), "x4");
+        assert_eq!(x4.regs().len(), 4);
     }
 
     #[test]

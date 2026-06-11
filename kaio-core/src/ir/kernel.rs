@@ -115,6 +115,12 @@ impl PtxKernel {
                         TensorCoreOp::MmaSync { .. }
                         | TensorCoreOp::MmaSyncInt8 { .. }
                         | TensorCoreOp::MmaSyncBf16 { .. } => s.mma += 1,
+                        // Counted separately from both `mma` and
+                        // `ld_shared`: it is a warp-collective load, and
+                        // folding it into either would hide exactly the
+                        // instruction-mix shift the ldmatrix loader
+                        // rewire is supposed to show (Sprint 9.3).
+                        TensorCoreOp::LdMatrix { .. } => s.ldmatrix += 1,
                     }
                 }
                 PtxInstruction::Control(op) => {
@@ -183,6 +189,10 @@ pub struct KernelStats {
     pub bar_sync: usize,
     /// `mma.sync` instruction count (all tensor-core shapes).
     pub mma: usize,
+    /// `ldmatrix` instruction count (warp-collective fragment loads —
+    /// tracked apart from `ld_shared` so loader-rewire instruction-mix
+    /// shifts stay visible).
+    pub ldmatrix: usize,
     /// `cp.async.ca.shared.global` instruction count.
     pub cp_async: usize,
     /// `cp.async.commit_group` instruction count.

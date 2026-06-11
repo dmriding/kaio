@@ -93,17 +93,44 @@ impl PtxModule {
 
 /// Per-instruction target-agnostic IR validation for tensor-core ops.
 ///
-/// Currently rejects bf16 dtype tags on the generic [`TensorCoreOp::MmaSync`]
+/// Rejects bf16 dtype tags on the generic [`TensorCoreOp::MmaSync`]
 /// variant — bf16 emission must go through [`TensorCoreOp::MmaSyncBf16`] so
 /// the fragment types and instruction dtype stay aligned at the IR boundary.
+///
+/// Also rejects mis-typed registers on [`TensorCoreOp::LdMatrix`]: unlike
+/// the mma variants, whose operands are typed fragment wrappers (allocated
+/// with the correct register class by construction), `LdMatrix` carries raw
+/// [`Register`](crate::ir::Register)s — so the `.b32`-class requirement
+/// (`PtxType::U32`, the `alloc_packed_half2` packed-pair convention) is
+/// enforced here, surfacing a named error at module load instead of a
+/// cryptic ptxas failure at JIT time.
 fn validate_tensor_core_op(op: &TensorCoreOp) -> Result<(), ValidationError> {
-    if let TensorCoreOp::MmaSync { a_ty, b_ty, .. } = op {
-        if *a_ty == PtxType::BF16 {
-            return Err(ValidationError::MmaSyncBf16Rejected { operand: "a_ty" });
+    match op {
+        TensorCoreOp::MmaSync { a_ty, b_ty, .. } => {
+            if *a_ty == PtxType::BF16 {
+                return Err(ValidationError::MmaSyncBf16Rejected { operand: "a_ty" });
+            }
+            if *b_ty == PtxType::BF16 {
+                return Err(ValidationError::MmaSyncBf16Rejected { operand: "b_ty" });
+            }
         }
-        if *b_ty == PtxType::BF16 {
-            return Err(ValidationError::MmaSyncBf16Rejected { operand: "b_ty" });
+        TensorCoreOp::LdMatrix { dst, addr, .. } => {
+            for reg in dst.regs() {
+                if reg.ptx_type != PtxType::U32 {
+                    return Err(ValidationError::LdMatrixBadRegType {
+                        operand: "dst",
+                        found: reg.ptx_type,
+                    });
+                }
+            }
+            if addr.ptx_type != PtxType::U32 {
+                return Err(ValidationError::LdMatrixBadRegType {
+                    operand: "addr",
+                    found: addr.ptx_type,
+                });
+            }
         }
+        _ => {}
     }
     Ok(())
 }
@@ -155,6 +182,22 @@ pub enum ValidationError {
         /// `"b_ty"`).
         operand: &'static str,
     },
+    /// A [`TensorCoreOp::LdMatrix`] instruction carries a register whose
+    /// declared type is not `PtxType::U32` (`.b32` class). The mma
+    /// variants get this for free from their typed fragment wrappers;
+    /// `LdMatrix` takes raw registers, so the check lives here.
+    ///
+    /// Destination registers hold packed 16-bit pairs
+    /// ([`alloc_packed_half2`](crate::ir::RegisterAllocator::alloc_packed_half2)
+    /// convention) and the address register is a shared-space `.u32`
+    /// byte address. Introduced in Sprint 9.3.
+    LdMatrixBadRegType {
+        /// Which operand carried the rejected register (`"dst"` or
+        /// `"addr"`).
+        operand: &'static str,
+        /// The register's declared PTX type.
+        found: PtxType,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -174,6 +217,12 @@ impl fmt::Display for ValidationError {
                 write!(
                     f,
                     "TensorCoreOp::MmaSync with PtxType::BF16 on {operand} is rejected; use TensorCoreOp::MmaSyncBf16 for bf16 emission"
+                )
+            }
+            Self::LdMatrixBadRegType { operand, found } => {
+                write!(
+                    f,
+                    "TensorCoreOp::LdMatrix {operand} register must be PtxType::U32 (.b32 packed-pair convention, see alloc_packed_half2), found {found:?}"
                 )
             }
         }
@@ -292,6 +341,122 @@ mod tests {
         let mut module = PtxModule::new("sm_89");
         module.add_kernel(tc_int8_kernel());
         assert!(module.validate().is_ok());
+    }
+
+    fn ldmatrix_kernel() -> PtxKernel {
+        use crate::instr::LdMatrixDst;
+        let mut alloc = RegisterAllocator::new();
+        let mut k = PtxKernel::new("has_ldmatrix");
+        k.push(PtxInstruction::TensorCore(TensorCoreOp::LdMatrix {
+            dst: LdMatrixDst::X4([
+                alloc.alloc_packed_half2(),
+                alloc.alloc_packed_half2(),
+                alloc.alloc_packed_half2(),
+                alloc.alloc_packed_half2(),
+            ]),
+            addr: alloc.alloc(PtxType::U32),
+            trans: false,
+        }));
+        k
+    }
+
+    // ldmatrix is the first sub-80 TensorCore instruction; these tests
+    // protect the shared validation path for the new 75 tier
+    // (Sprint 9.3): sm_75 accepts ldmatrix, sm_70 still rejects it, and
+    // mma stays gated at 80 even in a module whose ldmatrix is fine.
+    #[test]
+    fn validate_accepts_ldmatrix_on_sm_75() {
+        let mut module = PtxModule::new("sm_75");
+        module.add_kernel(ldmatrix_kernel());
+        assert!(module.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_ldmatrix_on_sm_70() {
+        let mut module = PtxModule::new("sm_70");
+        module.add_kernel(ldmatrix_kernel());
+        let err = module.validate().unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::SmTooLow {
+                required: 75,
+                actual: 70,
+                feature: "ldmatrix.m8n8.x4".to_string(),
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "ldmatrix.m8n8.x4 requires sm_75+, target is sm_70"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_mma_at_sm_75_even_with_ldmatrix_present() {
+        let mut module = PtxModule::new("sm_75");
+        module.add_kernel(ldmatrix_kernel());
+        module.add_kernel(tc_kernel());
+        let err = module.validate().unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::SmTooLow {
+                required: 80,
+                actual: 75,
+                feature: "mma.sync.m16n8k16".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_ldmatrix_bad_dst_reg_type() {
+        use crate::instr::LdMatrixDst;
+        let mut alloc = RegisterAllocator::new();
+        let mut k = PtxKernel::new("bad_ldmatrix_dst");
+        // Third dst register is an .f32 — not the .b32 packed-pair class.
+        k.push(PtxInstruction::TensorCore(TensorCoreOp::LdMatrix {
+            dst: LdMatrixDst::X4([
+                alloc.alloc_packed_half2(),
+                alloc.alloc_packed_half2(),
+                alloc.alloc(PtxType::F32),
+                alloc.alloc_packed_half2(),
+            ]),
+            addr: alloc.alloc(PtxType::U32),
+            trans: false,
+        }));
+        let mut module = PtxModule::new("sm_80");
+        module.add_kernel(k);
+        let err = module.validate().unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::LdMatrixBadRegType {
+                operand: "dst",
+                found: PtxType::F32,
+            }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_ldmatrix_bad_addr_reg_type() {
+        use crate::instr::LdMatrixDst;
+        let mut alloc = RegisterAllocator::new();
+        let mut k = PtxKernel::new("bad_ldmatrix_addr");
+        // Shared addresses are 32-bit byte offsets in this IR — a .u64
+        // address register is a wiring bug.
+        k.push(PtxInstruction::TensorCore(TensorCoreOp::LdMatrix {
+            dst: LdMatrixDst::X2([alloc.alloc_packed_half2(), alloc.alloc_packed_half2()]),
+            addr: alloc.alloc(PtxType::U64),
+            trans: true,
+        }));
+        let mut module = PtxModule::new("sm_80");
+        module.add_kernel(k);
+        let err = module.validate().unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::LdMatrixBadRegType {
+                operand: "addr",
+                found: PtxType::U64,
+            }
+        );
+        assert!(err.to_string().contains("alloc_packed_half2"));
     }
 
     #[test]
