@@ -88,9 +88,8 @@ mod qkv_skeleton;
 mod tuner;
 
 pub use attention_kernel::{
-    attention, attention_causal, attention_flash, attention_flash_bwd,
-    attention_flash_bwd_causal, attention_flash_causal, attention_flash_causal_with_stats,
-    attention_flash_with_stats,
+    attention, attention_causal, attention_flash, attention_flash_bwd, attention_flash_bwd_causal,
+    attention_flash_causal, attention_flash_causal_with_stats, attention_flash_with_stats,
 };
 pub use matmul_kernel::matmul;
 pub use tuner::{

@@ -1135,7 +1135,9 @@ pub fn attention_flash_bwd(
     attention_flash_bwd_dkdv(
         device, grad_out, q, k, v, stats, &d_buf, dk, dv, seq_len, d_k, false,
     )?;
-    attention_flash_bwd_dq(device, grad_out, q, k, v, stats, &d_buf, dq, seq_len, d_k, false)?;
+    attention_flash_bwd_dq(
+        device, grad_out, q, k, v, stats, &d_buf, dq, seq_len, d_k, false,
+    )?;
     Ok(())
 }
 
@@ -1166,7 +1168,9 @@ pub fn attention_flash_bwd_causal(
     attention_flash_bwd_dkdv(
         device, grad_out, q, k, v, stats, &d_buf, dk, dv, seq_len, d_k, true,
     )?;
-    attention_flash_bwd_dq(device, grad_out, q, k, v, stats, &d_buf, dq, seq_len, d_k, true)?;
+    attention_flash_bwd_dq(
+        device, grad_out, q, k, v, stats, &d_buf, dq, seq_len, d_k, true,
+    )?;
     Ok(())
 }
 

@@ -770,14 +770,34 @@ fn run_bwd_full(seq_len: usize, d_k: usize, causal: bool, g_h: &[f32], label: &s
         attention_flash_causal_with_stats(&device, &q, &k, &v, &mut out, &mut stats, sl, dk_u)
             .unwrap();
         attention_flash_bwd_causal(
-            &device, &g, &q, &k, &v, &out, &stats, &mut dq_gpu, &mut dk_gpu, &mut dv_gpu, sl,
+            &device,
+            &g,
+            &q,
+            &k,
+            &v,
+            &out,
+            &stats,
+            &mut dq_gpu,
+            &mut dk_gpu,
+            &mut dv_gpu,
+            sl,
             dk_u,
         )
         .unwrap();
     } else {
         attention_flash_with_stats(&device, &q, &k, &v, &mut out, &mut stats, sl, dk_u).unwrap();
         attention_flash_bwd(
-            &device, &g, &q, &k, &v, &out, &stats, &mut dq_gpu, &mut dk_gpu, &mut dv_gpu, sl,
+            &device,
+            &g,
+            &q,
+            &k,
+            &v,
+            &out,
+            &stats,
+            &mut dq_gpu,
+            &mut dk_gpu,
+            &mut dv_gpu,
+            sl,
             dk_u,
         )
         .unwrap();
