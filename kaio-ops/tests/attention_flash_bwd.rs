@@ -32,8 +32,9 @@
 
 use kaio::prelude::*;
 use kaio_ops::{
-    attention_flash, attention_flash_bwd_dkdv, attention_flash_bwd_preprocess,
-    attention_flash_causal, attention_flash_causal_with_stats, attention_flash_with_stats,
+    attention_flash, attention_flash_bwd_dkdv, attention_flash_bwd_dq,
+    attention_flash_bwd_preprocess, attention_flash_causal, attention_flash_causal_with_stats,
+    attention_flash_with_stats,
 };
 
 // --- CPU f64 analytical reference ---
@@ -650,4 +651,92 @@ fn bwd_dkdv_128x128() {
 fn bwd_dkdv_non_aligned_17x19() {
     check_dkdv(17, 19, false);
     check_dkdv(17, 19, true);
+}
+
+// ---------------------------------------------------------------------------
+// GPU: backward dQ kernel vs the f64 oracle (Sprint 9.2)
+// ---------------------------------------------------------------------------
+
+/// Runs the real GPU pipeline (forward `_with_stats` → preprocess →
+/// dq) and compares dQ against the all-f64 analytical oracle.
+fn check_dq(seq_len: usize, d_k: usize, causal: bool) {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let (q_h, k_h, v_h) = gpu_inputs_f32(seq_len, d_k);
+    let g_h = gpu_grad_f32(seq_len, d_k);
+
+    let sl = seq_len as u32;
+    let dk_u = d_k as u32;
+    let n = seq_len * d_k;
+
+    let q = device.alloc_from(&q_h).unwrap();
+    let k = device.alloc_from(&k_h).unwrap();
+    let v = device.alloc_from(&v_h).unwrap();
+    let g = device.alloc_from(&g_h).unwrap();
+    let mut out = device.alloc_zeros::<f32>(n).unwrap();
+    let mut stats = device.alloc_zeros::<f32>(seq_len).unwrap();
+    let mut d_buf = device.alloc_zeros::<f32>(seq_len).unwrap();
+    let mut dq_gpu = device.alloc_zeros::<f32>(n).unwrap();
+
+    if causal {
+        attention_flash_causal_with_stats(&device, &q, &k, &v, &mut out, &mut stats, sl, dk_u)
+            .unwrap();
+    } else {
+        attention_flash_with_stats(&device, &q, &k, &v, &mut out, &mut stats, sl, dk_u).unwrap();
+    }
+    attention_flash_bwd_preprocess(&device, &g, &out, &mut d_buf, sl, dk_u).unwrap();
+    attention_flash_bwd_dq(
+        &device,
+        &g,
+        &q,
+        &k,
+        &v,
+        &stats,
+        &d_buf,
+        &mut dq_gpu,
+        sl,
+        dk_u,
+        causal,
+    )
+    .unwrap();
+
+    let label = if causal { "causal" } else { "plain" };
+
+    let q64: Vec<f64> = q_h.iter().map(|&x| x as f64).collect();
+    let k64: Vec<f64> = k_h.iter().map(|&x| x as f64).collect();
+    let v64: Vec<f64> = v_h.iter().map(|&x| x as f64).collect();
+    let g64: Vec<f64> = g_h.iter().map(|&x| x as f64).collect();
+    let (o_ref, p_ref) = cpu_attention_fwd_f64(&q64, &k64, &v64, seq_len, d_k, causal);
+    let (dq_ref, _, _) =
+        cpu_attention_bwd_f64(&q64, &k64, &v64, &o_ref, &p_ref, &g64, seq_len, d_k);
+
+    let dq_h = dq_gpu.to_host(&device).unwrap();
+    assert_grads_close(&dq_h, &dq_ref, &format!("dq_{label}_{seq_len}x{d_k}/dQ"));
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dq_32x32() {
+    check_dq(32, 32, false);
+    check_dq(32, 32, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dq_64x64() {
+    check_dq(64, 64, false);
+    check_dq(64, 64, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dq_128x128() {
+    check_dq(128, 128, false);
+    check_dq(128, 128, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dq_non_aligned_17x19() {
+    check_dq(17, 19, false);
+    check_dq(17, 19, true);
 }

@@ -815,6 +815,143 @@ fn flash_attn_bwd_dkdv_causal_kernel(
     }
 }
 
+// dQ_i: one block per query row i, threads stream key rows j in
+// 256-tiles (the forward's loop nest). Phase 1: thread tid owns key
+// row j = kv_start + tid and computes dS_ij into a shared tile.
+// Phase 2: the first d_k threads serially accumulate dQ_i from the
+// tile. L_i and D_i are block-constant scalars.
+#[allow(clippy::too_many_arguments)]
+#[gpu_kernel(block_size = (256, 1))]
+fn flash_attn_bwd_dq_kernel(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    d_out: &[f32],
+    stats: &[f32],
+    d_buf: &[f32],
+    dq: &mut [f32],
+    seq_len: u32,
+    d_k: u32,
+    inv_sqrt_dk: f32,
+) {
+    let tid = thread_idx_x();
+    let q_row = block_idx_x();
+    let q_base = q_row * d_k;
+
+    let tile_ds = shared_mem![f32; 256];
+
+    let l_i = stats[q_row];
+    let d_i = d_buf[q_row];
+
+    let mut dq_acc = 0.0f32;
+
+    let mut kv_start = 0u32;
+    while kv_start < seq_len {
+        let j = kv_start + tid;
+        let mut ds_val = 0.0f32;
+        if j < seq_len {
+            let mut s = 0.0f32;
+            let mut dp = 0.0f32;
+            let mut d = 0u32;
+            while d < d_k {
+                s = fma(q[q_base + d], k[j * d_k + d], s);
+                dp = fma(d_out[q_base + d], v[j * d_k + d], dp);
+                d += 1;
+            }
+            s = s * inv_sqrt_dk;
+            let p_val = exp(s - l_i);
+            ds_val = p_val * (dp - d_i);
+        }
+        tile_ds[tid] = ds_val;
+        bar_sync();
+
+        if tid < d_k {
+            let mut jj = 0u32;
+            while jj < 256 {
+                if kv_start + jj < seq_len {
+                    dq_acc = fma(tile_ds[jj], k[(kv_start + jj) * d_k + tid], dq_acc);
+                }
+                jj += 1;
+            }
+        }
+        bar_sync();
+
+        kv_start += 256;
+    }
+
+    if tid < d_k {
+        dq[q_base + tid] = dq_acc * inv_sqrt_dk;
+    }
+}
+
+// Causal dQ: query row i only attends to keys j <= i, mirroring the
+// forward's mask predicate. Masked keys park zeros in the shared tile.
+#[allow(clippy::too_many_arguments)]
+#[gpu_kernel(block_size = (256, 1))]
+fn flash_attn_bwd_dq_causal_kernel(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    d_out: &[f32],
+    stats: &[f32],
+    d_buf: &[f32],
+    dq: &mut [f32],
+    seq_len: u32,
+    d_k: u32,
+    inv_sqrt_dk: f32,
+) {
+    let tid = thread_idx_x();
+    let q_row = block_idx_x();
+    let q_base = q_row * d_k;
+
+    let tile_ds = shared_mem![f32; 256];
+
+    let l_i = stats[q_row];
+    let d_i = d_buf[q_row];
+
+    let mut dq_acc = 0.0f32;
+
+    let mut kv_start = 0u32;
+    while kv_start < seq_len {
+        let j = kv_start + tid;
+        let mut ds_val = 0.0f32;
+        if j < seq_len {
+            if j <= q_row {
+                let mut s = 0.0f32;
+                let mut dp = 0.0f32;
+                let mut d = 0u32;
+                while d < d_k {
+                    s = fma(q[q_base + d], k[j * d_k + d], s);
+                    dp = fma(d_out[q_base + d], v[j * d_k + d], dp);
+                    d += 1;
+                }
+                s = s * inv_sqrt_dk;
+                let p_val = exp(s - l_i);
+                ds_val = p_val * (dp - d_i);
+            }
+        }
+        tile_ds[tid] = ds_val;
+        bar_sync();
+
+        if tid < d_k {
+            let mut jj = 0u32;
+            while jj < 256 {
+                if kv_start + jj < seq_len {
+                    dq_acc = fma(tile_ds[jj], k[(kv_start + jj) * d_k + tid], dq_acc);
+                }
+                jj += 1;
+            }
+        }
+        bar_sync();
+
+        kv_start += 256;
+    }
+
+    if tid < d_k {
+        dq[q_base + tid] = dq_acc * inv_sqrt_dk;
+    }
+}
+
 /// FlashAttention: single-head attention without materializing the
 /// O(seq_len^2) attention matrix. O(d_k) memory per query position.
 ///
@@ -1018,6 +1155,61 @@ pub fn attention_flash_bwd_dkdv(
             d_buf,
             dk,
             dv,
+            seq_len,
+            d_k,
+            inv_sqrt_dk,
+            grid,
+        )?;
+    }
+    Ok(())
+}
+
+/// Backward dQ accumulation. Internal building block of
+/// `attention_flash_bwd`; exposed for the per-kernel correctness tests
+/// only. Callers are responsible for `stats` and `d_buf` provenance
+/// (same q/k/v, same mask mode).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn attention_flash_bwd_dq(
+    device: &KaioDevice,
+    grad_out: &GpuBuffer<f32>,
+    q: &GpuBuffer<f32>,
+    k: &GpuBuffer<f32>,
+    v: &GpuBuffer<f32>,
+    stats: &GpuBuffer<f32>,
+    d_buf: &GpuBuffer<f32>,
+    dq: &mut GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+    causal: bool,
+) -> Result<()> {
+    let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
+    let grid = (seq_len, 1, 1); // one block per query row
+    if causal {
+        flash_attn_bwd_dq_causal_kernel::launch(
+            device,
+            q,
+            k,
+            v,
+            grad_out,
+            stats,
+            d_buf,
+            dq,
+            seq_len,
+            d_k,
+            inv_sqrt_dk,
+            grid,
+        )?;
+    } else {
+        flash_attn_bwd_dq_kernel::launch(
+            device,
+            q,
+            k,
+            v,
+            grad_out,
+            stats,
+            d_buf,
+            dq,
             seq_len,
             d_k,
             inv_sqrt_dk,

@@ -105,7 +105,9 @@ pub use matmul_kernel::matmul_naive;
 // correctness tests; the public API is the orchestrating
 // attention_flash_bwd / attention_flash_bwd_causal functions.
 #[doc(hidden)]
-pub use attention_kernel::{attention_flash_bwd_dkdv, attention_flash_bwd_preprocess};
+pub use attention_kernel::{
+    attention_flash_bwd_dkdv, attention_flash_bwd_dq, attention_flash_bwd_preprocess,
+};
 
 // Sprint 6.7 D7 promotion (multi-warp restructure + edge tiles +
 // benchmark) + Sprint 6.7b (bank-conflict padding + D10 hoist,
