@@ -862,3 +862,108 @@ pub fn build_bitops_ptx(sm: &str) -> String {
     module.emit(&mut w).unwrap();
     w.finish()
 }
+
+/// Build a minimal kernel exercising both Sprint 9.3 `ldmatrix` forms —
+/// `m8n8.x4.shared.b16` (fragment-A order) and `m8n8.x2.trans.shared.b16`
+/// (the future fragment-B form) — with the per-lane address math the
+/// real loader uses (`row = lane & 15`, `col_byte = lane & 16` into a
+/// row-major 16×16 fp16 tile, 32-byte row stride).
+///
+/// The shared tile declares `align: 16` — ldmatrix row addresses must be
+/// 16-byte aligned at runtime (a rule ptxas does not statically check;
+/// see the Sprint 9.3 audit), so the builder models the contract the
+/// production kernels must follow.
+#[allow(dead_code)]
+pub fn build_ldmatrix_ptx(sm: &str) -> String {
+    use kaio_core::instr::LdMatrixDst;
+
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("ldmatrix_smoke");
+
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile".to_string(),
+        align: 16,
+        size_bytes: 512, // 16 rows × 32 B (16 fp16 per row)
+    });
+
+    // %tid.x
+    let (r_tid, tid_instr) = special::tid_x(&mut alloc);
+    kernel.push(tid_instr);
+
+    // Shared base offset for the tile.
+    let r_tile = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile,
+        src: Operand::SharedAddr("tile".to_string()),
+        ty: PtxType::U32,
+    });
+
+    // Per-lane row address: row = lane & 15, col_byte = lane & 16,
+    // addr = tile + row * 32 + col_byte — the closed form the
+    // fragment-A ldmatrix loader emits (Sprint 9.3 D3).
+    let r_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::And {
+        dst: r_row,
+        lhs: Operand::Reg(r_tid),
+        rhs: Operand::ImmU32(15),
+        ty: PtxType::U32,
+    }));
+    let r_colb = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::And {
+        dst: r_colb,
+        lhs: Operand::Reg(r_tid),
+        rhs: Operand::ImmU32(16),
+        ty: PtxType::U32,
+    }));
+    let r_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: r_off,
+        a: Operand::Reg(r_row),
+        b: Operand::ImmU32(32),
+        c: Operand::Reg(r_colb),
+        ty: PtxType::U32,
+        mode: MadMode::Lo,
+    }));
+    let r_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_addr,
+        lhs: Operand::Reg(r_tile),
+        rhs: Operand::Reg(r_off),
+        ty: PtxType::U32,
+    }));
+
+    // x4 form — four 8×8 matrices into four .b32 regs per lane.
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::LdMatrix {
+        dst: LdMatrixDst::X4([
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+        ]),
+        addr: r_addr,
+        trans: false,
+    }));
+
+    // x2.trans form — lanes 0-15's addresses consumed, transposed load.
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::LdMatrix {
+        dst: LdMatrixDst::X2([alloc.alloc_packed_half2(), alloc.alloc_packed_half2()]),
+        addr: r_addr,
+        trans: true,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new(sm);
+    module.add_kernel(kernel);
+
+    // The smoke kernel must satisfy the same module-load validation the
+    // production launch path runs (SM gate + LdMatrix register typing).
+    module
+        .validate()
+        .expect("ldmatrix smoke kernel must pass module validation");
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
