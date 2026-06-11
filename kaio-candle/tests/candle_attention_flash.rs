@@ -532,3 +532,152 @@ fn attention_flash_backward_seq1_closed_form() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Path equivalence: candle autograd vs direct kaio-ops backward
+// ---------------------------------------------------------------------------
+
+/// The gradient tests above check the candle path against the f64
+/// oracle, and the kaio-ops suite checks the direct path against the
+/// same oracle — so the two paths only agree transitively, within the
+/// oracle tolerance. This pins them to each other bit-exactly, so a
+/// binding orchestration bug (e.g. the wrong buffer wired as `out` or
+/// `stats` in the backward call) cannot hide inside that tolerance.
+/// Bit-exactness is the right bar: the binding adds no arithmetic of
+/// its own, the `_with_stats` recompute is bit-deterministic (locked
+/// by the determinism canary in the kaio-ops suite), and the upstream
+/// gradient of `sum(W ∘ out)` is `W` exactly (`1.0 * x == x`).
+fn bwd_path_equivalence(seq_len: usize, d_k: usize, causal: bool) -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+    let (q_h, k_h, v_h) = inputs_f32(seq_len, d_k);
+    // Non-trivial upstream gradient: loss = sum(W ∘ out) makes dO = W.
+    let w_h: Vec<f32> = (0..seq_len * d_k)
+        .map(|i| ((i % 7) as f32 - 3.0) * 0.1)
+        .collect();
+
+    // Candle autograd path.
+    let q = candle_core::Var::from_vec(q_h.clone(), (seq_len, d_k), &candle_dev)?;
+    let k = candle_core::Var::from_vec(k_h.clone(), (seq_len, d_k), &candle_dev)?;
+    let v = candle_core::Var::from_vec(v_h.clone(), (seq_len, d_k), &candle_dev)?;
+    let out = if causal {
+        kaio_candle::attention_flash_causal(&kaio_dev, q.as_tensor(), k.as_tensor(), v.as_tensor())?
+    } else {
+        kaio_candle::attention_flash(&kaio_dev, q.as_tensor(), k.as_tensor(), v.as_tensor())?
+    };
+    let w = Tensor::from_vec(w_h.clone(), (seq_len, d_k), &candle_dev)?;
+    let loss = (out * w)?.sum_all()?;
+    let grads = loss.backward()?;
+    let gq: Vec<f32> = grads
+        .get(q.as_tensor())
+        .expect("Q grad")
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let gk: Vec<f32> = grads
+        .get(k.as_tensor())
+        .expect("K grad")
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let gv: Vec<f32> = grads
+        .get(v.as_tensor())
+        .expect("V grad")
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+
+    // Direct kaio-ops path on the same input bits: `_with_stats`
+    // forward for out + L, then the three-kernel backward with dO = W.
+    let q_buf = kaio_dev.alloc_from(&q_h)?;
+    let k_buf = kaio_dev.alloc_from(&k_h)?;
+    let v_buf = kaio_dev.alloc_from(&v_h)?;
+    let w_buf = kaio_dev.alloc_from(&w_h)?;
+    let mut out_buf = kaio_dev.alloc_zeros::<f32>(seq_len * d_k)?;
+    let mut stats_buf = kaio_dev.alloc_zeros::<f32>(seq_len)?;
+    let mut dq_buf = kaio_dev.alloc_zeros::<f32>(seq_len * d_k)?;
+    let mut dk_buf = kaio_dev.alloc_zeros::<f32>(seq_len * d_k)?;
+    let mut dv_buf = kaio_dev.alloc_zeros::<f32>(seq_len * d_k)?;
+    if causal {
+        kaio_ops::attention_flash_causal_with_stats(
+            &kaio_dev,
+            &q_buf,
+            &k_buf,
+            &v_buf,
+            &mut out_buf,
+            &mut stats_buf,
+            seq_len as u32,
+            d_k as u32,
+        )?;
+        kaio_ops::attention_flash_bwd_causal(
+            &kaio_dev,
+            &w_buf,
+            &q_buf,
+            &k_buf,
+            &v_buf,
+            &out_buf,
+            &stats_buf,
+            &mut dq_buf,
+            &mut dk_buf,
+            &mut dv_buf,
+            seq_len as u32,
+            d_k as u32,
+        )?;
+    } else {
+        kaio_ops::attention_flash_with_stats(
+            &kaio_dev,
+            &q_buf,
+            &k_buf,
+            &v_buf,
+            &mut out_buf,
+            &mut stats_buf,
+            seq_len as u32,
+            d_k as u32,
+        )?;
+        kaio_ops::attention_flash_bwd(
+            &kaio_dev,
+            &w_buf,
+            &q_buf,
+            &k_buf,
+            &v_buf,
+            &out_buf,
+            &stats_buf,
+            &mut dq_buf,
+            &mut dk_buf,
+            &mut dv_buf,
+            seq_len as u32,
+            d_k as u32,
+        )?;
+    }
+    let dq_h: Vec<f32> = dq_buf.to_host(&kaio_dev)?;
+    let dk_h: Vec<f32> = dk_buf.to_host(&kaio_dev)?;
+    let dv_h: Vec<f32> = dv_buf.to_host(&kaio_dev)?;
+
+    let label = if causal { "causal" } else { "plain" };
+    for (name, candle_g, direct_g) in [("dQ", &gq, &dq_h), ("dK", &gk, &dk_h), ("dV", &gv, &dv_h)] {
+        assert_eq!(candle_g.len(), direct_g.len(), "{label} {name}: length");
+        for (idx, (c, d)) in candle_g.iter().zip(direct_g.iter()).enumerate() {
+            assert_eq!(
+                c.to_bits(),
+                d.to_bits(),
+                "{label} {name}: bit mismatch at {idx}: candle {c} vs direct {d}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_bwd_paths_bit_exact_64x64() -> anyhow::Result<()> {
+    bwd_path_equivalence(64, 64, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_causal_bwd_paths_bit_exact_64x64() -> anyhow::Result<()> {
+    bwd_path_equivalence(64, 64, true)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_bwd_paths_bit_exact_non_aligned_17x19() -> anyhow::Result<()> {
+    bwd_path_equivalence(17, 19, false)
+}
