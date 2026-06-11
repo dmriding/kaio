@@ -1089,6 +1089,128 @@ pub fn attention_flash_causal_with_stats(
     Ok(())
 }
 
+/// FlashAttention backward: computes `dQ`, `dK`, `dV` from the forward
+/// inputs, the forward output, the saved logsumexp stats, and the
+/// upstream gradient.
+///
+/// Launches three kernels on the device stream in order: a preprocess
+/// computing `D_i = Σ_d dO[i,d]·O[i,d]` (into an internal `seq_len × f32`
+/// scratch allocation), then dK/dV (one block per key row), then dQ
+/// (one block per query row). No atomics — every output row is owned by
+/// exactly one block.
+///
+/// # Provenance contract
+///
+/// `out` and `stats` must come from a single
+/// [`attention_flash_with_stats()`] call on the **same** `q`, `k`, `v`
+/// with the same `seq_len` / `d_k`. Validation can only check buffer
+/// lengths — it cannot detect stats produced from different inputs or
+/// from the causal sibling. Mixing produces silently wrong gradients.
+///
+/// # Constraints
+///
+/// Same as the forward: `d_k ≤ 256`, `d_v == d_k`, f32 row-major
+/// contiguous; every query row attends to at least one key. `grad_out`,
+/// `dq`, `dk`, `dv` hold at least `seq_len × d_k` elements; `stats` at
+/// least `seq_len`.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_flash_bwd(
+    device: &KaioDevice,
+    grad_out: &GpuBuffer<f32>,
+    q: &GpuBuffer<f32>,
+    k: &GpuBuffer<f32>,
+    v: &GpuBuffer<f32>,
+    out: &GpuBuffer<f32>,
+    stats: &GpuBuffer<f32>,
+    dq: &mut GpuBuffer<f32>,
+    dk: &mut GpuBuffer<f32>,
+    dv: &mut GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+) -> Result<()> {
+    validate_flash_bwd_dims(grad_out, q, k, v, out, stats, dq, dk, dv, seq_len, d_k)?;
+
+    let mut d_buf = device.alloc_zeros::<f32>(seq_len as usize)?;
+    attention_flash_bwd_preprocess(device, grad_out, out, &mut d_buf, seq_len, d_k)?;
+    attention_flash_bwd_dkdv(
+        device, grad_out, q, k, v, stats, &d_buf, dk, dv, seq_len, d_k, false,
+    )?;
+    attention_flash_bwd_dq(device, grad_out, q, k, v, stats, &d_buf, dq, seq_len, d_k, false)?;
+    Ok(())
+}
+
+/// Causal-mask sibling of [`attention_flash_bwd()`]. `out` and `stats`
+/// must come from [`attention_flash_causal_with_stats()`] on the same
+/// inputs — the same provenance contract applies, including the mask
+/// mode (causal stats with the non-causal backward, or vice versa,
+/// produce silently wrong gradients).
+#[allow(clippy::too_many_arguments)]
+pub fn attention_flash_bwd_causal(
+    device: &KaioDevice,
+    grad_out: &GpuBuffer<f32>,
+    q: &GpuBuffer<f32>,
+    k: &GpuBuffer<f32>,
+    v: &GpuBuffer<f32>,
+    out: &GpuBuffer<f32>,
+    stats: &GpuBuffer<f32>,
+    dq: &mut GpuBuffer<f32>,
+    dk: &mut GpuBuffer<f32>,
+    dv: &mut GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+) -> Result<()> {
+    validate_flash_bwd_dims(grad_out, q, k, v, out, stats, dq, dk, dv, seq_len, d_k)?;
+
+    let mut d_buf = device.alloc_zeros::<f32>(seq_len as usize)?;
+    attention_flash_bwd_preprocess(device, grad_out, out, &mut d_buf, seq_len, d_k)?;
+    attention_flash_bwd_dkdv(
+        device, grad_out, q, k, v, stats, &d_buf, dk, dv, seq_len, d_k, true,
+    )?;
+    attention_flash_bwd_dq(device, grad_out, q, k, v, stats, &d_buf, dq, seq_len, d_k, true)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_flash_bwd_dims(
+    grad_out: &GpuBuffer<f32>,
+    q: &GpuBuffer<f32>,
+    k: &GpuBuffer<f32>,
+    v: &GpuBuffer<f32>,
+    out: &GpuBuffer<f32>,
+    stats: &GpuBuffer<f32>,
+    dq: &GpuBuffer<f32>,
+    dk: &GpuBuffer<f32>,
+    dv: &GpuBuffer<f32>,
+    seq_len: u32,
+    d_k: u32,
+) -> Result<()> {
+    if seq_len == 0 || d_k == 0 {
+        return Err(KaioError::InvalidConfig(
+            "attention dimensions must be non-zero".to_string(),
+        ));
+    }
+    validate_flash_dk(d_k)?;
+    let sd = (seq_len as usize) * (d_k as usize);
+    let buffers: [(&str, usize); 8] = [
+        ("grad_out", grad_out.len()),
+        ("Q", q.len()),
+        ("K", k.len()),
+        ("V", v.len()),
+        ("out", out.len()),
+        ("dQ", dq.len()),
+        ("dK", dk.len()),
+        ("dV", dv.len()),
+    ];
+    for (name, len) in buffers {
+        if len < sd {
+            return Err(KaioError::InvalidConfig(format!(
+                "{name} buffer too small: need {sd} elements ({seq_len}×{d_k}), got {len}"
+            )));
+        }
+    }
+    validate_flash_stats(stats, seq_len)
+}
+
 /// Backward preprocess: `D[i] = Σ_d dO[i,d] · O[i,d]`, one f32 per
 /// query row. Internal building block of `attention_flash_bwd`;
 /// exposed for the per-kernel correctness tests only.

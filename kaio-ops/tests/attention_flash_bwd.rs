@@ -32,9 +32,9 @@
 
 use kaio::prelude::*;
 use kaio_ops::{
-    attention_flash, attention_flash_bwd_dkdv, attention_flash_bwd_dq,
-    attention_flash_bwd_preprocess, attention_flash_causal, attention_flash_causal_with_stats,
-    attention_flash_with_stats,
+    attention_flash, attention_flash_bwd, attention_flash_bwd_causal, attention_flash_bwd_dkdv,
+    attention_flash_bwd_dq, attention_flash_bwd_preprocess, attention_flash_causal,
+    attention_flash_causal_with_stats, attention_flash_with_stats,
 };
 
 // --- CPU f64 analytical reference ---
@@ -739,4 +739,273 @@ fn bwd_dq_128x128() {
 fn bwd_dq_non_aligned_17x19() {
     check_dq(17, 19, false);
     check_dq(17, 19, true);
+}
+
+// ---------------------------------------------------------------------------
+// GPU: full backward via the public API vs the f64 oracle (Sprint 9.2)
+// ---------------------------------------------------------------------------
+
+/// Full pipeline through the public API: `_with_stats` forward →
+/// `attention_flash_bwd[_causal]` → all three gradients vs the oracle.
+/// `g_h` is the upstream gradient (caller controls its distribution).
+fn run_bwd_full(seq_len: usize, d_k: usize, causal: bool, g_h: &[f32], label: &str) {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let (q_h, k_h, v_h) = gpu_inputs_f32(seq_len, d_k);
+
+    let sl = seq_len as u32;
+    let dk_u = d_k as u32;
+    let n = seq_len * d_k;
+
+    let q = device.alloc_from(&q_h).unwrap();
+    let k = device.alloc_from(&k_h).unwrap();
+    let v = device.alloc_from(&v_h).unwrap();
+    let g = device.alloc_from(g_h).unwrap();
+    let mut out = device.alloc_zeros::<f32>(n).unwrap();
+    let mut stats = device.alloc_zeros::<f32>(seq_len).unwrap();
+    let mut dq_gpu = device.alloc_zeros::<f32>(n).unwrap();
+    let mut dk_gpu = device.alloc_zeros::<f32>(n).unwrap();
+    let mut dv_gpu = device.alloc_zeros::<f32>(n).unwrap();
+
+    if causal {
+        attention_flash_causal_with_stats(&device, &q, &k, &v, &mut out, &mut stats, sl, dk_u)
+            .unwrap();
+        attention_flash_bwd_causal(
+            &device, &g, &q, &k, &v, &out, &stats, &mut dq_gpu, &mut dk_gpu, &mut dv_gpu, sl,
+            dk_u,
+        )
+        .unwrap();
+    } else {
+        attention_flash_with_stats(&device, &q, &k, &v, &mut out, &mut stats, sl, dk_u).unwrap();
+        attention_flash_bwd(
+            &device, &g, &q, &k, &v, &out, &stats, &mut dq_gpu, &mut dk_gpu, &mut dv_gpu, sl,
+            dk_u,
+        )
+        .unwrap();
+    }
+
+    let q64: Vec<f64> = q_h.iter().map(|&x| x as f64).collect();
+    let k64: Vec<f64> = k_h.iter().map(|&x| x as f64).collect();
+    let v64: Vec<f64> = v_h.iter().map(|&x| x as f64).collect();
+    let g64: Vec<f64> = g_h.iter().map(|&x| x as f64).collect();
+    let (o_ref, p_ref) = cpu_attention_fwd_f64(&q64, &k64, &v64, seq_len, d_k, causal);
+    let (dq_ref, dk_ref, dv_ref) =
+        cpu_attention_bwd_f64(&q64, &k64, &v64, &o_ref, &p_ref, &g64, seq_len, d_k);
+
+    let dq_h = dq_gpu.to_host(&device).unwrap();
+    let dk_h = dk_gpu.to_host(&device).unwrap();
+    let dv_h = dv_gpu.to_host(&device).unwrap();
+    assert_grads_close(&dq_h, &dq_ref, &format!("{label}/dQ"));
+    assert_grads_close(&dk_h, &dk_ref, &format!("{label}/dK"));
+    assert_grads_close(&dv_h, &dv_ref, &format!("{label}/dV"));
+}
+
+fn check_bwd_full(seq_len: usize, d_k: usize, causal: bool) {
+    let g_h = gpu_grad_f32(seq_len, d_k);
+    let label = format!(
+        "bwd_full_{}_{seq_len}x{d_k}",
+        if causal { "causal" } else { "plain" }
+    );
+    run_bwd_full(seq_len, d_k, causal, &g_h, &label);
+}
+
+/// Closed-form gate at `seq_len = 1`: `dV = grad_out`, `dQ = 0`,
+/// `dK = 0`. Wiring errors (wrong sign, swapped buffers, missing
+/// scale) produce O(0.1+) violations here; the small tolerances below
+/// only absorb FP noise — `dP_11` (serial per-thread sum) and `D_1`
+/// (block tree reduction) sum in different orders, so `dS` is ~1e-7
+/// rather than exactly zero.
+#[test]
+#[ignore] // GPU required
+fn bwd_seq1_closed_form_gate() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let d_k = 16usize;
+    let (q_h, k_h, v_h) = gpu_inputs_f32(1, d_k);
+    let g_h = gpu_grad_f32(1, d_k);
+
+    for causal in [false, true] {
+        let q = device.alloc_from(&q_h).unwrap();
+        let k = device.alloc_from(&k_h).unwrap();
+        let v = device.alloc_from(&v_h).unwrap();
+        let g = device.alloc_from(&g_h).unwrap();
+        let mut out = device.alloc_zeros::<f32>(d_k).unwrap();
+        let mut stats = device.alloc_zeros::<f32>(1).unwrap();
+        let mut dq = device.alloc_zeros::<f32>(d_k).unwrap();
+        let mut dk = device.alloc_zeros::<f32>(d_k).unwrap();
+        let mut dv = device.alloc_zeros::<f32>(d_k).unwrap();
+
+        if causal {
+            attention_flash_causal_with_stats(&device, &q, &k, &v, &mut out, &mut stats, 1, 16)
+                .unwrap();
+            attention_flash_bwd_causal(
+                &device, &g, &q, &k, &v, &out, &stats, &mut dq, &mut dk, &mut dv, 1, 16,
+            )
+            .unwrap();
+        } else {
+            attention_flash_with_stats(&device, &q, &k, &v, &mut out, &mut stats, 1, 16).unwrap();
+            attention_flash_bwd(
+                &device, &g, &q, &k, &v, &out, &stats, &mut dq, &mut dk, &mut dv, 1, 16,
+            )
+            .unwrap();
+        }
+
+        let label = if causal { "causal" } else { "plain" };
+        let dq_h = dq.to_host(&device).unwrap();
+        let dk_h = dk.to_host(&device).unwrap();
+        let dv_h = dv.to_host(&device).unwrap();
+        for d in 0..d_k {
+            assert!(
+                (dv_h[d] - g_h[d]).abs() < 1e-6,
+                "seq1 {label}: dV[{d}] = {} != grad {}",
+                dv_h[d],
+                g_h[d]
+            );
+            assert!(
+                dq_h[d].abs() < 1e-5,
+                "seq1 {label}: dQ[{d}] = {} != 0",
+                dq_h[d]
+            );
+            assert!(
+                dk_h[d].abs() < 1e-5,
+                "seq1 {label}: dK[{d}] = {} != 0",
+                dk_h[d]
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_full_seq32() {
+    for d_k in [32, 64, 128] {
+        check_bwd_full(32, d_k, false);
+        check_bwd_full(32, d_k, true);
+    }
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_full_seq64() {
+    for d_k in [32, 64, 128] {
+        check_bwd_full(64, d_k, false);
+        check_bwd_full(64, d_k, true);
+    }
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_full_seq128() {
+    for d_k in [32, 64, 128] {
+        check_bwd_full(128, d_k, false);
+        check_bwd_full(128, d_k, true);
+    }
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_full_non_aligned_17x19() {
+    check_bwd_full(17, 19, false);
+    check_bwd_full(17, 19, true);
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_full_tile_boundary_257x32() {
+    check_bwd_full(257, 32, false);
+    check_bwd_full(257, 32, true);
+}
+
+/// Upstream-gradient rows spanning orders of magnitude so `D_i` varies
+/// widely across rows — exercises the cancellation path in
+/// `dS = P·(dP − D)` that uniform-magnitude data cannot reach.
+#[test]
+#[ignore] // GPU required
+fn bwd_full_wide_range_dout() {
+    let seq_len = 64usize;
+    let d_k = 64usize;
+    let row_scale: Vec<f32> = (0..seq_len)
+        .map(|i| match i % 6 {
+            0 => 1e-3,
+            1 => 1.0,
+            2 => 5e1,
+            3 => 1e-2,
+            4 => 1e2,
+            _ => 0.5,
+        })
+        .collect();
+    let g_h: Vec<f32> = (0..seq_len * d_k)
+        .map(|i| {
+            let base = ((i % 11) as f32 - 5.0) * 0.2;
+            base * row_scale[i / d_k]
+        })
+        .collect();
+    run_bwd_full(seq_len, d_k, false, &g_h, "bwd_wide_range_plain_64x64");
+    run_bwd_full(seq_len, d_k, true, &g_h, "bwd_wide_range_causal_64x64");
+}
+
+/// Finite-difference smoke on the GPU at a tiny shape — a sanity layer
+/// independent of the analytical oracle, not the primary gate.
+#[test]
+#[ignore] // GPU required
+fn bwd_fd_smoke_8x16() {
+    let seq_len = 8usize;
+    let d_k = 16usize;
+    let (q_h, k_h, v_h) = gpu_inputs_f32(seq_len, d_k);
+    let g_h = gpu_grad_f32(seq_len, d_k);
+
+    let device = KaioDevice::new(0).expect("GPU required");
+    let sl = seq_len as u32;
+    let n = seq_len * d_k;
+
+    for causal in [false, true] {
+        let q = device.alloc_from(&q_h).unwrap();
+        let k = device.alloc_from(&k_h).unwrap();
+        let v = device.alloc_from(&v_h).unwrap();
+        let g = device.alloc_from(&g_h).unwrap();
+        let mut out = device.alloc_zeros::<f32>(n).unwrap();
+        let mut stats = device.alloc_zeros::<f32>(seq_len).unwrap();
+        let mut dq = device.alloc_zeros::<f32>(n).unwrap();
+        let mut dk = device.alloc_zeros::<f32>(n).unwrap();
+        let mut dv = device.alloc_zeros::<f32>(n).unwrap();
+
+        if causal {
+            attention_flash_causal_with_stats(&device, &q, &k, &v, &mut out, &mut stats, sl, 16)
+                .unwrap();
+            attention_flash_bwd_causal(
+                &device, &g, &q, &k, &v, &out, &stats, &mut dq, &mut dk, &mut dv, sl, 16,
+            )
+            .unwrap();
+        } else {
+            attention_flash_with_stats(&device, &q, &k, &v, &mut out, &mut stats, sl, 16).unwrap();
+            attention_flash_bwd(
+                &device, &g, &q, &k, &v, &out, &stats, &mut dq, &mut dk, &mut dv, sl, 16,
+            )
+            .unwrap();
+        }
+
+        let q64: Vec<f64> = q_h.iter().map(|&x| x as f64).collect();
+        let k64: Vec<f64> = k_h.iter().map(|&x| x as f64).collect();
+        let v64: Vec<f64> = v_h.iter().map(|&x| x as f64).collect();
+        let g64: Vec<f64> = g_h.iter().map(|&x| x as f64).collect();
+        let h = 1e-5f64;
+        let dq_fd = fd_grad_f64(&q64, &k64, &v64, &g64, seq_len, d_k, causal, 0, h);
+        let dk_fd = fd_grad_f64(&q64, &k64, &v64, &g64, seq_len, d_k, causal, 1, h);
+        let dv_fd = fd_grad_f64(&q64, &k64, &v64, &g64, seq_len, d_k, causal, 2, h);
+
+        let label = if causal { "fd_causal" } else { "fd_plain" };
+        assert_grads_close(
+            &dq.to_host(&device).unwrap(),
+            &dq_fd,
+            &format!("{label}/dQ"),
+        );
+        assert_grads_close(
+            &dk.to_host(&device).unwrap(),
+            &dk_fd,
+            &format!("{label}/dK"),
+        );
+        assert_grads_close(
+            &dv.to_host(&device).unwrap(),
+            &dv_fd,
+            &format!("{label}/dV"),
+        );
+    }
 }
