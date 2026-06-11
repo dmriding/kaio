@@ -221,3 +221,314 @@ fn attention_flash_rejects_rank3() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Gradient correctness (backward via candle autograd)
+// ---------------------------------------------------------------------------
+// CPU f64 analytical reference — host-side copy of the oracle that
+// gates the kaio-ops kernels in kaio-ops/tests/attention_flash_bwd.rs
+// (that file also self-checks the identities against f64 finite
+// differences before anything trusts them).
+
+fn cpu_attention_fwd_f64(
+    q: &[f64],
+    k: &[f64],
+    v: &[f64],
+    seq_len: usize,
+    d_k: usize,
+    causal: bool,
+) -> (Vec<f64>, Vec<f64>) {
+    let scale = 1.0f64 / (d_k as f64).sqrt();
+    let mut s = vec![0.0f64; seq_len * seq_len];
+    for i in 0..seq_len {
+        for j in 0..seq_len {
+            if causal && j > i {
+                s[i * seq_len + j] = f64::NEG_INFINITY;
+            } else {
+                let mut dot = 0.0f64;
+                for d in 0..d_k {
+                    dot += q[i * d_k + d] * k[j * d_k + d];
+                }
+                s[i * seq_len + j] = dot * scale;
+            }
+        }
+    }
+    let mut p = vec![0.0f64; seq_len * seq_len];
+    for i in 0..seq_len {
+        let row = &s[i * seq_len..(i + 1) * seq_len];
+        let max = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exps: Vec<f64> = row.iter().map(|&x| (x - max).exp()).collect();
+        let sum: f64 = exps.iter().sum();
+        for j in 0..seq_len {
+            p[i * seq_len + j] = exps[j] / sum;
+        }
+    }
+    let mut o = vec![0.0f64; seq_len * d_k];
+    for i in 0..seq_len {
+        for d in 0..d_k {
+            let mut acc = 0.0f64;
+            for j in 0..seq_len {
+                acc += p[i * seq_len + j] * v[j * d_k + d];
+            }
+            o[i * d_k + d] = acc;
+        }
+    }
+    (o, p)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cpu_attention_bwd_f64(
+    q: &[f64],
+    k: &[f64],
+    v: &[f64],
+    o: &[f64],
+    p: &[f64],
+    d_out: &[f64],
+    seq_len: usize,
+    d_k: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let scale = 1.0f64 / (d_k as f64).sqrt();
+    let mut dv = vec![0.0f64; seq_len * d_k];
+    for j in 0..seq_len {
+        for d in 0..d_k {
+            let mut acc = 0.0f64;
+            for i in 0..seq_len {
+                acc += p[i * seq_len + j] * d_out[i * d_k + d];
+            }
+            dv[j * d_k + d] = acc;
+        }
+    }
+    let mut dp = vec![0.0f64; seq_len * seq_len];
+    for i in 0..seq_len {
+        for j in 0..seq_len {
+            let mut acc = 0.0f64;
+            for d in 0..d_k {
+                acc += d_out[i * d_k + d] * v[j * d_k + d];
+            }
+            dp[i * seq_len + j] = acc;
+        }
+    }
+    let mut dd = vec![0.0f64; seq_len];
+    for i in 0..seq_len {
+        let mut acc = 0.0f64;
+        for d in 0..d_k {
+            acc += d_out[i * d_k + d] * o[i * d_k + d];
+        }
+        dd[i] = acc;
+    }
+    let mut ds = vec![0.0f64; seq_len * seq_len];
+    for i in 0..seq_len {
+        for j in 0..seq_len {
+            ds[i * seq_len + j] = p[i * seq_len + j] * (dp[i * seq_len + j] - dd[i]);
+        }
+    }
+    let mut dq = vec![0.0f64; seq_len * d_k];
+    for i in 0..seq_len {
+        for d in 0..d_k {
+            let mut acc = 0.0f64;
+            for j in 0..seq_len {
+                acc += ds[i * seq_len + j] * k[j * d_k + d];
+            }
+            dq[i * d_k + d] = acc * scale;
+        }
+    }
+    let mut dk = vec![0.0f64; seq_len * d_k];
+    for j in 0..seq_len {
+        for d in 0..d_k {
+            let mut acc = 0.0f64;
+            for i in 0..seq_len {
+                acc += ds[i * seq_len + j] * q[i * d_k + d];
+            }
+            dk[j * d_k + d] = acc * scale;
+        }
+    }
+    (dq, dk, dv)
+}
+
+fn assert_grad_close(got: &[f32], expected: &[f64], label: &str) {
+    assert_eq!(got.len(), expected.len(), "{label}: length mismatch");
+    for (idx, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+        let g = g as f64;
+        let abs_err = (g - e).abs();
+        let rel_err = if e.abs() > 1e-12 {
+            abs_err / e.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{label}: grad mismatch at [{idx}]: got={g}, expected={e}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e}"
+        );
+    }
+}
+
+/// Builds a candle graph `loss = sum(W ∘ attention_flash(Q, K, V))`
+/// (`W = ones` for the unweighted variant, so `dO = W` either way),
+/// runs `.backward()`, and checks all three input gradients against
+/// the CPU f64 analytical oracle.
+fn gradient_check_attention_flash(
+    seq_len: usize,
+    d_k: usize,
+    causal: bool,
+    weighted: bool,
+) -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+    let (q_h, k_h, v_h) = inputs_f32(seq_len, d_k);
+    let w_h: Vec<f32> = if weighted {
+        (0..seq_len * d_k)
+            .map(|i| ((i % 7) as f32 - 3.0) * 0.1)
+            .collect()
+    } else {
+        vec![1.0f32; seq_len * d_k]
+    };
+
+    let q = candle_core::Var::from_vec(q_h.clone(), (seq_len, d_k), &candle_dev)?;
+    let k = candle_core::Var::from_vec(k_h.clone(), (seq_len, d_k), &candle_dev)?;
+    let v = candle_core::Var::from_vec(v_h.clone(), (seq_len, d_k), &candle_dev)?;
+
+    let out = if causal {
+        kaio_candle::attention_flash_causal(&kaio_dev, q.as_tensor(), k.as_tensor(), v.as_tensor())?
+    } else {
+        kaio_candle::attention_flash(&kaio_dev, q.as_tensor(), k.as_tensor(), v.as_tensor())?
+    };
+    let w = Tensor::from_vec(w_h.clone(), (seq_len, d_k), &candle_dev)?;
+    let loss = (out * w)?.sum_all()?;
+
+    let grads = loss.backward()?;
+    let grad_q = grads.get(q.as_tensor()).expect("Q should have gradient");
+    let grad_k = grads.get(k.as_tensor()).expect("K should have gradient");
+    let grad_v = grads.get(v.as_tensor()).expect("V should have gradient");
+
+    let gq: Vec<f32> = grad_q.flatten_all()?.to_vec1::<f32>()?;
+    let gk: Vec<f32> = grad_k.flatten_all()?.to_vec1::<f32>()?;
+    let gv: Vec<f32> = grad_v.flatten_all()?.to_vec1::<f32>()?;
+
+    let q64: Vec<f64> = q_h.iter().map(|&x| x as f64).collect();
+    let k64: Vec<f64> = k_h.iter().map(|&x| x as f64).collect();
+    let v64: Vec<f64> = v_h.iter().map(|&x| x as f64).collect();
+    let w64: Vec<f64> = w_h.iter().map(|&x| x as f64).collect();
+    let (o_ref, p_ref) = cpu_attention_fwd_f64(&q64, &k64, &v64, seq_len, d_k, causal);
+    let (dq_ref, dk_ref, dv_ref) =
+        cpu_attention_bwd_f64(&q64, &k64, &v64, &o_ref, &p_ref, &w64, seq_len, d_k);
+
+    let label = format!(
+        "attention_flash{}{}_{seq_len}x{d_k}",
+        if causal { "_causal" } else { "" },
+        if weighted { "_weighted" } else { "" }
+    );
+    assert_grad_close(&gq, &dq_ref, &format!("{label}/dQ"));
+    assert_grad_close(&gk, &dk_ref, &format!("{label}/dK"));
+    assert_grad_close(&gv, &dv_ref, &format!("{label}/dV"));
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_backward_32x32() -> anyhow::Result<()> {
+    gradient_check_attention_flash(32, 32, false, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_backward_64x64() -> anyhow::Result<()> {
+    gradient_check_attention_flash(64, 64, false, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_backward_128x128() -> anyhow::Result<()> {
+    gradient_check_attention_flash(128, 128, false, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_backward_weighted_64x64() -> anyhow::Result<()> {
+    gradient_check_attention_flash(64, 64, false, true)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_causal_backward_32x32() -> anyhow::Result<()> {
+    gradient_check_attention_flash(32, 32, true, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_causal_backward_64x64() -> anyhow::Result<()> {
+    gradient_check_attention_flash(64, 64, true, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_causal_backward_128x128() -> anyhow::Result<()> {
+    gradient_check_attention_flash(128, 128, true, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_causal_backward_weighted_64x64() -> anyhow::Result<()> {
+    gradient_check_attention_flash(64, 64, true, true)
+}
+
+/// Closed-form sanity through the full candle graph at `seq_len = 1`:
+/// `dV = W` (the loss weight), `dQ = dK = 0` up to FP noise.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn attention_flash_backward_seq1_closed_form() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+    let d_k = 16usize;
+    let (q_h, k_h, v_h) = inputs_f32(1, d_k);
+    let w_h: Vec<f32> = (0..d_k).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
+
+    for causal in [false, true] {
+        let q = candle_core::Var::from_vec(q_h.clone(), (1, d_k), &candle_dev)?;
+        let k = candle_core::Var::from_vec(k_h.clone(), (1, d_k), &candle_dev)?;
+        let v = candle_core::Var::from_vec(v_h.clone(), (1, d_k), &candle_dev)?;
+
+        let out = if causal {
+            kaio_candle::attention_flash_causal(
+                &kaio_dev,
+                q.as_tensor(),
+                k.as_tensor(),
+                v.as_tensor(),
+            )?
+        } else {
+            kaio_candle::attention_flash(&kaio_dev, q.as_tensor(), k.as_tensor(), v.as_tensor())?
+        };
+        let w = Tensor::from_vec(w_h.clone(), (1, d_k), &candle_dev)?;
+        let loss = (out * w)?.sum_all()?;
+        let grads = loss.backward()?;
+
+        let gq: Vec<f32> = grads
+            .get(q.as_tensor())
+            .expect("Q grad")
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let gk: Vec<f32> = grads
+            .get(k.as_tensor())
+            .expect("K grad")
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let gv: Vec<f32> = grads
+            .get(v.as_tensor())
+            .expect("V grad")
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        let label = if causal { "causal" } else { "plain" };
+        for d in 0..d_k {
+            assert!(
+                (gv[d] - w_h[d]).abs() < 1e-6,
+                "seq1 {label}: dV[{d}] = {} != {}",
+                gv[d],
+                w_h[d]
+            );
+            assert!(gq[d].abs() < 1e-5, "seq1 {label}: dQ[{d}] = {} != 0", gq[d]);
+            assert!(gk[d].abs() < 1e-5, "seq1 {label}: dK[{d}] = {} != 0", gk[d]);
+        }
+    }
+    Ok(())
+}
