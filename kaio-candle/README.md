@@ -6,7 +6,7 @@
 
 **Candle bridge for [KAIO](https://github.com/dmriding/kaio) — `CustomOp` bindings that let you call KAIO's tensor-core GPU kernels directly on `candle_core::Tensor`.**
 
-Ships ten ops: `matmul_tc`, `matmul_tc_bf16`, `matmul_tc_async`, `matmul_tc_bf16_async`, `matmul_int4`, `matmul_int8`, `attention_tc`, `attention_tc_causal`, `qkv_project_int8`, `qkv_project_int4`. All four matmul TC variants (f16 + bf16, sync + async) support backward (autograd) via the forward-reuse pattern — no new PTX in either precision. Attention and quantized ops are forward-only.
+Ships twelve ops: `matmul_tc`, `matmul_tc_bf16`, `matmul_tc_async`, `matmul_tc_bf16_async`, `matmul_int4`, `matmul_int8`, `attention_tc`, `attention_tc_causal`, `attention_flash`, `attention_flash_causal`, `qkv_project_int8`, `qkv_project_int4`. All four matmul TC variants (f16 + bf16, sync + async) support backward (autograd) via the forward-reuse pattern — no new PTX in either precision. FlashAttention (`attention_flash` + `attention_flash_causal`) supports backward through dedicated backward PTX kernels, preserving the no-O(seq²)-memory profile through the backward pass. `attention_tc` and quantized ops are forward-only.
 
 ## Status — v0.1.0 (initial release)
 
@@ -94,6 +94,8 @@ cargo run --release --features cuda --example attention_tc_candle
 | `matmul_int8(kd, a, b, scale)` | `CustomOp2` | `a: [M, K]`, `b: [K, N]` → `[M, N]` | u8-as-i8 × u8-as-i8 → f32 (× f32 scale) |
 | `attention_tc(kd, q, k, v)` | `CustomOp3` | `q: [seq_q, d_k]`, `k: [seq_k, d_k]`, `v: [seq_k, d_v]` → `[seq_q, d_v]` | f16 × f16 × f16 → f32 |
 | `attention_tc_causal(kd, q, k, v)` | `CustomOp3` | same | f16 × f16 × f16 → f32 |
+| `attention_flash(kd, q, k, v)` | `CustomOp3` | `q`, `k`, `v` all `[seq_len, d_k]` → `[seq_len, d_k]` | f32 × f32 × f32 → f32 |
+| `attention_flash_causal(kd, q, k, v)` | `CustomOp3` | same | f32 × f32 × f32 → f32 |
 | `qkv_project_int8(kd, x, wq, wk, wv, sq, sk, sv)` | Direct-call | `x: [M, K]`, `wq/wk/wv: [K, N]` → `(Q, K, V)` each `[M, N]` | f16 × u8-as-i8 → **f16** |
 | `qkv_project_int4(kd, x, wq, wk, wv, sq, sk, sv)` | Direct-call | `x: [M, K]`, `wq/wk/wv: [K/8, N]`, `sq/sk/sv: [K/128, N]` → `(Q, K, V)` each `[M, N]` | f16 × u32 × f16 → **f16** |
 
@@ -101,7 +103,7 @@ cargo run --release --features cuda --example attention_tc_candle
 
 `matmul_int8` is W8A8 symmetric quant. Candle has no `DType::I8`, so the convention is `DType::U8` tensors whose bytes are interpreted as signed INT8 (`-128..=127`) by the kernel. The bridge reinterprets the storage via a same-layout transmute. `scale` is a scalar `f32` applied in the accumulator; a typical realistic value is `max_abs / 127`.
 
-`attention_tc` uses a shared-memory scores buffer capped at `seq_k ≤ 384`. FlashAttention-TC will lift this cap in a later sprint.
+`attention_tc` uses a shared-memory scores buffer capped at `seq_k ≤ 384`. `attention_flash` has no seq cap (online softmax — no materialized score matrix) but is strictly single-head self-attention: Q, K, V must all be `[seq_len, d_k]` with `d_k ≤ 256`; cross-attention shapes are rejected with a pointer back to `attention_tc`.
 
 `qkv_project_int8` and `qkv_project_int4` are **direct-call** functions (not `CustomOpN` — candle's trait maxes at 3 inputs and single output). They return `(Tensor, Tensor, Tensor)` with `DType::F16` output because the fused kernel performs the `f32→f16` conversion internally as part of the projection fusion. Gradient-tracked inputs are rejected with a loud error requiring `.detach()` — these ops are forward-only.
 
@@ -111,13 +113,16 @@ cargo run --release --features cuda --example attention_tc_candle
 | --- | --- | --- |
 | `matmul_tc` | Supported | `dA = grad @ B^T`, `dB = A^T @ grad` via forward kernel |
 | `matmul_tc_async` | Supported | Same, uses `cp.async` variant in both directions |
-| `attention_tc` / `attention_tc_causal` | Not yet | FlashAttention backward requires new PTX kernels (Phase 8) |
+| `attention_flash` / `attention_flash_causal` | Supported | Dedicated backward PTX kernels (D-preprocess + dK/dV + dQ) rebuilding the softmax from a per-row logsumexp; f32 end-to-end, no dtype casts |
+| `attention_tc` / `attention_tc_causal` | No | Short-sequence inference op — training users route to `attention_flash`, which has backward and no `seq_k` cap |
 | `matmul_int4` / `matmul_int8` | No | Quantized inference ops — frozen weights, no backprop in practice |
 | `qkv_project_int8` / `qkv_project_int4` | No | Direct-call ops, inference-only by design |
 
-**Numerically approximate:** The backward implementation downcasts the f32 upstream gradient to f16 to reuse the existing tensor-core forward kernels, and casts the output gradients back to f16 to satisfy candle's dtype-matching constraint. This is an initial autograd integration proving the `bwd()` bridge pattern, not a final mixed-precision training stack.
+**Numerically approximate (matmul TC backward):** The backward implementation downcasts the f32 upstream gradient to f16 (or bf16) to reuse the existing tensor-core forward kernels, and casts the output gradients back to the input dtype to satisfy candle's dtype-matching constraint. This is an initial autograd integration proving the `bwd()` bridge pattern, not a final mixed-precision training stack. The FlashAttention backward has no such round-trip — it is f32 end-to-end.
 
-**Memory:** The backward pass materializes transposed tensors in VRAM (`.t()?.contiguous()` = allocation + copy). Peak backward memory is approximately 2–3x the forward input size. Designed for integration testing and light training, not high-throughput training loops where allocator overhead matters.
+**Memory (matmul TC backward):** The backward pass materializes transposed tensors in VRAM (`.t()?.contiguous()` = allocation + copy). Peak backward memory is approximately 2–3x the forward input size. Designed for integration testing and light training, not high-throughput training loops where allocator overhead matters.
+
+**Recompute (FlashAttention backward):** candle's `CustomOp3` has no fwd→bwd saved-intermediate channel, so each backward call re-runs the stats-saving forward once to recover the per-row logsumexp before launching the backward kernels (the forward is deterministic; recomputed stats are bit-identical to saved ones). Direct `kaio_ops::attention_flash_with_stats` + `attention_flash_bwd` callers can hold the stats buffer themselves and skip the recompute. Measured cost of both tiers is in `docs/performance.md`.
 
 ## Device lifetime
 
@@ -143,7 +148,7 @@ A weekly GitHub Actions workflow (`.github/workflows/candle-head.yml`) builds ka
 - **Non-zero storage offset rejected** (e.g. from `.narrow(...)` / `.slice(...)`). Call `.contiguous()?` to compact.
 - **Rank-2 only.** Multi-head attention callers must reshape `[heads, seq, d]` to `[heads * seq, d]` or call per-head with rank-2 slices. Wrappers error with a concrete reshape hint for higher-rank inputs.
 - **CUDA Graph capture partially unblocked.** Event-based sync (Sprint 7.4c) removes the prior `cuCtxSynchronize` blocker. However, full CUDA Graph capture requires non-default streams on both the candle and KAIO sides, which is not yet verified.
-- **f32 output (CustomOp ops) / f16 output (direct-call ops).** `matmul_tc`, `matmul_int4`, `matmul_int8`, `attention_tc` return `f32` matching the kaio-ops accumulator. `qkv_project_int{4,8}` return `f16` because the fused kernel converts internally.
+- **f32 output (CustomOp ops) / f16 output (direct-call ops).** `matmul_tc`, `matmul_int4`, `matmul_int8`, `attention_tc`, and `attention_flash` return `f32` matching the kaio-ops accumulator. `qkv_project_int{4,8}` return `f16` because the fused kernel converts internally.
 - **No CPU fallback.** `cpu_fwd` returns a loud error rather than silently routing to `candle.matmul()`. KAIO's value is GPU-specific PTX; a silent CPU fallback would mask every perf claim.
 - **Bench numbers vs direct-call gap.** Each bridge call issues event-based stream sync (two `join()` calls per op). This replaced the heavier `cuCtxSynchronize` from v0.1 but still allocates a transient `CudaEvent` per call. KAIO's published %-of-cuBLAS numbers are measured via direct kaio-ops calls, not through the bridge.
 

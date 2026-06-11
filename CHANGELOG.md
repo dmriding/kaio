@@ -8,10 +8,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1, 9.1.2, 9.1.3, 9.1.4)
+## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1, 9.1.2, 9.1.3, 9.1.4, 9.2)
 
 ### Added
 
+- FlashAttention backward (Sprint 9.2) — the Phase 9 headline.
+  Three layers in one sprint:
+  - `kaio_ops::attention_flash_with_stats` +
+    `attention_flash_causal_with_stats` — forward variants that
+    additionally save the per-row softmax logsumexp
+    (`L_i = m_i + log(l_i)`, one f32 per query row). Output is
+    numerically identical to the existing forwards (zero-diff
+    verified); the shipped `attention_flash` / `attention_flash_causal`
+    are untouched.
+  - `kaio_ops::attention_flash_bwd` + `attention_flash_bwd_causal` —
+    backward via three new PTX kernels (D-term preprocess, dK/dV, dQ),
+    rebuilding `P_ij = exp(S_ij − L_i)` from the saved logsumexp
+    instead of materializing the O(seq²) probability matrix. No
+    atomics — the dK/dV and dQ kernels swap loop nests so every output
+    row has exactly one owning block. f32, single-head self-attention,
+    `d_k ≤ 256`, same shape contract as the forward. All kernels run
+    18–22 registers/thread (ptxas -v, sm_89).
+  - `kaio_candle::attention_flash` + `attention_flash_causal` — first
+    candle bindings for the flash family, forward + backward together
+    (`CustomOp3`). f32 end-to-end, no dtype casts. Backward recovers
+    the logsumexp by re-running the stats-saving forward (candle's
+    `CustomOp3` has no fwd→bwd saved-intermediate channel; the forward
+    is deterministic so recomputed stats are bit-identical). Rejects
+    cross-attention shapes loudly (use `attention_tc` for those).
+  - Correctness: CPU f64 analytical backward oracle (self-checked
+    against f64 central finite differences before judging any GPU
+    output), `seq_len = 1` closed-form gate, full
+    `seq ∈ {32,64,128} × d_k ∈ {32,64,128}` matrix plus non-aligned
+    `(17,19)`, tile-boundary `seq = 257`, and wide-dynamic-range
+    upstream-gradient cases targeting the `dS = P·(dP − D)`
+    cancellation path. 26 new GPU tests in
+    `kaio-ops/tests/attention_flash_bwd.rs`, 19 in
+    `kaio-candle/tests/candle_attention_flash.rs`, 4 host-only oracle
+    self-checks. Tolerance `rel < 1e-2 || abs < 1e-3` vs the f64
+    oracle held everywhere.
+  - Bench: `benchmark_attention_flash_backward` in
+    `attention_flash_bench.rs`; backward section added to
+    `docs/performance.md` with the two-tier cost contract (bwd-only
+    vs bwd + stats recompute) and honest ratio scaling notes.
 - `MatmulTcBf16Op::bwd` + `MatmulTcBf16AsyncOp::bwd` (Sprint 9.1.4)
   — backward implementations for the two bf16 candle forwards from
   Sprint 9.1.3. Forward-reuse pattern: `dA = grad @ B^T`, `dB = A^T

@@ -50,6 +50,8 @@ matmul_auto(&device, &a, &b, &mut c, m, n, k)?; // picks best variant from cache
 |----|---------|--------|-------|
 | `attention` | scalar, materialized | any | Standard scaled dot-product attention. Companion: `attention_causal` for causal masking. |
 | `attention_flash` | scalar, FlashAttention | any | O(d_k) memory — no attention matrix materialization. `d_k ≤ 256`. Companion: `attention_flash_causal`. |
+| `attention_flash_with_stats` | scalar, FlashAttention | any | Forward that also saves the per-row softmax logsumexp (one f32 per query row) for a subsequent backward. Output identical to `attention_flash`. Companion: `attention_flash_causal_with_stats`. |
+| `attention_flash_bwd` | scalar, FlashAttention backward | any | `dQ`/`dK`/`dV` from the saved logsumexp — three kernels (D-preprocess + dK/dV + dQ), no O(seq²) materialization, no atomics. `out`/`stats` must come from the matching `_with_stats` call. Companion: `attention_flash_bwd_causal`. |
 
 Auto-tuned: `attention_auto`, `attention_auto_causal`,
 `tune_attention`, `tune_attention_causal`.
