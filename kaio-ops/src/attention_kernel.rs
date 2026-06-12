@@ -1188,13 +1188,7 @@ fn validate_flash_bwd_dims(
     seq_len: u32,
     d_k: u32,
 ) -> Result<()> {
-    if seq_len == 0 || d_k == 0 {
-        return Err(KaioError::InvalidConfig(
-            "attention dimensions must be non-zero".to_string(),
-        ));
-    }
-    validate_flash_dk(d_k)?;
-    let sd = (seq_len as usize) * (d_k as usize);
+    let sd = validate_flash_bwd_common(seq_len, d_k)?;
     let buffers: [(&str, usize); 8] = [
         ("grad_out", grad_out.len()),
         ("Q", q.len()),
@@ -1206,18 +1200,56 @@ fn validate_flash_bwd_dims(
         ("dV", dv.len()),
     ];
     for (name, len) in buffers {
-        if len < sd {
-            return Err(KaioError::InvalidConfig(format!(
-                "{name} buffer too small: need {sd} elements ({seq_len}×{d_k}), got {len}"
-            )));
-        }
+        validate_flash_buf(name, len, sd, seq_len, d_k)?;
     }
     validate_flash_stats(stats, seq_len)
+}
+
+// Shared head of every backward entry point — the orchestrators and the
+// #[doc(hidden)] per-kernel helpers alike. Nonzero dims plus the
+// d_k <= 256 bound; returns the seq_len×d_k element count the row-major
+// buffers must hold. The d_k bound is a hard correctness bound for all
+// four backward kernels, not just the shared-memory-tiled ones: each
+// runs 256 threads per block with thread `tid` owning dim `tid`, so
+// dims 256.. would be silently dropped from the reductions (truncated
+// D_i / dK / dV / dQ), not OOB-faulted.
+fn validate_flash_bwd_common(seq_len: u32, d_k: u32) -> Result<usize> {
+    if seq_len == 0 || d_k == 0 {
+        return Err(KaioError::InvalidConfig(
+            "attention dimensions must be non-zero".to_string(),
+        ));
+    }
+    validate_flash_dk(d_k)?;
+    Ok((seq_len as usize) * (d_k as usize))
+}
+
+fn validate_flash_buf(name: &str, len: usize, sd: usize, seq_len: u32, d_k: u32) -> Result<()> {
+    if len < sd {
+        return Err(KaioError::InvalidConfig(format!(
+            "{name} buffer too small: need {sd} elements ({seq_len}×{d_k}), got {len}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_flash_d_buf(d_buf: &GpuBuffer<f32>, seq_len: u32) -> Result<()> {
+    if d_buf.len() < seq_len as usize {
+        return Err(KaioError::InvalidConfig(format!(
+            "d_buf buffer too small: need seq_len = {seq_len} elements (one D_i per query row), got {}",
+            d_buf.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Backward preprocess: `D[i] = Σ_d dO[i,d] · O[i,d]`, one f32 per
 /// query row. Internal building block of `attention_flash_bwd`;
 /// exposed for the per-kernel correctness tests only.
+///
+/// Validates dims and buffer lengths like every other launch wrapper.
+/// The `d_k <= 256` bound matters here in its own right: the kernel
+/// covers dims with one 256-thread block per row, so a larger `d_k`
+/// would silently truncate the `D_i` reduction rather than fault.
 #[doc(hidden)]
 pub fn attention_flash_bwd_preprocess(
     device: &KaioDevice,
@@ -1227,6 +1259,11 @@ pub fn attention_flash_bwd_preprocess(
     seq_len: u32,
     d_k: u32,
 ) -> Result<()> {
+    let sd = validate_flash_bwd_common(seq_len, d_k)?;
+    validate_flash_buf("grad_out", grad_out.len(), sd, seq_len, d_k)?;
+    validate_flash_buf("out", out.len(), sd, seq_len, d_k)?;
+    validate_flash_d_buf(d_buf, seq_len)?;
+
     let grid = (seq_len, 1, 1);
     flash_attn_bwd_preprocess_kernel::launch(device, grad_out, out, d_buf, d_k, grid)?;
     Ok(())
@@ -1234,8 +1271,10 @@ pub fn attention_flash_bwd_preprocess(
 
 /// Backward dK/dV accumulation. Internal building block of
 /// `attention_flash_bwd`; exposed for the per-kernel correctness tests
-/// only. Callers are responsible for `stats` and `d_buf` provenance
-/// (same q/k/v, same mask mode).
+/// only. Validates dims and buffer lengths like every other launch
+/// wrapper; `stats` and `d_buf` provenance (same q/k/v, same mask mode)
+/// remains the caller's contract — lengths are checkable, provenance
+/// is not.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn attention_flash_bwd_dkdv(
@@ -1252,6 +1291,21 @@ pub fn attention_flash_bwd_dkdv(
     d_k: u32,
     causal: bool,
 ) -> Result<()> {
+    let sd = validate_flash_bwd_common(seq_len, d_k)?;
+    let buffers: [(&str, usize); 6] = [
+        ("grad_out", grad_out.len()),
+        ("Q", q.len()),
+        ("K", k.len()),
+        ("V", v.len()),
+        ("dK", dk.len()),
+        ("dV", dv.len()),
+    ];
+    for (name, len) in buffers {
+        validate_flash_buf(name, len, sd, seq_len, d_k)?;
+    }
+    validate_flash_stats(stats, seq_len)?;
+    validate_flash_d_buf(d_buf, seq_len)?;
+
     let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
     let grid = (seq_len, 1, 1); // one block per key row
     if causal {
@@ -1292,8 +1346,10 @@ pub fn attention_flash_bwd_dkdv(
 
 /// Backward dQ accumulation. Internal building block of
 /// `attention_flash_bwd`; exposed for the per-kernel correctness tests
-/// only. Callers are responsible for `stats` and `d_buf` provenance
-/// (same q/k/v, same mask mode).
+/// only. Validates dims and buffer lengths like every other launch
+/// wrapper; `stats` and `d_buf` provenance (same q/k/v, same mask mode)
+/// remains the caller's contract — lengths are checkable, provenance
+/// is not.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn attention_flash_bwd_dq(
@@ -1309,6 +1365,20 @@ pub fn attention_flash_bwd_dq(
     d_k: u32,
     causal: bool,
 ) -> Result<()> {
+    let sd = validate_flash_bwd_common(seq_len, d_k)?;
+    let buffers: [(&str, usize); 5] = [
+        ("grad_out", grad_out.len()),
+        ("Q", q.len()),
+        ("K", k.len()),
+        ("V", v.len()),
+        ("dQ", dq.len()),
+    ];
+    for (name, len) in buffers {
+        validate_flash_buf(name, len, sd, seq_len, d_k)?;
+    }
+    validate_flash_stats(stats, seq_len)?;
+    validate_flash_d_buf(d_buf, seq_len)?;
+
     let inv_sqrt_dk = 1.0f32 / (d_k as f32).sqrt();
     let grid = (seq_len, 1, 1); // one block per query row
     if causal {

@@ -1029,3 +1029,133 @@ fn bwd_fd_smoke_8x16() {
         );
     }
 }
+
+// ============================================================================
+// Validation-error tests — the per-kernel building blocks must reject
+// bad dims/buffers before launch, like every other launch wrapper in
+// kaio-ops. A short buffer here is otherwise a GPU out-of-bounds
+// write; an oversized d_k is a silently truncated reduction.
+// ============================================================================
+
+/// `d_k > 256` must be rejected by the preprocess helper specifically:
+/// its kernel covers dims with one 256-thread block per row, so without
+/// the guard a 512-dim call computes `D_i` over the first 256 dims only
+/// — silently wrong, no fault. All buffers here are correctly sized for
+/// `d_k = 512`, so the d_k bound is the only check that can fire.
+#[test]
+#[ignore] // GPU required
+fn bwd_preprocess_rejects_dk_over_256() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let seq_len = 2u32;
+    let d_k = 512u32;
+    let n = (seq_len * d_k) as usize;
+    let g = device.alloc_zeros::<f32>(n).unwrap();
+    let o = device.alloc_zeros::<f32>(n).unwrap();
+    let mut d_buf = device.alloc_zeros::<f32>(seq_len as usize).unwrap();
+    let err =
+        attention_flash_bwd_preprocess(&device, &g, &o, &mut d_buf, seq_len, d_k).unwrap_err();
+    match err {
+        KaioError::InvalidConfig(msg) => {
+            assert!(msg.contains("d_k <= 256"), "got: {msg}")
+        }
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+}
+
+/// `d_buf` is the one buffer the orchestrators never validate (they
+/// allocate it exact-size internally) — the helper must.
+#[test]
+#[ignore] // GPU required
+fn bwd_preprocess_rejects_short_d_buf() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let seq_len = 8u32;
+    let d_k = 16u32;
+    let n = (seq_len * d_k) as usize;
+    let g = device.alloc_zeros::<f32>(n).unwrap();
+    let o = device.alloc_zeros::<f32>(n).unwrap();
+    let mut d_buf = device.alloc_zeros::<f32>(seq_len as usize - 1).unwrap();
+    let err =
+        attention_flash_bwd_preprocess(&device, &g, &o, &mut d_buf, seq_len, d_k).unwrap_err();
+    match err {
+        KaioError::InvalidConfig(msg) => {
+            assert!(msg.contains("d_buf buffer too small"), "got: {msg}")
+        }
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dkdv_rejects_short_dk_buffer() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let seq_len = 8u32;
+    let d_k = 16u32;
+    let n = (seq_len * d_k) as usize;
+    let g = device.alloc_zeros::<f32>(n).unwrap();
+    let q = device.alloc_zeros::<f32>(n).unwrap();
+    let k = device.alloc_zeros::<f32>(n).unwrap();
+    let v = device.alloc_zeros::<f32>(n).unwrap();
+    let stats = device.alloc_zeros::<f32>(seq_len as usize).unwrap();
+    let d_buf = device.alloc_zeros::<f32>(seq_len as usize).unwrap();
+    let mut dk = device.alloc_zeros::<f32>(n - 1).unwrap();
+    let mut dv = device.alloc_zeros::<f32>(n).unwrap();
+    let err = attention_flash_bwd_dkdv(
+        &device, &g, &q, &k, &v, &stats, &d_buf, &mut dk, &mut dv, seq_len, d_k, false,
+    )
+    .unwrap_err();
+    match err {
+        KaioError::InvalidConfig(msg) => {
+            assert!(msg.contains("dK buffer too small"), "got: {msg}")
+        }
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dq_rejects_short_dq_buffer() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let seq_len = 8u32;
+    let d_k = 16u32;
+    let n = (seq_len * d_k) as usize;
+    let g = device.alloc_zeros::<f32>(n).unwrap();
+    let q = device.alloc_zeros::<f32>(n).unwrap();
+    let k = device.alloc_zeros::<f32>(n).unwrap();
+    let v = device.alloc_zeros::<f32>(n).unwrap();
+    let stats = device.alloc_zeros::<f32>(seq_len as usize).unwrap();
+    let d_buf = device.alloc_zeros::<f32>(seq_len as usize).unwrap();
+    let mut dq = device.alloc_zeros::<f32>(n - 1).unwrap();
+    let err = attention_flash_bwd_dq(
+        &device, &g, &q, &k, &v, &stats, &d_buf, &mut dq, seq_len, d_k, true,
+    )
+    .unwrap_err();
+    match err {
+        KaioError::InvalidConfig(msg) => {
+            assert!(msg.contains("dQ buffer too small"), "got: {msg}")
+        }
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+}
+
+#[test]
+#[ignore] // GPU required
+fn bwd_dq_rejects_zero_seq_len() {
+    let device = KaioDevice::new(0).expect("GPU required");
+    let g = device.alloc_zeros::<f32>(1).unwrap();
+    let q = device.alloc_zeros::<f32>(1).unwrap();
+    let k = device.alloc_zeros::<f32>(1).unwrap();
+    let v = device.alloc_zeros::<f32>(1).unwrap();
+    let stats = device.alloc_zeros::<f32>(1).unwrap();
+    let d_buf = device.alloc_zeros::<f32>(1).unwrap();
+    let mut dq = device.alloc_zeros::<f32>(1).unwrap();
+    let err = attention_flash_bwd_dq(
+        &device, &g, &q, &k, &v, &stats, &d_buf, &mut dq, 0, 16, false,
+    )
+    .unwrap_err();
+    match err {
+        KaioError::InvalidConfig(msg) => {
+            assert!(msg.contains("non-zero"), "got: {msg}")
+        }
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+}
