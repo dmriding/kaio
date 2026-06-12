@@ -12,7 +12,7 @@ members = ["kaio-core", "kaio-runtime", "kaio-macros", "kaio", "kaio-ops", "xtas
 exclude = ["examples/*", "kaio-candle", "kaio-py"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Dave Riding <david@netviper.gr>"]

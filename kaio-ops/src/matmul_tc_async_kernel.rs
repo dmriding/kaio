@@ -90,7 +90,7 @@ use kaio_core::ir::{
 use kaio_core::types::PtxType;
 
 use crate::matmul_tc_kernel::{
-    emit_mw_load_tile_b_16x64, emit_pre_zero_shared_tiles, emit_warp_quadrant_mma,
+    FragALoaderKind, emit_mw_load_tile_b_16x64, emit_pre_zero_shared_tiles, emit_warp_quadrant_mma,
     emit_warp_quadrant_store, validate_dims_tc,
 };
 
@@ -138,12 +138,22 @@ pub(crate) fn buffer_offsets(k_tile: u32) -> (u32, u32, u32, u32) {
     )
 }
 
-/// Multi-warp cooperative async-load of the 64×16 fp16 row-major A
-/// block tile via `cp.async.ca.shared.global` (size = 16). 128 threads
-/// × 1 issue per thread = 2,048 B = full A buffer.
+/// Multi-warp cooperative async-load of the 64×16 row-major A block
+/// tile via `cp.async.ca.shared.global` (size = 16). 128 threads × 1
+/// issue per thread = 2,048 B = full A buffer.
+///
+/// **Precision-agnostic at the byte level.** `cp.async.ca.shared.global`
+/// issues a 16-byte transfer with no dtype involvement; this helper
+/// is suitable for any 2-byte fragment dtype with M=64, K=16 tile
+/// geometry. The "fp16" framing below describes the canonical caller
+/// (`matmul_tc_async`); the bf16 async sibling reuses this verbatim
+/// since bf16 storage is also 2 bytes/element and bf16 zero is
+/// all-zero bytes (matching the pre-zero contract). The alignment
+/// contract is enforced by the caller's shared-tile `align` decl +
+/// the upstream `K % 16` validate gate.
 ///
 /// **Per-thread layout:** thread `t` writes 16 contiguous bytes (= 8
-/// fp16 = a half-row of 8 cols) at:
+/// 2-byte elements = a half-row of 8 cols) at:
 /// - `row = t / 2`            (0..64 across all 128 threads ✓)
 /// - `col_byte = (t % 2) * 16`
 /// - `shared_off = row * 32 + col_byte`
@@ -166,8 +176,11 @@ pub(crate) fn buffer_offsets(k_tile: u32) -> (u32, u32, u32, u32) {
 /// boundary so preamble and in-loop issues each commit independently.
 ///
 /// `label_suffix` makes the bra-skip label unique per call site.
+///
+/// Currently used by [`build_matmul_tc_async_module`] and
+/// [`crate::matmul_tc_bf16_async_kernel::build_matmul_tc_bf16_async_module`].
 #[allow(clippy::too_many_arguments)]
-fn emit_mw_load_tile_a_64x16_async(
+pub(crate) fn emit_mw_load_tile_a_64x16_async(
     alloc: &mut RegisterAllocator,
     kernel: &mut PtxKernel,
     a_block_base_global: Register, // u64 — A[block_row, k_tile*16]
@@ -389,7 +402,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
     // Sprint 6.7b D10 hoist: compute fragment-layout (group_id, tig) ONCE at
     // kernel start, reuse across every emit_warp_quadrant_mma call. Saves
     // 6 × div/rem pairs per K-iter that the fragment loaders would otherwise
-    // recompute internally (2 FragmentA + 4 FragmentB per K-iter).
+    // recompute internally (2 FragmentA_F16 + 4 FragmentB_F16 per K-iter).
     let r_hoisted_group_id = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Div {
         dst: r_hoisted_group_id,
@@ -846,7 +859,11 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         ty: PtxType::U32,
     }));
 
-    // Per-warp 8-mma accumulation. Same helper as Gate A.
+    // Per-warp 8-mma accumulation. Same helper as Gate A. Both
+    // production kernels use the ld.shared A loader — Sprint 9.3 built
+    // the ldmatrix alternative but parked it at the measured noise
+    // floor (D6); this call site is a scheduled consumer if the
+    // XOR-swizzle follow-up makes the collective load pay.
     emit_warp_quadrant_mma(
         &mut alloc,
         &mut kernel,
@@ -854,6 +871,7 @@ pub(crate) fn build_matmul_tc_async_module(sm: &str) -> PtxModule {
         r_tile_b_warp_cur,
         r_tid_x,
         (r_hoisted_group_id, r_hoisted_tig),
+        FragALoaderKind::LdShared,
         &mut accs,
     );
 
@@ -1115,6 +1133,7 @@ mod tests {
                     "unexpected feature name: {feature}"
                 );
             }
+            other => panic!("expected SmTooLow, got {other:?}"),
         }
     }
 

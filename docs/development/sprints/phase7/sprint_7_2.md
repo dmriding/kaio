@@ -199,11 +199,10 @@ the INT8 kernel's layout documentation style at
 
 ### K-tile granularity — `K_TILE_SHARED = 16`
 
-Locked at 16 f16 elements per the plan (round 3 arbitration).
-At K=16 exactly one mma K-step per K-tile per warp; the cooperative
-load for A, the unpacked B-feed, and the mma all run on the same
-tile. Rationale captured in the plan file; budget-check numbers
-below confirm K=16 is comfortable on shared memory.
+Locked at 16 f16 elements. At K=16 exactly one mma K-step per
+K-tile per warp; the cooperative load for A, the unpacked B-feed,
+and the mma all run on the same tile. Budget-check numbers below
+confirm K=16 is comfortable on shared memory.
 
 Widening to K=32 post-bench is a one-constant change; flagged as a
 perf follow-up if D7 bench shows barrier-sync overhead dominating.

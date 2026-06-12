@@ -19,6 +19,8 @@ KAIO looks like.
 | `softmax`    | `softmax/`           | Single-block softmax with max-sub stability      | Attention normalization; reduction-heavy primitive   |
 | `int8`       | `int8_dequant/`      | Symmetric INT8 dequantization                    | Quantized-weight unpack; signed-shift DSL showcase   |
 | `int8matmul` | `int8_matmul/`       | W8A8 symmetric tensor-core matmul                | Full quantize → `matmul_int8` → f32 pipeline (v0.3.0)|
+| `int4matmul` | `int4_matmul/`       | W4A16 GPTQ-style dequantize-matmul               | Packed INT4 weights + f16 group scales → `matmul_int4` (v0.3.x) |
+| `qkvattn`    | `quantized_attention/` | Fused `qkv_project_int4` → `attention_tc` pipeline | End-to-end quantized attention block vs f16 reference |
 
 Each example ships with a `Cargo.toml`, an `src/main.rs` (kernel + CPU
 reference + PASS/FAIL + median timing), and a `README.md` that leads
@@ -31,7 +33,7 @@ The fastest way to see them all run, with no `cd` required:
 ```sh
 git clone https://github.com/dmriding/kaio.git
 cd kaio
-cargo xtask showcase              # all seven in sequence
+cargo xtask showcase              # all nine in sequence
 cargo xtask showcase silu         # just fused_silu_gate
 cargo xtask showcase --list       # list available names
 ```

@@ -7,7 +7,7 @@ authors = ["KAIO contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dmriding/kaio"
 readme = "README.md"
-description = "Python bindings for KAIO — Rust-native GPU kernel authoring framework. Exposes the kaio-ops public API (tensor-core matmul, attention, quantized kernels) to Python via PyO3."
+description = "Python bindings for KAIO — Rust-native GPU kernel authoring framework. Currently exposes Device/Tensor NumPy round-trip and the tensor-core matmul kernel via PyO3; wider op coverage is user-request-driven."
 keywords = ["gpu", "cuda", "python", "pyo3", "kernel"]
 categories = ["hardware-support", "api-bindings"]
 include = [
@@ -49,7 +49,7 @@ numpy = { version = "0.28", features = ["half"] }
 # use `kaio_rs::...`. Both path + version specified so cargo uses
 # path locally and version when publishing to crates.io (same pattern
 # as kaio-candle).
-kaio-rs = { package = "kaio", version = "0.4.1", path = "../kaio", default-features = false, features = ["dynamic-loading"] }
-kaio-ops = { version = "0.4.1", path = "../kaio-ops", default-features = false, features = ["dynamic-loading"] }
+kaio-rs = { package = "kaio", version = "0.5.0", path = "../kaio", default-features = false, features = ["dynamic-loading"] }
+kaio-ops = { version = "0.5.0", path = "../kaio-ops", default-features = false, features = ["dynamic-loading"] }
 
 half = "2"

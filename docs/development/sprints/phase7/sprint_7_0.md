@@ -220,7 +220,7 @@ Pure docs.
   `KAIO_SM_TARGET` (`build_vector_add_ptx`, `build_shared_mem_ptx`,
   `build_ld_global_b128_ptx`). Their callers don't mutate env so no
   correctness issue — minor consistency cleanup, low priority.
-- Short-circuit optimization pass (flagged by owner during planning):
+- Short-circuit optimization pass (flagged during planning):
   when both sides of `&&` / `||` are provably pure (no side effects,
   no OOB-dependent array access), emit `and.pred` / `or.pred` instead
   of branches. Additive, no semantic change.

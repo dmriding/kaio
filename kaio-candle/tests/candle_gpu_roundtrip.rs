@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use candle_core::{Device, Tensor};
-use half::f16;
+use half::{bf16, f16};
 use kaio::prelude::KaioDevice;
 
 // ---------------------------------------------------------------------------
@@ -192,6 +192,221 @@ fn matmul_tc_rejects_nonzero_offset() -> anyhow::Result<()> {
     // paths (contiguity AND offset checks). Assert that SOME rejection
     // fires — whichever path catches it first is acceptable for the test.
     let err = kaio_candle::matmul_tc(&kaio_dev, &a_off, &b).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous") || msg.contains("offset"),
+        "expected contiguity or offset rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// matmul_tc_bf16 / matmul_tc_bf16_async (Sprint 9.1.3 — bf16 forwards)
+// ---------------------------------------------------------------------------
+//
+// CROSS-PRECISION ISOLATION CONTRACT (per 9.1.3 plan C3 isolation note):
+// tests in this section share `Arc<KaioDevice>` and Allocator state with
+// the f16 tests above. Bridge primitives are dtype-generic; the existing
+// `#[ignore]` GPU sweep isolation handles concurrency. NO MUTABLE STATE
+// is shared between bf16 and f16 tests beyond device creation — each
+// test allocates its own GpuBuffers and constructs its own Tensors. A
+// future contributor reading only this section does not need to grep
+// the f16 section above to understand the invariant.
+//
+// Forward-only — backward arrives in Sprint 9.1.4. The two negative
+// tests at the bottom assert calling `.backward()` on a graph containing
+// a bf16 op surfaces the explicit Err naming sprint 9.1.4.
+
+fn bit_exact_matmul_tc_bf16(m: usize, n: usize, k: usize) -> anyhow::Result<()> {
+    let a_host: Vec<bf16> = (0..m * k)
+        .map(|i| bf16::from_f32(((i % 31) as f32) * 0.1 - 1.5))
+        .collect();
+    let b_host: Vec<bf16> = (0..k * n)
+        .map(|i| bf16::from_f32(((i % 17) as f32) * 0.05 - 0.4))
+        .collect();
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a_candle = Tensor::from_vec(a_host.clone(), (m, k), &candle_dev)?;
+    let b_candle = Tensor::from_vec(b_host.clone(), (k, n), &candle_dev)?;
+    let c_candle = kaio_candle::matmul_tc_bf16(&kaio_dev, &a_candle, &b_candle)?;
+    let c_candle_host: Vec<f32> = c_candle.flatten_all()?.to_vec1::<f32>()?;
+
+    let a_buf = kaio_dev.alloc_from(&a_host)?;
+    let b_buf = kaio_dev.alloc_from(&b_host)?;
+    let mut c_buf = kaio_dev.alloc_zeros::<f32>(m * n)?;
+    kaio_ops::matmul_tc_bf16(
+        &kaio_dev, &a_buf, &b_buf, &mut c_buf, m as u32, n as u32, k as u32,
+    )?;
+    let c_kaio_host: Vec<f32> = c_buf.to_host(&kaio_dev)?;
+
+    assert_eq!(
+        c_candle_host.len(),
+        c_kaio_host.len(),
+        "output length mismatch"
+    );
+    for (i, (cc, ck)) in c_candle_host.iter().zip(c_kaio_host.iter()).enumerate() {
+        assert_eq!(
+            cc.to_bits(),
+            ck.to_bits(),
+            "bit mismatch at element {i}: candle={cc} kaio={ck} (shapes {m}x{n}x{k})"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_bit_exact_64() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16(64, 64, 64)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_bit_exact_256() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16(256, 256, 256)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_bit_exact_1024() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16(1024, 1024, 1024)
+}
+
+fn bit_exact_matmul_tc_bf16_async(m: usize, n: usize, k: usize) -> anyhow::Result<()> {
+    let a_host: Vec<bf16> = (0..m * k)
+        .map(|i| bf16::from_f32(((i % 31) as f32) * 0.1 - 1.5))
+        .collect();
+    let b_host: Vec<bf16> = (0..k * n)
+        .map(|i| bf16::from_f32(((i % 17) as f32) * 0.05 - 0.4))
+        .collect();
+
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a_candle = Tensor::from_vec(a_host.clone(), (m, k), &candle_dev)?;
+    let b_candle = Tensor::from_vec(b_host.clone(), (k, n), &candle_dev)?;
+    let c_candle = kaio_candle::matmul_tc_bf16_async(&kaio_dev, &a_candle, &b_candle)?;
+    let c_candle_host: Vec<f32> = c_candle.flatten_all()?.to_vec1::<f32>()?;
+
+    let a_buf = kaio_dev.alloc_from(&a_host)?;
+    let b_buf = kaio_dev.alloc_from(&b_host)?;
+    let mut c_buf = kaio_dev.alloc_zeros::<f32>(m * n)?;
+    kaio_ops::matmul_tc_bf16_async(
+        &kaio_dev, &a_buf, &b_buf, &mut c_buf, m as u32, n as u32, k as u32,
+    )?;
+    let c_kaio_host: Vec<f32> = c_buf.to_host(&kaio_dev)?;
+
+    assert_eq!(c_candle_host.len(), c_kaio_host.len());
+    for (i, (cc, ck)) in c_candle_host.iter().zip(c_kaio_host.iter()).enumerate() {
+        assert_eq!(
+            cc.to_bits(),
+            ck.to_bits(),
+            "bit mismatch at element {i}: candle={cc} kaio={ck} (shapes {m}x{n}x{k})"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_bit_exact_64() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16_async(64, 64, 64)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_bit_exact_256() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16_async(256, 256, 256)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_bit_exact_1024() -> anyhow::Result<()> {
+    bit_exact_matmul_tc_bf16_async(1024, 1024, 1024)
+}
+
+// bf16 rejection-path tests (4 — 2 per binding).
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_rejects_noncontiguous() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+    let b = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+
+    let a_nc = a.t()?;
+    assert!(
+        !a_nc.is_contiguous(),
+        "setup sanity: .t() should be non-contiguous"
+    );
+
+    let err = kaio_candle::matmul_tc_bf16(&kaio_dev, &a_nc, &b).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous"),
+        "expected contiguity rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_rejects_nonzero_offset() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let base = Tensor::ones((128, 64), candle_core::DType::BF16, &candle_dev)?;
+    let a_off = base.narrow(0, 64, 64)?;
+    let b = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+
+    let err = kaio_candle::matmul_tc_bf16(&kaio_dev, &a_off, &b).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous") || msg.contains("offset"),
+        "expected contiguity or offset rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_rejects_noncontiguous() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+    let b = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+
+    let a_nc = a.t()?;
+    assert!(
+        !a_nc.is_contiguous(),
+        "setup sanity: .t() should be non-contiguous"
+    );
+
+    let err = kaio_candle::matmul_tc_bf16_async(&kaio_dev, &a_nc, &b).expect_err("must reject");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("contiguous"),
+        "expected contiguity rejection, got: {msg}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_rejects_nonzero_offset() -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let base = Tensor::ones((128, 64), candle_core::DType::BF16, &candle_dev)?;
+    let a_off = base.narrow(0, 64, 64)?;
+    let b = Tensor::ones((64, 64), candle_core::DType::BF16, &candle_dev)?;
+
+    let err = kaio_candle::matmul_tc_bf16_async(&kaio_dev, &a_off, &b).expect_err("must reject");
     let msg = format!("{err}");
     assert!(
         msg.contains("contiguous") || msg.contains("offset"),
@@ -1256,4 +1471,255 @@ fn matmul_tc_backward_weighted_64x32x128() -> anyhow::Result<()> {
 #[ignore = "requires NVIDIA GPU"]
 fn matmul_tc_async_backward_weighted_64x32x128() -> anyhow::Result<()> {
     gradient_check_matmul_weighted(64, 32, 128, true)
+}
+
+// ---------------------------------------------------------------------------
+// matmul_tc_bf16 / matmul_tc_bf16_async backward (gradient correctness,
+// Sprint 9.1.4)
+//
+// Parallel to the f16 gradient-check helpers above. These are not
+// precision-generic at the host-data level (f16 helpers use `Vec<f16>` /
+// `kaio_candle::matmul_tc[_async]`); the bf16 path ships parallel helpers
+// rather than generalizing. Dual tolerance `rel < 1e-2 || abs < 1e-3` is
+// identical to f16 and held in practice for the shapes tested below.
+// ---------------------------------------------------------------------------
+
+/// Analytical gradient check for C = A @ B with loss = C.sum() (bf16
+/// variant). Same shape as `gradient_check_matmul` but typed for bf16
+/// inputs + bf16 candle ops.
+fn gradient_check_matmul_bf16(m: usize, k: usize, n: usize, use_async: bool) -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    // Small-magnitude patterned data in [-0.1, 0.1] for bf16 stability.
+    let a_data: Vec<bf16> = (0..m * k)
+        .map(|i| bf16::from_f32(((i % 19) as f32 - 9.0) * 0.01))
+        .collect();
+    let b_data: Vec<bf16> = (0..k * n)
+        .map(|i| bf16::from_f32(((i % 23) as f32 - 11.0) * 0.01))
+        .collect();
+
+    let a = candle_core::Var::from_vec(a_data.clone(), (m, k), &candle_dev)?;
+    let b = candle_core::Var::from_vec(b_data.clone(), (k, n), &candle_dev)?;
+
+    let c = if use_async {
+        kaio_candle::matmul_tc_bf16_async(&kaio_dev, a.as_tensor(), b.as_tensor())?
+    } else {
+        kaio_candle::matmul_tc_bf16(&kaio_dev, a.as_tensor(), b.as_tensor())?
+    };
+
+    let loss = c.sum_all()?;
+    let grads = loss.backward()?;
+
+    let grad_a = grads.get(a.as_tensor()).expect("a should have gradient");
+    let grad_b = grads.get(b.as_tensor()).expect("b should have gradient");
+
+    let grad_a_host: Vec<bf16> = grad_a.flatten_all()?.to_vec1::<bf16>()?;
+    let grad_b_host: Vec<bf16> = grad_b.flatten_all()?.to_vec1::<bf16>()?;
+
+    // Analytical: dA[i,j] = sum_l B[j,l]; dB[i,j] = sum_l A[l,i].
+    let mut expected_grad_a = vec![0.0f32; m * k];
+    for i in 0..m {
+        for j in 0..k {
+            let mut sum = 0.0f32;
+            for l in 0..n {
+                sum += b_data[j * n + l].to_f32();
+            }
+            expected_grad_a[i * k + j] = sum;
+        }
+    }
+    let mut expected_grad_b = vec![0.0f32; k * n];
+    for i in 0..k {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for l in 0..m {
+                sum += a_data[l * k + i].to_f32();
+            }
+            expected_grad_b[i * n + j] = sum;
+        }
+    }
+
+    let variant = if use_async {
+        "matmul_tc_bf16_async"
+    } else {
+        "matmul_tc_bf16"
+    };
+    for (idx, (got, expected)) in grad_a_host.iter().zip(expected_grad_a.iter()).enumerate() {
+        let got_f32 = got.to_f32();
+        let exp = *expected;
+        let abs_err = (got_f32 - exp).abs();
+        let rel_err = if exp.abs() > 1e-6 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{variant} grad_a mismatch at [{idx}]: got={got_f32}, expected={expected}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e} (M={m} K={k} N={n})"
+        );
+    }
+    for (idx, (got, expected)) in grad_b_host.iter().zip(expected_grad_b.iter()).enumerate() {
+        let got_f32 = got.to_f32();
+        let exp = *expected;
+        let abs_err = (got_f32 - exp).abs();
+        let rel_err = if exp.abs() > 1e-6 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{variant} grad_b mismatch at [{idx}]: got={got_f32}, expected={expected}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e} (M={m} K={k} N={n})"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_backward_32x32x32() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(32, 32, 32, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_backward_128x128x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(128, 128, 128, false)
+}
+
+/// Non-square shape catches transposition bugs where M=K=N would mask a swap.
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_backward_64x32x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(64, 32, 128, false)
+}
+
+/// Weighted-loss gradient check for the bf16 path. Same analytical shape as
+/// `gradient_check_matmul_weighted` (loss = sum(W * C); dA = W @ B^T;
+/// dB = A^T @ W) but typed for bf16 inputs.
+fn gradient_check_matmul_bf16_weighted(
+    m: usize,
+    k: usize,
+    n: usize,
+    use_async: bool,
+) -> anyhow::Result<()> {
+    let candle_dev = Device::new_cuda(0)?;
+    let kaio_dev = Arc::new(KaioDevice::new(0)?);
+
+    let a_data: Vec<bf16> = (0..m * k)
+        .map(|i| bf16::from_f32(((i % 19) as f32 - 9.0) * 0.01))
+        .collect();
+    let b_data: Vec<bf16> = (0..k * n)
+        .map(|i| bf16::from_f32(((i % 23) as f32 - 11.0) * 0.01))
+        .collect();
+    let w_data: Vec<f32> = (0..m * n).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
+
+    let a = candle_core::Var::from_vec(a_data.clone(), (m, k), &candle_dev)?;
+    let b = candle_core::Var::from_vec(b_data.clone(), (k, n), &candle_dev)?;
+
+    let c = if use_async {
+        kaio_candle::matmul_tc_bf16_async(&kaio_dev, a.as_tensor(), b.as_tensor())?
+    } else {
+        kaio_candle::matmul_tc_bf16(&kaio_dev, a.as_tensor(), b.as_tensor())?
+    };
+
+    let w = Tensor::from_vec(w_data.clone(), (m, n), &candle_dev)?;
+    let loss = (c * w)?.sum_all()?;
+
+    let grads = loss.backward()?;
+    let grad_a = grads.get(a.as_tensor()).expect("a should have gradient");
+    let grad_b = grads.get(b.as_tensor()).expect("b should have gradient");
+
+    let grad_a_host: Vec<bf16> = grad_a.flatten_all()?.to_vec1::<bf16>()?;
+    let grad_b_host: Vec<bf16> = grad_b.flatten_all()?.to_vec1::<bf16>()?;
+
+    let mut expected_grad_a = vec![0.0f32; m * k];
+    for i in 0..m {
+        for j in 0..k {
+            let mut sum = 0.0f32;
+            for l in 0..n {
+                sum += w_data[i * n + l] * b_data[j * n + l].to_f32();
+            }
+            expected_grad_a[i * k + j] = sum;
+        }
+    }
+    let mut expected_grad_b = vec![0.0f32; k * n];
+    for i in 0..k {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for l in 0..m {
+                sum += a_data[l * k + i].to_f32() * w_data[l * n + j];
+            }
+            expected_grad_b[i * n + j] = sum;
+        }
+    }
+
+    let variant = if use_async {
+        "matmul_tc_bf16_async"
+    } else {
+        "matmul_tc_bf16"
+    };
+    for (idx, (got, expected)) in grad_a_host.iter().zip(expected_grad_a.iter()).enumerate() {
+        let got_f32 = got.to_f32();
+        let exp = *expected;
+        let abs_err = (got_f32 - exp).abs();
+        let rel_err = if exp.abs() > 1e-6 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{variant} weighted grad_a mismatch at [{idx}]: got={got_f32}, expected={expected}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e} (M={m} K={k} N={n})"
+        );
+    }
+    for (idx, (got, expected)) in grad_b_host.iter().zip(expected_grad_b.iter()).enumerate() {
+        let got_f32 = got.to_f32();
+        let exp = *expected;
+        let abs_err = (got_f32 - exp).abs();
+        let rel_err = if exp.abs() > 1e-6 {
+            abs_err / exp.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            rel_err < 1e-2 || abs_err < 1e-3,
+            "{variant} weighted grad_b mismatch at [{idx}]: got={got_f32}, expected={expected}, \
+             rel_err={rel_err:.4e}, abs_err={abs_err:.4e} (M={m} K={k} N={n})"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_backward_weighted_64x32x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16_weighted(64, 32, 128, false)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_backward_32x32x32() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(32, 32, 32, true)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_backward_128x128x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(128, 128, 128, true)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_backward_64x32x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16(64, 32, 128, true)
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU"]
+fn matmul_tc_bf16_async_backward_weighted_64x32x128() -> anyhow::Result<()> {
+    gradient_check_matmul_bf16_weighted(64, 32, 128, true)
 }

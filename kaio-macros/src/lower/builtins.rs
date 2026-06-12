@@ -432,9 +432,10 @@ fn lower_log(
     let ln2_reg = ctx.fresh_reg();
     let dst = ctx.fresh_reg();
 
-    // LN_2 = 0.6931472 (f32)
-    let ln2: f32 = std::f32::consts::LN_2;
-
+    // Interpolate the named-constant *path* into the generated code, not
+    // the evaluated value — a raw `0.6931472f32` literal in the expansion
+    // trips `clippy::approx_constant` in every kernel that calls log().
+    // Same pattern as lower_exp's LOG2_E above.
     let tokens = quote! {
         // ln(x) = log2(x) * ln(2)
         let #log2_result = alloc.alloc(PtxType::F32);
@@ -445,7 +446,7 @@ fn lower_log(
         let #ln2_reg = alloc.alloc(PtxType::F32);
         kernel.push(PtxInstruction::Mov {
             dst: #ln2_reg,
-            src: Operand::ImmF32(#ln2),
+            src: Operand::ImmF32(std::f32::consts::LN_2),
             ty: PtxType::F32,
         });
         let #dst = alloc.alloc(PtxType::F32);

@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/kaio.svg)](https://crates.io/crates/kaio)
 [![Documentation](https://docs.rs/kaio/badge.svg)](https://docs.rs/kaio)
 [![Build Status](https://github.com/dmriding/kaio/actions/workflows/ci.yml/badge.svg)](https://github.com/dmriding/kaio/actions)
-[![Coverage](https://img.shields.io/badge/coverage-88.39%25-green)](#test-coverage)
+[![Coverage](https://img.shields.io/badge/coverage-94.67%25-green)](#test-coverage)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](https://github.com/dmriding/kaio)
 [![Rust](https://img.shields.io/badge/rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 
@@ -14,13 +14,15 @@ who need custom GPU kernels today — fused attention variants,
 quantization ops, novel activations — and would otherwise be writing
 CUDA C++ because their framework doesn't support them.
 
+> **Tensor-core matmul reaches 115% of cuBLAS sgemm at 4096³ on RTX 4090** (worst observed across 10 consecutive runs; full distribution in [`docs/performance.md`](docs/performance.md)).
+
 ## Key highlights
 
 - **No CUDA toolkit required** — just the NVIDIA display driver. Build
   in CI on a standard GitHub runner; host tests pass without a GPU.
   This is KAIO's single biggest differentiator vs CUDA C++, `rust-cuda`,
   and Triton.
-- **Meets or beats cuBLAS sgemm at 4096²** — on RTX 4090 across 10
+- **Meets or beats cuBLAS sgemm at 4096³** — on RTX 4090 across 10
   consecutive benchmark runs, KAIO tensor-core matmul (async, fp16
   inputs with fp32 accumulation) reached **58.74 TFLOPS worst
   observed** and **65.12 TFLOPS median**. Against the corresponding
@@ -35,6 +37,29 @@ CUDA C++ because their framework doesn't support them.
   handed to the CUDA driver for JIT compilation. Type-safe kernel
   signatures catch dtype mismatches at compile time, not as silent GPU
   corruption at runtime.
+- **Drops into Candle's tensor graph** via [`kaio-candle`](kaio-candle/) —
+  twelve forward `CustomOp` bindings (matmul_tc f16 + bf16, sync + async,
+  matmul_int8, matmul_int4, fused QKV variants, attention,
+  FlashAttention) plus backward for all four matmul TC variants and
+  FlashAttention (plain + causal), with event-based stream sync that's
+  CUDA-Graph compatible.
+
+## The problem KAIO solves
+
+The Rust ML ecosystem can't keep up with Python. Every time a new
+model architecture drops with a custom operation — a novel attention
+variant, a fused activation, a custom quantization kernel — frameworks
+like [candle](https://github.com/huggingface/candle) and
+[burn](https://github.com/tracel-ai/burn) can't support it until
+someone writes the GPU function. Today, that means writing CUDA C++,
+fighting FFI bindings, and giving up on Windows.
+
+Meanwhile, Python developers write a
+[Triton](https://github.com/triton-lang/triton) kernel in an afternoon
+and move on. Triton doesn't support Windows, requires Python, and
+JIT-compiles at runtime — but it works, and Rust has no equivalent.
+
+**KAIO is that equivalent.**
 
 ## Try KAIO in 30 seconds
 
@@ -46,7 +71,7 @@ cd kaio
 cargo xtask showcase
 ```
 
-You'll see `fused_silu_gate`, `gelu_comparison`, `rms_norm`, `layer_norm`, `softmax`, `int8_dequant`, `int8_matmul`, `int4_matmul`, and `quantized_attention` compile, launch, verify correctness against a CPU reference, and report median latency. The nine examples span activations, normalizations, reductions, the quantize → matmul pipeline, and end-to-end quantized attention — the canonical transformer-primitive arc plus the W8A8 / W4A16 / fused-QKV headline ops.
+Nine kernels covering the canonical transformer-primitive arc — activations (`fused_silu_gate`, `gelu_comparison`), normalizations (`rms_norm`, `layer_norm`), reductions (`softmax`), the W8A8 / W4A16 quantization pipeline (`int8_dequant`, `int8_matmul`, `int4_matmul`), and end-to-end `quantized_attention` — each compiles, launches, verifies against a CPU reference, and reports median latency.
 
 Want the performance pitch instead? `cargo xtask bench` runs the tensor-core matmul benchmark against cuBLAS sgemm across five sizes. Or `cargo xtask all` for both. `cargo xtask --help` for the full tooling surface.
 
@@ -179,23 +204,6 @@ when you need more control than they provide.
 | Type-safe kernel signatures | Yes        | No            | N/A           | No              | No       |
 | ML framework integration    | candle (via `kaio-candle`) | Standalone | Built-in | PyTorch      | Manual   |
 
-## What this is not
-
-- **Not compiled Rust.** `#[gpu_kernel]` bodies use Rust syntax but are
-  parsed into KAIO's own IR and lowered directly to PTX. rustc's
-  backend (LLVM, MIR, borrow checker) never sees the kernel body. You
-  cannot call Rust functions declared outside the kernel from inside
-  it.
-- **Not CUDA bindings.** KAIO generates PTX itself. It does not wrap
-  cuDNN, cuBLAS, CUTLASS, or any CUDA C++ library. The comparison to
-  cuBLAS sgemm in this README is a *measurement reference*, not a
-  dependency.
-- **Not a full ML framework.** No autograd (beyond the handful of
-  `kaio-candle` backward bindings), no model zoo, no training loop.
-  KAIO is the layer you use when
-  [Candle](https://github.com/huggingface/candle) or
-  [Burn](https://github.com/tracel-ai/burn) don't have the op you need.
-
 ## Performance
 
 Performance is optimized for large ML workloads (transformer-scale
@@ -236,22 +244,22 @@ Compare these numbers sprint-over-sprint for regression detection; the
 precision-identity claim. See [docs/performance.md](docs/performance.md)
 for the full distribution (min / median / max across all sizes).
 
-## The problem KAIO solves
+## What this is not
 
-The Rust ML ecosystem can't keep up with Python. Every time a new
-model architecture drops with a custom operation — a novel attention
-variant, a fused activation, a custom quantization kernel — frameworks
-like [candle](https://github.com/huggingface/candle) and
-[burn](https://github.com/tracel-ai/burn) can't support it until
-someone writes the GPU function. Today, that means writing CUDA C++,
-fighting FFI bindings, and giving up on Windows.
-
-Meanwhile, Python developers write a
-[Triton](https://github.com/triton-lang/triton) kernel in an afternoon
-and move on. Triton doesn't support Windows, requires Python, and
-JIT-compiles at runtime — but it works, and Rust has no equivalent.
-
-**KAIO is that equivalent.**
+- **Not compiled Rust.** `#[gpu_kernel]` bodies use Rust syntax but are
+  parsed into KAIO's own IR and lowered directly to PTX. rustc's
+  backend (LLVM, MIR, borrow checker) never sees the kernel body. You
+  cannot call Rust functions declared outside the kernel from inside
+  it.
+- **Not CUDA bindings.** KAIO generates PTX itself. It does not wrap
+  cuDNN, cuBLAS, CUTLASS, or any CUDA C++ library. The comparison to
+  cuBLAS sgemm in this README is a *measurement reference*, not a
+  dependency.
+- **Not a full ML framework.** No autograd (beyond the handful of
+  `kaio-candle` backward bindings), no model zoo, no training loop.
+  KAIO is the layer you use when
+  [Candle](https://github.com/huggingface/candle) or
+  [Burn](https://github.com/tracel-ai/burn) don't have the op you need.
 
 ## Patterns
 
@@ -304,12 +312,14 @@ fn reduce(input: *const [f32], out: *mut [f32], n: u32) {
 | 2D blocks, FMA, math builtins            | `block_size = (16,16)`, `fma`, `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max`. |
 | Scalar tiled matmul                      | `kaio_ops::matmul` / `matmul_auto` — 31% of cuBLAS sgemm. Any SM.          |
 | Fused attention + FlashAttention         | `kaio_ops::attention`, `attention_flash` (O(d_k) memory). Any SM.          |
+| FlashAttention backward                  | `kaio_ops::attention_flash_bwd` / `_bwd_causal` + the `_with_stats` forwards (per-row logsumexp export). f32, single-head self-attention, `d_k ≤ 256`, three-kernel design (D-term preprocess, dK/dV, dQ), no atomics. Any SM. |
 | Tensor-core matmul                       | `kaio_ops::matmul_tc` / `matmul_tc_async` / `matmul_auto_tc` — f16 → f32, SM 8.0+, **worst-of-10 at 4096³ on RTX 4090: sync 107% / async 115% of cuBLAS sgemm**. |
+| Tensor-core matmul (bf16)                | `kaio_ops::matmul_tc_bf16` / `matmul_tc_bf16_async` / `matmul_auto_tc_bf16` — bf16 × bf16 → f32, SM 8.0+, `K % 16 == 0`. Sync and cp.async-pipelined siblings of `matmul_tc` / `matmul_tc_async` using `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`, plus the 2-way auto-tuner cache (`matmul_auto_tc_bf16` + `tune_matmul_tc_bf16`) for per-shape dispatch. Perf parity with the f16 path at 4096³ on RTX 4090 sm_89 — interleaved per-iter bf16/f16 ratio gate (alternating launch order): async median +0.72% / worst +1.55% within the ±3% / ±15% bounds. Full parity record in [docs/performance.md](docs/performance.md). |
 | INT8 dequantize-matmul (W8A8)            | `kaio_ops::matmul_int8` — symmetric i8 × i8 → f32 with single-scalar scale, SM 8.0+, K%32==0. **Worst-of-10 at 4096³: 84.07 TOPS (median 92.58, best 93.38).** |
 | INT4 dequantize-matmul (W4A16, GPTQ-style) | `kaio_ops::matmul_int4` — packed signed-INT4 weights × f16 activations → f32, f16 group scales (group_size=128), DEQUANT-F16 via `mma.sync.m16n8k16`, SM 8.0+, K%128==0. **Worst-of-10 at 4096³: 52.02 TOPS (median 57.52, best 58.04).** |
 | Fused tri-output QKV projection (INT8, W8A16) | `kaio_ops::qkv_project_int8` — f16 activations × i8 weights × per-projection scalar scales → three f16 outputs (Q, K, V). Decode tier ~3× faster than three standalone matmuls; prefill performance varies by shape. SM 8.0+, K%16==0, N%2==0. |
 | Fused tri-output QKV projection (INT4, W4A16) | `kaio_ops::qkv_project_int4` — packed INT4 weights × f16 activations × f16 group scales → three f16 outputs. Decode tier ~3× faster than three standalone calls; for prefill-heavy workloads at M≥2048, three separate `matmul_int4` calls may be faster. SM 8.0+, K%128==0, group_size=128. |
-| Auto-tuner + cache                       | `tune_matmul`, `matmul_auto`, `matmul_auto_tc` with JSON cache.            |
+| Auto-tuner + cache                       | `tune_matmul`, `matmul_auto`, `matmul_auto_tc`, `matmul_auto_tc_bf16` (+ `tune_*` siblings) with JSON cache. |
 | PTX inspection                           | `KAIO_DUMP_PTX=1`, `KAIO_PTX_STATS=1`, `KAIO_PTX_ANNOTATE=1`.              |
 
 See [docs.rs/kaio](https://docs.rs/kaio) for the full API surface and
@@ -322,16 +332,19 @@ KAIO is pre-1.0 software. Current engineering constraints:
 - **NVIDIA only.** SM 7.0+ (Volta, Turing, Ampere, Ada Lovelace,
   Hopper). No AMD, no Intel, no Apple Silicon.
 - **Matmul performance is size-dependent.** Tensor-core matmul meets
-  or beats cuBLAS sgemm at 4096² on RTX 4090 (worst-of-10: 107% sync /
-  115% async) but lags heavily at ≤1024² (5–17%) because a 64×64
+  or beats cuBLAS sgemm at 4096³ on RTX 4090 (worst-of-10: 107% sync /
+  115% async) but lags heavily at ≤1024³ (5–17%) because a 64×64
   multi-warp block tile doesn't fill the SM array until the grid is
   large. Scalar matmul tops out at 31% of cuBLAS. For small shapes
   prefer cuBLAS or the scalar path. [Details →](docs/performance.md)
-- **Mostly inference.** The [`kaio-candle`](kaio-candle/) bridge ships
-  8 forward ops; `matmul_tc` and `matmul_tc_async` support backward
-  via mixed-precision autograd (gradients are computed in f16, matching
-  the forward-pass precision). Attention and quantized-op backward are
-  not yet implemented.
+- **Inference plus single-head attention training.** The
+  [`kaio-candle`](kaio-candle/) bridge ships 12 forward ops; all four
+  matmul TC variants (`matmul_tc`, `matmul_tc_bf16`, `matmul_tc_async`,
+  `matmul_tc_bf16_async`) support backward via mixed-precision autograd
+  (gradients computed in the forward-pass precision — f16 or bf16), and
+  `attention_flash` / `attention_flash_causal` support backward through
+  dedicated PTX kernels (f32, single-head self-attention). `attention_tc`
+  and quantized-op backward are not implemented.
 - **DSL is a Rust subset, not compiled Rust.** `#[gpu_kernel]` function
   bodies use Rust syntax but are parsed into KAIO's own IR and lowered
   directly to PTX. The kernel body **never reaches rustc's backend** —
@@ -383,13 +396,13 @@ Four layers, bottom to top:
 | `kaio-core`    | PTX IR, instruction emitters, fragment containers, zero external deps   |
 | `kaio-runtime` | CUDA driver wrapper via [cudarc](https://github.com/coreylowman/cudarc) |
 | `kaio-ops`     | Pre-built GPU operations (matmul, attention, TC matmul, auto-tuner)     |
-| `kaio-candle`  | [candle](https://github.com/huggingface/candle) bridge — 8 forward ops + 2 backward (matmul_tc, matmul_tc_async), event-based stream sync. Standalone crate at [`kaio-candle/`](kaio-candle/) |
+| `kaio-candle`  | [candle](https://github.com/huggingface/candle) bridge — 12 forward ops + 6 backward (all 4 matmul TC variants: f16 + bf16, sync + async; FlashAttention plain + causal), event-based stream sync. Standalone crate at [`kaio-candle/`](kaio-candle/) |
 
 ## Candle integration
 
 The [`kaio-candle`](kaio-candle/) crate bridges KAIO's GPU kernels into
-[candle](https://github.com/huggingface/candle)'s tensor graph. 8 forward
-ops + 2 backward ops, event-based stream sync (CUDA Graph compatible).
+[candle](https://github.com/huggingface/candle)'s tensor graph. 12 forward
+ops + 6 backward ops, event-based stream sync (CUDA Graph compatible).
 
 ```rust
 use std::sync::Arc;
@@ -441,13 +454,13 @@ for "did it compile → launch → produce right output?"
 
 ## Test coverage
 
-**88.39% line coverage** across the 21,569-line workspace (2,504 lines
+**94.67% line coverage** across the 21,893-line workspace (1,167 lines
 uncovered, mostly host-side parser error paths, the `xtask` repo-tooling
 binary, and the unreachable-by-design host stubs for GPU builtins in
 `kaio/src/gpu_builtins.rs`). Shipped kernel crates remain well above
-the workspace average — `kaio-ops/src/matmul_int8_kernel.rs` at 97.18%,
-`matmul_tc_kernel.rs` at 97.94%, `matmul_tc_async_kernel.rs` at 99.87%,
-`attention_tc_kernel.rs` at 97.70%. Measured on RTX 4090 sm_89 via
+the workspace average — `kaio-ops/src/matmul_int8_kernel.rs` at 97.10%,
+`matmul_tc_kernel.rs` at 97.78%, `matmul_tc_async_kernel.rs` at 99.74%,
+`attention_tc_kernel.rs` at 97.60%. Measured on RTX 4090 sm_89 via
 `cargo llvm-cov` with the host test suite and the full GPU-only
 `--ignored` test suite merged:
 
@@ -464,7 +477,7 @@ the GPU-ignored tests require actual NVIDIA hardware and can't run on
 standard GitHub Actions runners. See
 [`docs/testing-strategy.md`](docs/testing-strategy.md) for the full
 testing model (host tests, GPU integration tests, `ptxas_verify`
-structural checks, and the `matmul_tc_bench` performance harness).
+structural checks, and the `cargo xtask bench` performance harnesses).
 
 ## How it works
 
@@ -525,7 +538,16 @@ for a complete end-to-end example.
 - [x] **Phase 7** — Quantized kernels (INT8/INT4, fused QKV
   projection), candle integration (`kaio-candle` bridge — 8 forward ops,
   2 backward ops, event-based stream sync).
-- [ ] **Phase 8** — PyO3 bindings (Python access to `kaio-ops`).
+- [x] **Phase 8** — PyO3 scaffold (`kaio-py`: Device/Tensor NumPy
+  round-trip + `matmul_tc` smoke kernel, abi3 wheels). Wider op
+  coverage is user-request-driven from here. Pointer-syntax RFC
+  (`*const [T]` / `*mut [T]`) shipped as the Sprint 8.0 prelude.
+- [x] **Phase 9** — Training-side deepening: bf16 tensor-core matmul
+  family (sync / async / auto-tuner / candle fwd+bwd), FlashAttention
+  backward (three-kernel design + candle autograd bindings), and the
+  `ldmatrix` IR primitive (loader built and parked behind the
+  `ld.shared` default pending an XOR-swizzle tile layout). crates.io
+  v0.5.0.
 
 See [CHANGELOG.md](CHANGELOG.md) for per-release detail and
 [docs/phases.md](docs/phases.md) for deeper phase plans.
@@ -544,8 +566,8 @@ See [CHANGELOG.md](CHANGELOG.md) for per-release detail and
 ## Feedback
 
 If something is confusing, awkward, or broken —
-[open an issue](https://github.com/dmriding/kaio/issues). Even small
-friction matters. This project is actively developed and feedback
+[open an issue](https://github.com/dmriding/kaio/issues). **Even small
+friction matters.** This project is actively developed and feedback
 directly shapes what gets built next.
 
 ## License

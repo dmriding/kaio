@@ -313,7 +313,11 @@ QKV projections for transformer decode, and a candle bridge crate
 gain access to tensor-core matmul, fused attention, and quantized
 matmul on Windows without Triton's Linux-only constraint.
 
-**Status:** Planned
+**Status:** In progress — Sprint 8.0 (pointer-syntax prelude, v0.4.1)
+and Sprint 8.1 (`kaio-py` PyO3 scaffold: Device/Tensor NumPy
+round-trip + `matmul_tc` smoke kernel, first shipped in v0.5.0) have
+landed. The scaffold is complete and further op exposure is
+user-request-driven (see the kaio-py README).
 
 **Depends on:** Phase 7 complete (v0.4.0, 2026-04-18).
 
@@ -347,18 +351,24 @@ the Phase 8 timeline.
 
 ---
 
-## Phase 9: Attention Backward & Kernel Deepening
+## Phase 9: Attention Backward & Kernel Deepening ✅
 
 **Goal:** FlashAttention backward pass (new PTX kernels — softmax
 recomputation, tiled Q/K/V backward, causal mask in reverse) and
 further kernel improvements (bf16 TC matmul variant, `ldmatrix.sync`
 for additional TC headroom).
 
-**Status:** Planned
+**Status:** Complete (v0.5.0, 2026-06-12) — 9.1–9.1.4 (bf16 TC matmul
+family, forward + backward, shipped 2026-05-14..18), 9.2
+(FlashAttention backward, the v0.5.0 hard gate, shipped 2026-06-12),
+and 9.3 (`ldmatrix.sync.aligned` IR primitive shipped 2026-06-12; the
+matmul_tc loader rewire measured at the noise floor and parked —
+see `docs/performance.md`). The v0.5.0 aggregate release closed the
+phase after the release review + version-bump pass.
 
-**Depends on:** Phase 8 complete (pointer-syntax prelude landed as
-Sprint 8.0; Phase 9 kernel work can proceed in parallel with Phase 8
-PyO3 binding work since they touch non-overlapping surfaces).
+**Depends on:** Sprint 8.0 pointer-syntax prelude (landed 2026-04-24);
+Phase 9 kernel work proceeded in parallel with Phase 8's
+demand-gated PyO3 work since they touch non-overlapping surfaces.
 
 ---
 

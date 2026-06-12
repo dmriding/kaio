@@ -240,6 +240,21 @@ const BENCHES: &[(&str, &str, &str)] = &[
         "f16 × f16 → f32 TC sync + async vs cuBLAS sgemm",
     ),
     (
+        "=== Matmul tensor-core benchmark (KAIO bf16 × bf16 → f32 vs f16 + cuBLAS sgemm) ===",
+        "matmul_tc_bf16_bench",
+        "bf16 × bf16 → f32 TC sync vs f16 sync; Sprint 9.1 SC-2 split-bound perf-parity gate (median ±3% + worst ±15%) at 4096³",
+    ),
+    (
+        "=== Matmul TC async benchmark (KAIO bf16_async vs f16_async + cuBLAS sgemm reference) ===",
+        "matmul_tc_bf16_async_bench",
+        "bf16 × bf16 → f32 TC cp.async-pipelined vs f16 async; Sprint 9.1.1 SC-2 split-bound perf-parity gate (median ±3% + worst ±15%) at 4096³",
+    ),
+    (
+        "=== Matmul TC ldmatrix A/B (sync fragment-A: ldmatrix vs ld.shared) ===",
+        "matmul_tc_ldmatrix_bench",
+        "Sprint 9.3 loader-rewire regression gate: bit-exact pre-gate + interleaved per-iter ratios, one-sided non-regression bounds (median ≥ 97%, worst ≥ 85%) at every shape 256³..4096³",
+    ),
+    (
         "=== matmul_int8 benchmark (KAIO i8 × i8 → f32 vs cuBLAS sgemm, rough reference) ===",
         "matmul_int8_bench",
         "W8A8 symmetric INT8 matmul; cuBLAS sgemm column is apples-to-oranges",

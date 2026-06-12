@@ -11,6 +11,8 @@
 //! - [`ir`] — Intermediate representation (modules, kernels, instructions)
 //! - [`instr`] — Instruction category enums (arithmetic, memory, control)
 //! - [`emit`] — PTX text emission (`Emit` trait + `PtxWriter`)
+//! - [`fragment`] — tensor-core fragment register containers and
+//!   loaders for `mma.sync` / `ldmatrix` operands
 
 #![warn(missing_docs)]
 

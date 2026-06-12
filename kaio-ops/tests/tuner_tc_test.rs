@@ -18,31 +18,54 @@ use common::{assert_close_with_k_scaled_tol, cpu_matmul_f16xf16_f32, patterned_f
 /// of a test. Caller must keep the guard alive across the test body;
 /// the guard restores the previous env var (or removes it) on drop so
 /// tests don't leak state into each other.
+///
+/// Cargo's test harness runs tests within a test binary in parallel by
+/// default (different test binaries are separate processes, so
+/// cross-binary state isn't shared). Without serialisation, two
+/// concurrent `CacheEnvGuard::set` calls would race on the global
+/// `KAIO_TUNE_CACHE` env var, and one test's "previous" snapshot
+/// could capture another test's redirect path, leaking state across
+/// tests on guard drop. The static `ENV_MUTEX` below serialises env
+/// mutations within the binary for the lifetime of any
+/// `CacheEnvGuard` instance.
+static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
 struct CacheEnvGuard {
     previous: Option<String>,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl CacheEnvGuard {
     fn set(path: &str) -> Self {
+        let mutex = ENV_MUTEX.get_or_init(|| std::sync::Mutex::new(()));
+        // Poison-tolerant: if a prior test panicked while holding the
+        // lock, we still want subsequent tests to acquire it and run.
+        // Test isolation matters more than poison correctness here.
+        let lock = mutex
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var("KAIO_TUNE_CACHE").ok();
-        // SAFETY: test binaries run single-threaded by default
-        // (--test-threads=1 effectively, or at least these env-mutation
-        // tests serialize via the harness). See the parallel note in
-        // kaio-core's ptxas_verify tech-debt entry.
+        // SAFETY: env mutation is serialised by the static `ENV_MUTEX`
+        // held in `_lock`; no other thread inside this test binary can
+        // observe a partial update or race with our `previous` snapshot.
         unsafe { std::env::set_var("KAIO_TUNE_CACHE", path) };
-        Self { previous }
+        Self {
+            previous,
+            _lock: lock,
+        }
     }
 }
 
 impl Drop for CacheEnvGuard {
     fn drop(&mut self) {
-        // SAFETY: see set().
+        // SAFETY: `_lock` is still held — see set().
         unsafe {
             match &self.previous {
                 Some(v) => std::env::set_var("KAIO_TUNE_CACHE", v),
                 None => std::env::remove_var("KAIO_TUNE_CACHE"),
             }
         }
+        // `_lock` drops here, releasing serialisation for the next guard.
     }
 }
 

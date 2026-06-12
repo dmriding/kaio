@@ -2,8 +2,8 @@
 
 This document describes **how** KAIO's performance numbers are
 measured. Current **results** live in
-[performance.md](performance.md); they are updated per sprint with
-worst-of-N framing.
+[performance.md](performance.md); they are updated as kernel families
+land, with worst-of-N framing.
 
 ## What is measured
 
@@ -98,7 +98,8 @@ times in sequence and aggregate across invocations.
 ## Apples-to-apples framing
 
 Current KAIO kernels compared against cuBLAS sgemm use different
-dtypes and instructions (f16/INT8/INT4 inputs vs sgemm's f32/f32).
+dtypes and instructions (f16/bf16/INT8/INT4 inputs vs sgemm's
+f32/f32).
 The comparison is a **project-local performance baseline** for
 regression detection, not a precision-identity claim. Each result
 table in `performance.md` carries its own apples-to-apples
@@ -106,21 +107,32 @@ disclaimer describing exactly what is being compared to what.
 
 ## Bench coverage
 
-As of Sprint 8.0.5, `cargo xtask bench` covers seven benchmark
+As of Sprint 9.3, `cargo xtask bench` covers ten benchmark
 harnesses spanning the shipped high-level / public kernel families
 plus the showcase kernels:
 
 - `matmul_tc_bench` — f16 tensor-core matmul (sync + async) vs cuBLAS sgemm
+- `matmul_tc_bf16_bench` — bf16 sync vs f16 sync parity gate + cuBLAS sgemm reference
+- `matmul_tc_bf16_async_bench` — bf16 async vs f16 async parity gate
+- `matmul_tc_ldmatrix_bench` — `ldmatrix` vs `ld.shared` fragment-A loader A/B regression gate
 - `matmul_int8_bench` — W8A8 symmetric INT8 matmul
 - `matmul_int4_bench` — W4A16 GPTQ-style INT4 matmul
 - `qkv_project_bench` — fused INT4 vs 3× standalone `matmul_int4`; INT8 absolute TOPS
 - `attention_tc_bench` — `attention_tc` + `attention_tc_causal` (short-seq TC, `seq_k ≤ 384`)
-- `attention_flash_bench` — `attention_flash` + `attention_flash_causal` (long-seq online softmax)
+- `attention_flash_bench` — `attention_flash` + `attention_flash_causal` (long-seq online softmax) + the FlashAttention backward benchmark
 - `norm_activation_bench` — `rms_norm`, `layer_norm`, `softmax` (reductions) + `fused_silu_gate`, `gelu_exact`, `gelu_fast` (elementwise sweep)
 
-Result tables live in `performance.md`. Methodology (5 warmup + 20
-timed iterations per shape, worst-of-N framing across 10 consecutive
-`cargo xtask bench` invocations) applies uniformly across all seven.
+Result tables live in `performance.md`. The absolute-throughput
+benches share one methodology: 5 warmup + 20 timed iterations per
+shape, worst-of-N framing across 10 consecutive `cargo xtask bench`
+invocations. Three harnesses are **relative gates** rather than
+absolute-throughput tables and use interleaved A/B protocols instead:
+the two bf16 benches assert bf16/f16 parity (10 interleaved
+alternating-order runs at 4096³, per-iteration ratios, median ±3% and
+worst ±15%), and the ldmatrix bench asserts one-sided non-regression
+of the `ldmatrix` loader vs the `ld.shared` default (median ≥ 97%,
+worst ≥ 85%, bit-exact output pre-gate). Interleaving cancels
+thermal/clock drift that consecutive-invocation comparisons cannot.
 
 Internal `kaio-ops` primitives (fragment loaders, PTX-IR building
 blocks) and test-only macro kernels are intentionally outside bench

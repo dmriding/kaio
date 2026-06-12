@@ -215,7 +215,7 @@ All gates green before commit:
   `rect_128_8_16`), B shared layout not explicitly stated (fixed:
   column-major in docstring), units mixing in staging math (fixed:
   bytes-pinned throughout).
-- **Owner decisions:** caught that `pub` matmul_tc with divisibility
+- **Maintainer decisions:** caught that `pub` matmul_tc with divisibility
   restrictions would generate support issues (fixed: internal-only);
   caught that the plan had multiplications flipped (re-verified math).
   Approved the `.f16` single-byte B staging (no bitwise pack

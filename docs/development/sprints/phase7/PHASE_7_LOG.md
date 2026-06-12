@@ -21,7 +21,7 @@ Master plan: [phase7_master_plan.md](phase7_master_plan.md)
 | [7.4b-part2](sprint_7_4b_part2.md) | `kaio-candle` direct-call pattern + fused QKV bindings | ✅ Complete | New direct-call bridge pattern; qkv_project_int{4,8} with 12 new GPU tests; 32 total |
 | [7.4c](sprint_7_4c.md) | `kaio-candle` — event-based stream sync | ✅ Complete | Replaced cuCtxSynchronize with join()-based event sync; CUDA Graph capture partially unblocked |
 | [7.4d](sprint_7_4d.md) | `kaio-candle` — matmul_tc + matmul_tc_async backward | ✅ Complete | Analytical backward via forward kernel reuse; 6 gradient tests; 39 GPU tests total |
-| v0.4.0 | Phase 7 aggregate release | 📝 Planned | After 7.4 ships |
+| v0.4.0 | Phase 7 aggregate release | ✅ Complete (2026-04-18) | Workspace crates → 0.4.0, kaio-candle 0.1.0 first publish |
 
 ## Branch
 

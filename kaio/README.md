@@ -63,10 +63,13 @@ It is the layer you use when you need more control than they provide.
 | Math builtins | `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max` | Supported |
 | FMA | `fma(a, b, c)` | Supported |
 | 2D blocks | `block_size = (16, 16)`, `thread_idx_y()` | Supported |
-| Tiled matmul | `kaio_ops::matmul()` (31% of cuBLAS) | Supported |
+| Tiled matmul | `kaio_ops::matmul()` (scalar f32 baseline) | Supported |
+| Tensor-core matmul | `kaio_ops::matmul_tc()` / `matmul_tc_bf16()` + `cp.async` siblings — f16/bf16 → f32, SM 8.0+ | Supported |
+| Quantized matmul | `kaio_ops::matmul_int8()` (W8A8), `matmul_int4()` (W4A16) + fused QKV projections | Supported |
 | Attention | `kaio_ops::attention()`, `attention_causal()` | Supported |
 | FlashAttention | `kaio_ops::attention_flash()` — O(d_k) memory | Supported |
-| Auto-tuner | `kaio_ops::tune_matmul()`, `matmul_auto()` | Supported |
+| FlashAttention backward | `kaio_ops::attention_flash_bwd()` + causal / `_with_stats` forwards | Supported |
+| Auto-tuner | `kaio_ops::tune_matmul()`, `matmul_auto()`, `matmul_auto_tc()`, `matmul_auto_tc_bf16()` | Supported |
 
 ## Architecture
 
@@ -81,16 +84,23 @@ It is the layer you use when you need more control than they provide.
 ## Limitations
 
 - NVIDIA only (SM 7.0+) — no AMD, no Intel
-- Not cuBLAS-level performance (matmul reaches 31%)
+- Performance is size-dependent: tensor-core matmul meets or beats
+  cuBLAS sgemm at 4096³ on RTX 4090 (worst-of-10: 107% sync / 115%
+  async, precision caveats disclosed) but lags heavily at small
+  sizes; the scalar path tops out at ~31% of cuBLAS — see the
+  repository's `docs/performance.md`
 - DSL subset of Rust — no closures, traits, generics, or `&&`/`||`
 - FlashAttention requires d_k <= 256
-- No autograd, no multi-GPU
+- No autograd in the core crates (the `kaio-candle` bridge provides
+  backward for the matmul TC family and FlashAttention); no multi-GPU
 - API may change
 
 ## Status
 
-**Phase 5 complete** — attention (standard + FlashAttention), causal
-masking, auto-tuner, Windows CI. v0.1.0.
+**Phase 9 complete** — tensor-core matmul family (f16 + bf16, sync +
+`cp.async`, auto-tuned), quantized INT8/INT4 matmul + fused QKV
+projections, FlashAttention forward + backward, candle bridge
+(`kaio-candle`), `ldmatrix` IR primitive. v0.5.0.
 
 See the [repository](https://github.com/dmriding/kaio) for full
 documentation, runnable examples, copy-paste patterns, and development

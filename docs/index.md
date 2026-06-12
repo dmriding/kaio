@@ -87,7 +87,7 @@ kaio/
 
 ## Project Metadata
 
-- **Owner:** Dave Riding / NetViper
+- **Maintainer:** [NetViper](https://github.com/dmriding)
 - **License:** MIT OR Apache-2.0 (dual-licensed for ecosystem adoption)
 - **Repository:** https://github.com/dmriding/kaio
 - **Crates.io:** `kaio` — name reserved at `v0.0.1` (publish planned for Phase 5)

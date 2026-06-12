@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use half::f16;
+use half::{bf16, f16};
 
 /// Generate patterned f16 data scaled to |x| ≤ 1.0.
 ///
@@ -135,6 +135,372 @@ pub fn assert_close_with_k_scaled_tol(
          abs_tol = {abs_tol:e}, usage = {:.1}% of tolerance",
         100.0 * worst_abs_err / abs_tol
     );
+}
+
+// ============================================================================
+// Sprint 9.1 — bf16 TC matmul helpers
+// ============================================================================
+//
+// Sibling of the f16 trio above. Per the Sprint 9.1 D5 reference-strategy
+// table, small/medium bf16 correctness tests use a dense f64 CPU reference
+// (cheaper than f32-accumulated reference would be misleading: bf16's weak
+// 7-bit mantissa makes the f64 reference materially tighter than f32 for
+// dot-product cancellation patterns). Large shapes use sampled-cell f64 —
+// that helper lands at C5 when the full correctness suite arrives.
+
+/// Generate patterned bf16 data scaled to |x| ≤ 1.0.
+///
+/// Same `(i % 17) / 17 - 0.5` deterministic pattern as
+/// [`patterned_f16_data`] — keeps the comparison apples-to-apples
+/// across the f16 and bf16 paths. bf16's wider exponent doesn't
+/// matter at this magnitude; mantissa precision is what differs.
+pub fn patterned_bf16_data(len: usize) -> Vec<bf16> {
+    (0..len)
+        .map(|i| {
+            let v = ((i % 17) as f32) / 17.0 - 0.5;
+            bf16::from_f32(v)
+        })
+        .collect()
+}
+
+/// f64 CPU reference matmul for bf16 inputs.
+///
+/// Promotes each bf16 input to f64 and accumulates in f64. Per D5,
+/// f64 is the reference for the bf16 correctness suite because bf16's
+/// 7-bit mantissa can lose precision in cancellation-prone dot products
+/// at sizes where f32 accumulation would also be lossy enough to mask
+/// real kernel bugs. Used at small/medium shapes; sampled-cell f64
+/// for large shapes lands at C5.
+pub fn cpu_matmul_bf16xbf16_f64(a: &[bf16], b: &[bf16], m: usize, n: usize, k: usize) -> Vec<f64> {
+    let mut c = vec![0.0f64; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f64;
+            for p in 0..k {
+                let av = a[i * k + p].to_f32() as f64;
+                let bv = b[p * n + j].to_f32() as f64;
+                sum += av * bv;
+            }
+            c[i * n + j] = sum;
+        }
+    }
+    c
+}
+
+/// Generate patterned bf16 data with a target magnitude.
+///
+/// Same base pattern as [`patterned_bf16_data`] (`(i % 17) / 17 - 0.5`),
+/// scaled by `magnitude_scale` so peak |x| ≈ `0.5 * magnitude_scale`.
+/// Used for the medium (`scale = 200`, |x| ≤ 100) and large
+/// (`scale = 2e14`, |x| ≤ 1e14) magnitude classes in the bf16
+/// correctness suite. The large-magnitude cap of 1e14 keeps
+/// `|a| × |b| × K` comfortably under f32 max in the accumulator
+/// while still exercising bf16's full f32-style exponent range —
+/// well past f16's 65504 overflow point.
+pub fn patterned_bf16_magnitude(len: usize, magnitude_scale: f32) -> Vec<bf16> {
+    (0..len)
+        .map(|i| {
+            let v = (((i % 17) as f32) / 17.0 - 0.5) * magnitude_scale;
+            bf16::from_f32(v)
+        })
+        .collect()
+}
+
+/// Generate positive-only tiny-product bf16 data in `[1e-18, ~1.94e-18]`.
+///
+/// Both operands are normal bf16 values (bf16's min positive normal is
+/// `~1.175e-38`, so `1e-18` is comfortably normal). The class is a
+/// **tiny-product canary**: per-element products are `~1e-36`, far below
+/// any reasonable absolute tolerance, so an all-zero kernel would pass
+/// `abs_err < 1e-3` vacuously — the companion
+/// [`assert_bf16_close_d5_relative_only`] uses a relative-only bound
+/// plus a nonzero-output gate to catch underflow-to-zero bug classes.
+///
+/// Note: this class does **not** exercise bf16's lowest exponent band —
+/// inputs are 20 orders of magnitude above min-normal. For
+/// min-normal-band coverage see [`patterned_bf16_min_normal`].
+pub fn patterned_bf16_tiny_product(len: usize) -> Vec<bf16> {
+    (0..len)
+        .map(|i| {
+            // (i % 17) / 17 ∈ [0, ~0.94], shifted to [1.0, ~1.94] then × 1e-18
+            // → [1e-18, ~1.94e-18]. Strictly positive, deterministic.
+            let v = (1.0 + ((i % 17) as f32) / 17.0) * 1e-18;
+            bf16::from_f32(v)
+        })
+        .collect()
+}
+
+/// Generate positive-only bf16 data spanning the min-normal exponent
+/// band: `[2e-38, ~3.88e-38]`. Strictly above bf16's min positive
+/// normal `~1.175e-38` so values are normal-not-subnormal, but at the
+/// lowest exponent decade bf16 supports.
+///
+/// Pair with [`patterned_bf16_large_positive`] (e.g. `scale = 1e10`)
+/// to keep per-element products in normal-f32 range while exercising
+/// bf16's bottom exponent band on one operand — the canary against an
+/// implementation that flushes min-normal inputs to zero before the
+/// mma.sync. f32 min-normal is also `~1.175e-38` so the accumulator
+/// stays in normal range when the product is `~2e-28`.
+pub fn patterned_bf16_min_normal(len: usize) -> Vec<bf16> {
+    (0..len)
+        .map(|i| {
+            // (i % 17) / 17 ∈ [0, ~0.94], shifted to [1.0, ~1.94] then × 2e-38
+            // → [2e-38, ~3.88e-38]. Strictly positive, deterministic, strictly
+            // above the bf16/f32 min-normal boundary at ~1.175e-38.
+            let v = (1.0 + ((i % 17) as f32) / 17.0) * 2e-38;
+            bf16::from_f32(v)
+        })
+        .collect()
+}
+
+/// Generate positive-only bf16 data in `[scale, ~1.94 × scale]`.
+///
+/// Companion to [`patterned_bf16_min_normal`] for asymmetric-magnitude
+/// reference inputs: with `scale = 1e10`, paired against min-normal A
+/// (~2e-38), per-element products land near `2e-28` — well inside f32's
+/// normal range so the accumulator does not underflow.
+pub fn patterned_bf16_large_positive(len: usize, scale: f32) -> Vec<bf16> {
+    (0..len)
+        .map(|i| {
+            let v = (1.0 + ((i % 17) as f32) / 17.0) * scale;
+            bf16::from_f32(v)
+        })
+        .collect()
+}
+
+/// Deterministic-seed sampling of `n_samples` cell coordinates from an
+/// `m × n` output grid. Uses an inline Numerical-Recipes LCG so we
+/// don't pull in `rand` as a dev-dep just for this — the requirement
+/// is reproducibility and decorrelation between cells, not crypto
+/// quality.
+///
+/// Returns each cell as `(i, j)` with `0 ≤ i < m`, `0 ≤ j < n`. May
+/// return duplicates at small grid sizes; that's fine — the assertion
+/// just compares each sampled cell independently.
+pub fn sample_cells(m: usize, n: usize, n_samples: usize, seed: u64) -> Vec<(usize, usize)> {
+    let mut state: u32 = (seed ^ (seed >> 32)) as u32;
+    let mut next = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        state
+    };
+    (0..n_samples)
+        .map(|_| {
+            let i = (next() as usize) % m;
+            let j = (next() as usize) % n;
+            (i, j)
+        })
+        .collect()
+}
+
+/// Sampled-cell f64 reference: compute the f64 dot product for each
+/// cell in `cells`. Used for the D5 large-shape (2048³, 4096³) tests
+/// where a dense f64 matmul would be prohibitive (~68B FMAs at 4096³).
+/// Returns one f64 per cell, indexed the same as `cells`.
+pub fn sampled_cell_f64_reference(
+    a: &[bf16],
+    b: &[bf16],
+    _m: usize,
+    n: usize,
+    k: usize,
+    cells: &[(usize, usize)],
+) -> Vec<f64> {
+    cells
+        .iter()
+        .map(|&(i, j)| {
+            let mut sum = 0.0f64;
+            for p in 0..k {
+                let av = a[i * k + p].to_f32() as f64;
+                let bv = b[p * n + j].to_f32() as f64;
+                sum += av * bv;
+            }
+            sum
+        })
+        .collect()
+}
+
+/// Sprint 9.1 D5 standard-tolerance assertion at sampled cells:
+/// `rel_err < 1e-2 || abs_err < 1e-3` against an f64 reference computed
+/// only at the sampled cells. Used at large shapes (2048³, 4096³) where
+/// a dense reference is prohibitive.
+pub fn assert_bf16_close_d5_sampled(
+    got: &[f32],
+    cells: &[(usize, usize)],
+    expected: &[f64],
+    _m: usize,
+    n: usize,
+    label: &str,
+) {
+    const REL_BOUND: f64 = 1e-2;
+    const ABS_BOUND: f64 = 1e-3;
+
+    let mut worst: Option<(usize, usize, f64, f64, f64, f64)> = None;
+    for (idx, &(i, j)) in cells.iter().enumerate() {
+        let g = got[i * n + j] as f64;
+        let e = expected[idx];
+        let abs_err = (g - e).abs();
+        let rel_err = if e.abs() > 0.0 {
+            abs_err / e.abs()
+        } else {
+            abs_err
+        };
+        if abs_err < ABS_BOUND || rel_err < REL_BOUND {
+            continue;
+        }
+        if worst
+            .map(|(_, _, _, _, _, wr)| rel_err > wr)
+            .unwrap_or(true)
+        {
+            worst = Some((i, j, e, g, abs_err, rel_err));
+        }
+    }
+
+    if let Some((wi, wj, e, g, abs_err, rel_err)) = worst {
+        panic!(
+            "{label} (sampled, {} cells) FAILED Sprint 9.1 D5 tolerance:\n\
+             \n\
+             bounds:                rel_err < {REL_BOUND:e} || abs_err < {ABS_BOUND:e}\n\
+             worst index (i, j)     = ({wi}, {wj})\n\
+             f64 reference value    = {e}\n\
+             GPU value (f32 → f64)  = {g}\n\
+             abs_err                = {abs_err:e}\n\
+             rel_err                = {rel_err:e}\n",
+            cells.len(),
+        );
+    }
+}
+
+/// Sprint 9.1 D5 standard-tolerance assertion: `rel_err < 1e-2 ||
+/// abs_err < 1e-3` against an f64 reference, computed in f64 and only
+/// downcast when reporting the failure. Used for small/medium/large
+/// magnitude classes. The tiny-product and min-normal classes use a
+/// stricter rel-only bound + a nonzero-output assertion in
+/// [`assert_bf16_close_d5_relative_only`] (output magnitudes are far
+/// below the `abs_err < 1e-3` floor, which would otherwise pass an
+/// all-zero kernel vacuously).
+///
+/// `got` is the GPU output (f32 from the bf16 mma's f32 accumulator);
+/// `expected` is the f64 reference. The element-wise check is f64
+/// throughout, with `worst_*` reported in f64 for diagnostic fidelity.
+pub fn assert_bf16_close_d5(got: &[f32], expected: &[f64], m: usize, n: usize, label: &str) {
+    const REL_BOUND: f64 = 1e-2;
+    const ABS_BOUND: f64 = 1e-3;
+
+    let mut worst_idx: Option<(usize, usize)> = None;
+    let mut worst_rel = 0.0f64;
+    let mut worst_abs = 0.0f64;
+    let mut worst_got = 0.0f64;
+    let mut worst_expected = 0.0f64;
+
+    for i in 0..m {
+        for j in 0..n {
+            let idx = i * n + j;
+            let g = got[idx] as f64;
+            let e = expected[idx];
+            let abs_err = (g - e).abs();
+            let rel_err = if e.abs() > 0.0 {
+                abs_err / e.abs()
+            } else {
+                abs_err
+            };
+            if abs_err < ABS_BOUND || rel_err < REL_BOUND {
+                continue;
+            }
+            // Track the worst failing element.
+            if rel_err > worst_rel {
+                worst_idx = Some((i, j));
+                worst_rel = rel_err;
+                worst_abs = abs_err;
+                worst_got = g;
+                worst_expected = e;
+            }
+        }
+    }
+
+    if let Some((wi, wj)) = worst_idx {
+        panic!(
+            "{label} ({m}×_ × _×{n}) FAILED Sprint 9.1 D5 tolerance:\n\
+             \n\
+             bounds:                rel_err < {REL_BOUND:e} || abs_err < {ABS_BOUND:e}\n\
+             worst index (i, j)     = ({wi}, {wj})\n\
+             f64 reference value    = {worst_expected}\n\
+             GPU value (f32 → f64)  = {worst_got}\n\
+             abs_err                = {worst_abs:e}\n\
+             rel_err                = {worst_rel:e}\n",
+        );
+    }
+}
+
+/// Relative-only tolerance assertion for the bf16 correctness suite:
+/// `rel_err < 1e-1` **only** (no absolute-error fallback), plus a
+/// "non-zero output" assertion that catches the "kernel returns zero
+/// on small inputs" bug class.
+///
+/// Used by magnitude classes whose expected outputs are so small that
+/// the standard `abs_err < 1e-3` floor would pass an all-zero kernel
+/// vacuously: the tiny-product class (expected outputs `~K × 1e-36`)
+/// and the min-normal class (expected outputs `~K × 1e-28` after
+/// `min-normal × large-positive`). The nonzero-output gate is the
+/// primary bug-class catch — an FTZ-on-load implementation, or a
+/// kernel that underflows internally, would emit all zeros and fail
+/// here.
+pub fn assert_bf16_close_d5_relative_only(
+    got: &[f32],
+    expected: &[f64],
+    m: usize,
+    n: usize,
+    label: &str,
+) {
+    const REL_BOUND: f64 = 1e-1;
+
+    // (1) Nonzero-output assertion: at least one output cell must be
+    //     non-trivially non-zero. An all-zeros (or near-zeros) result
+    //     is the "kernel returns zero on small inputs" bug class this
+    //     relative-only tolerance is specifically targeting.
+    let max_abs_got = got.iter().fold(0.0f32, |acc, &v| acc.max(v.abs()));
+    let max_abs_expected = expected.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()));
+    let nonzero_floor = (max_abs_expected * 0.01).max(f64::MIN_POSITIVE);
+    assert!(
+        (max_abs_got as f64) > nonzero_floor,
+        "{label}: output is all-zero or far-below-expected — \
+         max_abs(got)={max_abs_got:e}, max_abs(expected)={max_abs_expected:e}, \
+         floor={nonzero_floor:e}. Likely the kernel underflowed at small inputs \
+         (the bug class this assertion is here to catch)."
+    );
+
+    // (2) Strict relative-only tolerance on cells where the f64 reference
+    //     itself is meaningful (above the nonzero floor). Cells where the
+    //     reference is at-or-near zero are skipped — relative error is
+    //     undefined and any abs check would be vacuous at these magnitudes.
+    let mut worst: Option<(usize, usize, f64, f64, f64)> = None;
+    for i in 0..m {
+        for j in 0..n {
+            let idx = i * n + j;
+            let g = got[idx] as f64;
+            let e = expected[idx];
+            if e.abs() < nonzero_floor {
+                continue;
+            }
+            let rel_err = (g - e).abs() / e.abs();
+            if rel_err < REL_BOUND {
+                continue;
+            }
+            if worst.map(|(_, _, _, _, wr)| rel_err > wr).unwrap_or(true) {
+                worst = Some((i, j, e, g, rel_err));
+            }
+        }
+    }
+
+    if let Some((wi, wj, e, g, rel_err)) = worst {
+        panic!(
+            "{label} ({m}×_ × _×{n}) FAILED Sprint 9.1 D5 relative-only tolerance:\n\
+             \n\
+             bound:                 rel_err < {REL_BOUND:e} (no abs fallback at this magnitude)\n\
+             worst index (i, j)     = ({wi}, {wj})\n\
+             f64 reference value    = {e:e}\n\
+             GPU value (f32 → f64)  = {g:e}\n\
+             rel_err                = {rel_err:e}\n",
+        );
+    }
 }
 
 // ============================================================================

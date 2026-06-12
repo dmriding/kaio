@@ -2,9 +2,10 @@
 
 use kaio_core::emit::{Emit, PtxWriter};
 use kaio_core::fragment::{
-    alloc_a, alloc_a_M16N8K32, alloc_b, alloc_b_M16N8K32, alloc_c, alloc_c_M16N8K32,
-    load_fragment_a_m16n8k16_shared_row, load_fragment_a_m16n8k32_shared_row,
-    load_fragment_b_m16n8k16_shared_col, load_fragment_b_m16n8k32_shared_col,
+    alloc_a_M16N8K32, alloc_a_f16, alloc_b_M16N8K32, alloc_b_f16, alloc_c, alloc_c_M16N8K32,
+    load_fragment_a_m16n8k16_shared_row, load_fragment_a_m16n8k16_shared_row_bf16,
+    load_fragment_a_m16n8k32_shared_row, load_fragment_b_m16n8k16_shared_col,
+    load_fragment_b_m16n8k16_shared_col_bf16, load_fragment_b_m16n8k32_shared_col,
 };
 use kaio_core::instr::control::{CmpOp, ControlOp};
 use kaio_core::instr::memory::MemoryOp;
@@ -275,8 +276,8 @@ pub fn build_mma_sync_ptx(sm: &str) -> String {
     let mut alloc = RegisterAllocator::new();
     let mut kernel = PtxKernel::new("mma_sync_smoke");
 
-    let a = alloc_a(&mut alloc);
-    let b = alloc_b(&mut alloc);
+    let a = alloc_a_f16(&mut alloc);
+    let b = alloc_b_f16(&mut alloc);
     let c = alloc_c(&mut alloc);
     let d = alloc_c(&mut alloc);
 
@@ -624,6 +625,98 @@ pub fn build_mma_sync_shared_ptx(sm: &str) -> String {
     w.finish()
 }
 
+/// Build a minimal kernel exercising `mma.sync.m16n8k16.bf16` with A and B
+/// loaded from **shared** memory via the bf16 shared-source fragment
+/// helpers (Sprint 9.1 D2.5). Uses the dedicated `TensorCoreOp::MmaSyncBf16`
+/// IR variant — sibling of `TensorCoreOp::MmaSyncInt8`.
+///
+/// Used by `ptxas_verify_mma_sync_bf16_shared` to confirm the bf16
+/// shared-source emission is structurally valid PTX for SM 8.0+. The
+/// kernel does no initial tile population — ptxas only verifies
+/// instruction syntax, not runtime values.
+///
+/// Tile strides are 32 bytes, matching the native m16n8k16 shape
+/// (16 cols × 2 bytes for A row-major; 16 rows × 2 bytes per col for B
+/// column-major). Byte layout is identical to the f16 helper above.
+#[allow(dead_code)]
+pub fn build_mma_sync_bf16_shared_ptx(sm: &str) -> String {
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("mma_sync_bf16_shared_smoke");
+
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_a".to_string(),
+        align: 4,
+        size_bytes: 512, // 16 × 16 bf16
+    });
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile_b".to_string(),
+        align: 4,
+        size_bytes: 256, // 16 × 8 bf16 column-major
+    });
+
+    let (r_tid, tid_instr) = special::tid_x(&mut alloc);
+    kernel.push(tid_instr);
+
+    let r_tile_a = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_a,
+        src: Operand::SharedAddr("tile_a".to_string()),
+        ty: PtxType::U32,
+    });
+    let r_tile_b = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile_b,
+        src: Operand::SharedAddr("tile_b".to_string()),
+        ty: PtxType::U32,
+    });
+
+    let frag_a = load_fragment_a_m16n8k16_shared_row_bf16(
+        &mut alloc,
+        &mut kernel,
+        r_tile_a,
+        r_tid,
+        32,
+        None,
+    );
+    let frag_b = load_fragment_b_m16n8k16_shared_col_bf16(
+        &mut alloc,
+        &mut kernel,
+        r_tile_b,
+        r_tid,
+        32,
+        None,
+    );
+
+    // Zero C fragment.
+    let frag_c = alloc_c(&mut alloc);
+    for r in &frag_c.regs {
+        kernel.push(PtxInstruction::Mov {
+            dst: *r,
+            src: Operand::ImmF32(0.0),
+            ty: PtxType::F32,
+        });
+    }
+
+    let frag_d = alloc_c(&mut alloc);
+
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::MmaSyncBf16 {
+        d: frag_d,
+        a: frag_a,
+        b: frag_b,
+        c: frag_c,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new(sm);
+    module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
 /// Build a minimal kernel that exercises `MemoryOp::LdGlobalB128`:
 /// loads a pointer parameter, converts to global-space, and issues
 /// one `ld.global.v4.b32` into 4 freshly-allocated b32 registers.
@@ -764,6 +857,111 @@ pub fn build_bitops_ptx(sm: &str) -> String {
 
     let mut module = PtxModule::new(sm);
     module.add_kernel(kernel);
+
+    let mut w = PtxWriter::new();
+    module.emit(&mut w).unwrap();
+    w.finish()
+}
+
+/// Build a minimal kernel exercising both Sprint 9.3 `ldmatrix` forms —
+/// `m8n8.x4.shared.b16` (fragment-A order) and `m8n8.x2.trans.shared.b16`
+/// (the future fragment-B form) — with the per-lane address math the
+/// real loader uses (`row = lane & 15`, `col_byte = lane & 16` into a
+/// row-major 16×16 fp16 tile, 32-byte row stride).
+///
+/// The shared tile declares `align: 16` — ldmatrix row addresses must be
+/// 16-byte aligned at runtime (a rule ptxas does not statically check;
+/// see the Sprint 9.3 audit), so the builder models the contract the
+/// production kernels must follow.
+#[allow(dead_code)]
+pub fn build_ldmatrix_ptx(sm: &str) -> String {
+    use kaio_core::instr::LdMatrixDst;
+
+    let mut alloc = RegisterAllocator::new();
+    let mut kernel = PtxKernel::new("ldmatrix_smoke");
+
+    kernel.add_shared_decl(SharedDecl {
+        name: "tile".to_string(),
+        align: 16,
+        size_bytes: 512, // 16 rows × 32 B (16 fp16 per row)
+    });
+
+    // %tid.x
+    let (r_tid, tid_instr) = special::tid_x(&mut alloc);
+    kernel.push(tid_instr);
+
+    // Shared base offset for the tile.
+    let r_tile = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Mov {
+        dst: r_tile,
+        src: Operand::SharedAddr("tile".to_string()),
+        ty: PtxType::U32,
+    });
+
+    // Per-lane row address: row = lane & 15, col_byte = lane & 16,
+    // addr = tile + row * 32 + col_byte — the closed form the
+    // fragment-A ldmatrix loader emits (Sprint 9.3 D3).
+    let r_row = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::And {
+        dst: r_row,
+        lhs: Operand::Reg(r_tid),
+        rhs: Operand::ImmU32(15),
+        ty: PtxType::U32,
+    }));
+    let r_colb = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::And {
+        dst: r_colb,
+        lhs: Operand::Reg(r_tid),
+        rhs: Operand::ImmU32(16),
+        ty: PtxType::U32,
+    }));
+    let r_off = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Mad {
+        dst: r_off,
+        a: Operand::Reg(r_row),
+        b: Operand::ImmU32(32),
+        c: Operand::Reg(r_colb),
+        ty: PtxType::U32,
+        mode: MadMode::Lo,
+    }));
+    let r_addr = alloc.alloc(PtxType::U32);
+    kernel.push(PtxInstruction::Arith(ArithOp::Add {
+        dst: r_addr,
+        lhs: Operand::Reg(r_tile),
+        rhs: Operand::Reg(r_off),
+        ty: PtxType::U32,
+    }));
+
+    // x4 form — four 8×8 matrices into four .b32 regs per lane.
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::LdMatrix {
+        dst: LdMatrixDst::X4([
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+            alloc.alloc_packed_half2(),
+        ]),
+        addr: r_addr,
+        trans: false,
+    }));
+
+    // x2.trans form — lanes 0-15's addresses consumed, transposed load.
+    kernel.push(PtxInstruction::TensorCore(TensorCoreOp::LdMatrix {
+        dst: LdMatrixDst::X2([alloc.alloc_packed_half2(), alloc.alloc_packed_half2()]),
+        addr: r_addr,
+        trans: true,
+    }));
+
+    kernel.push(PtxInstruction::Control(ControlOp::Ret));
+    kernel.set_registers(alloc.into_allocated());
+
+    let mut module = PtxModule::new(sm);
+    module.add_kernel(kernel);
+
+    // The smoke kernel must satisfy the same module-load validation the
+    // production launch path runs (SM gate + LdMatrix register typing).
+    module
+        .validate()
+        .expect("ldmatrix smoke kernel must pass module validation");
 
     let mut w = PtxWriter::new();
     module.emit(&mut w).unwrap();

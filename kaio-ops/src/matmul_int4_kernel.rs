@@ -729,7 +729,7 @@ pub(crate) fn emit_fragment_b_int4_per_lane(
     tile_scales_shared: Register,
     n_stripe_col_base: Register,
     lane_within_warp: Register,
-) -> kaio_core::fragment::FragmentB {
+) -> kaio_core::fragment::FragmentB_F16 {
     // group_id = lane / 4   (0..8, col within the 8-col fragment)
     let group_id = alloc.alloc(PtxType::U32);
     kernel.push(PtxInstruction::Arith(ArithOp::Div {
@@ -854,7 +854,7 @@ pub(crate) fn emit_fragment_b_int4_per_lane(
         Operand::Reg(shl_count_hi),
     );
 
-    kaio_core::fragment::FragmentB { regs: [reg0, reg1] }
+    kaio_core::fragment::FragmentB_F16 { regs: [reg0, reg1] }
 }
 
 /// Per-warp-quadrant mma pipeline: for each of `MMAS_PER_WARP_N=4`

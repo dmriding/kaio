@@ -112,9 +112,15 @@ impl PtxKernel {
                 PtxInstruction::TensorCore(op) => {
                     s.total_instructions += 1;
                     match op {
-                        TensorCoreOp::MmaSync { .. } | TensorCoreOp::MmaSyncInt8 { .. } => {
-                            s.mma += 1
-                        }
+                        TensorCoreOp::MmaSync { .. }
+                        | TensorCoreOp::MmaSyncInt8 { .. }
+                        | TensorCoreOp::MmaSyncBf16 { .. } => s.mma += 1,
+                        // Counted separately from both `mma` and
+                        // `ld_shared`: it is a warp-collective load, and
+                        // folding it into either would hide exactly the
+                        // instruction-mix shift the ldmatrix loader
+                        // rewire is supposed to show (Sprint 9.3).
+                        TensorCoreOp::LdMatrix { .. } => s.ldmatrix += 1,
                     }
                 }
                 PtxInstruction::Control(op) => {
@@ -183,6 +189,10 @@ pub struct KernelStats {
     pub bar_sync: usize,
     /// `mma.sync` instruction count (all tensor-core shapes).
     pub mma: usize,
+    /// `ldmatrix` instruction count (warp-collective fragment loads —
+    /// tracked apart from `ld_shared` so loader-rewire instruction-mix
+    /// shifts stay visible).
+    pub ldmatrix: usize,
     /// `cp.async.ca.shared.global` instruction count.
     pub cp_async: usize,
     /// `cp.async.commit_group` instruction count.
@@ -367,7 +377,7 @@ mod tests {
 
     #[test]
     fn stats_counts_tensor_core_and_cp_async() {
-        use crate::fragment::{alloc_a, alloc_b, alloc_c};
+        use crate::fragment::{alloc_a_f16, alloc_b_f16, alloc_c};
         use crate::instr::MmaShape;
         use crate::ir::RegisterAllocator;
 
@@ -379,8 +389,8 @@ mod tests {
             kernel.push(PtxInstruction::TensorCore(
                 crate::instr::TensorCoreOp::MmaSync {
                     d: alloc_c(&mut alloc),
-                    a: alloc_a(&mut alloc),
-                    b: alloc_b(&mut alloc),
+                    a: alloc_a_f16(&mut alloc),
+                    b: alloc_b_f16(&mut alloc),
                     c: alloc_c(&mut alloc),
                     shape: MmaShape::M16N8K16,
                     d_ty: PtxType::F32,

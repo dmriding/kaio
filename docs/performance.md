@@ -299,11 +299,11 @@ GemmEx is tracked tech debt for a future sprint.
 
 ### Why small sizes underperform cuBLAS
 
-At 256–1024, TC matmul lands at 3–8% of cuBLAS. This is expected:
+At 256–1024, TC matmul lands at ~5–17% of cuBLAS. This is expected:
 the multi-warp kernel launches `(N/64) × (M/64)` blocks and below
-1024² there are too few blocks to fill the SM array (1024² = 16
-blocks; one block per SM occupies only a sliver of the 4090's 128
-SMs). cuBLAS at small sizes uses dispatch heuristics that pick
+1024² there are too few blocks to fill the SM array (1024² = 256
+blocks — only ~2 per SM, far too few to hide latency; 256² is just
+16 blocks on the 4090's 128 SMs). cuBLAS at small sizes uses dispatch heuristics that pick
 launch shapes appropriate to the workload — a single library tuned
 for the full size range. KAIO's TC matmul is a single kernel
 optimized for the large-shape regime where TC throughput matters.
@@ -325,10 +325,76 @@ pipeline already saturates load bandwidth; its remaining bottleneck
 was shared-memory contention at fragment-read time, which is exactly
 what the padding fixes. Sync is still global-memory-latency-bound.
 
+### ldmatrix fragment-A loader: measured, parked (Sprint 9.3)
+
+Sprint 9.3 built the `ldmatrix.sync.aligned.m8n8.x4` warp-collective
+fragment-A loader for the sync kernel — bit-identical fragment
+contents to the per-thread `ld.shared` path (locked by a GPU contract
+gate), 4 ALU + 1 load per stripe instead of ~9 ALU + 4 loads — and
+measured it with an interleaved A/B bench (SC-2 methodology: per-iter
+ratios, alternating launch order, both kernels in one process). RTX
+4090 sm_89, three release runs, 4096³ interleaved median
+(ldmatrix/ld.shared): **102.75% / 104.49% / 102.82%** — at the ±3%
+structural noise floor, flat at smaller shapes, no regression at any
+measured shape.
+
+The mechanism behind the flat result: at the A tile's 32-byte row
+stride, the shared-memory bank-conflict pattern is **unchanged** by
+ldmatrix, and the sync path is global-load bound — so an
+instruction-issue reduction alone doesn't move wall-clock. The
+production default therefore stays on the proven `ld.shared` path,
+and the ldmatrix loader ships **built and parked** (a deferred win,
+not a null result): the IR primitive, loader, contract gate, and A/B
+regression bench are all in place, and the default flip is one line
+when an XOR-swizzle tile layout removes the bank conflicts and lets
+the collective load pay.
+
+(The A/B bench's absolute TF columns run below this document's
+worst-of-10 tables — short-burst runs without a sustained clock ramp.
+The interleaved per-iter ratios are thermal-invariant, so the verdict
+holds; the absolutes are not comparable.)
+
+### bf16 tensor-core matmul: f16 parity (Sprints 9.1–9.1.4)
+
+`matmul_tc_bf16` / `matmul_tc_bf16_async` are operand-dtype siblings
+of the f16 kernels above: same tile geometry, warp layout,
+shared-memory pipeline, and f32 accumulator — only the `mma.sync`
+operand type changes. The f16 tables above therefore carry the
+absolute-throughput story; the bf16 claim is **parity with f16**,
+measured apples-to-apples by the regression gates that ship with the
+kernels (`matmul_tc_bf16_bench`, `matmul_tc_bf16_async_bench`): 10
+interleaved alternating-order runs at 4096³, per-iteration bf16/f16
+TFLOPS ratios, median within ±3% and worst iteration within ±15%,
+asserted as a hard failure in release builds.
+
+Measured parity record (RTX 4090 sm_89, release builds):
+
+| Pair at 4096³ | median ratio | worst-iter ratio |
+|---|---:|---:|
+| bf16 sync / f16 sync (sprint gate, repeated runs) | +0.92% to +0.96% | +1.98% to +9.37% |
+| bf16 async / f16 async (sprint gate) | +0.72% | +1.55% |
+| Release verification, 2026-06-12 (5 sync runs + 1 async run) | −0.03% to +1.42% | see note |
+
+Note on worst-iteration tails: across the five release-day sync runs,
+two isolated worst iterations exceeded the ±15% band — once in each
+direction (+17.8%, −22.2%) — while the desktop was under unrelated
+load, without moving the median in any run; three consecutive
+follow-up runs in the same session held both bounds (worst −8.6% to
++8.6%). The structural median has stayed inside ±1.5% in every
+observed run since the kernels landed.
+
+Absolute reference from a single `cargo xtask bench` invocation
+(2026-06-12, median of 20 timed iterations per shape — single-run
+reference, not the worst-of-10 protocol the f16 tables use): bf16
+sync 58.31 TFLOPS at 4096³ vs f16 59.20 in the same run; bf16 async
+64.91 vs f16 async 62.28. Same-run cuBLAS sgemm reference: 58.04
+TFLOPS (sync table) / 52.89 (async table) — the apples-to-apples
+disclaimer for the f16 tables applies unchanged.
+
 ### Path to higher throughput (future work)
 
 Above the current worst-of-10 ceiling (115% async / 107% sync of
-cuBLAS sgemm at 4096² on RTX 4090), the remaining headroom — and the
+cuBLAS sgemm at 4096³ on RTX 4090), the remaining headroom — and the
 wider sync-vs-async gap at all sizes — is bounded by structural
 choices this kernel hasn't yet made:
 
@@ -343,11 +409,15 @@ choices this kernel hasn't yet made:
   creep against 6.7b's D10 orthogonality requirement. A future
   sprint can design that primitive properly and then use the
   LDG.128 variant cleanly.
-- **bf16 TC matmul / larger mma shapes** — deferred from Phase 7;
-  tracked under Phase 9 kernel deepening.
-- **ldmatrix.sync.aligned** — deferred from Phase 7; tracked under
-  Phase 9 kernel deepening. The real path to closing the remaining
-  sync-path gap.
+- **XOR-swizzle shared-tile layout + ldmatrix default flip.** The
+  Sprint 9.3 measurement above localized the sync path's shared-side
+  cost in the bank-conflict pattern, not instruction issue. A
+  swizzled A-tile layout that de-conflicts the 32-B row stride is the
+  lever that makes the already-built ldmatrix loader pay; the flip
+  itself is one line.
+- **Larger mma shapes** — deferred from Phase 7; still-open future
+  work (the other Phase 9 kernel-deepening item, bf16 TC matmul,
+  shipped in Sprints 9.1–9.1.4).
 
 ## Quantized Matmul Performance (Sprints 7.1 + 7.2)
 
@@ -438,10 +508,14 @@ W8A16 standalone op to serve as a fair 3× baseline — `matmul_int8`
 
 ## Attention Performance (Sprints 5.2 + 6.6 + Sprint 5.4)
 
-KAIO's public attention surface is **single-head self-attention**:
-`attention_tc` / `attention_tc_causal` (f16 Q/K/V → f32 out,
-tensor-core path) and `attention_flash` / `attention_flash_causal`
-(f32 Q/K/V → f32 out, online-softmax path). All four take either
+KAIO's public attention **forward** surface is **single-head
+self-attention**: `attention_tc` / `attention_tc_causal` (f16 Q/K/V →
+f32 out, tensor-core path) and `attention_flash` /
+`attention_flash_causal` (f32 Q/K/V → f32 out, online-softmax path),
+plus the `_with_stats` flash variants and the
+`attention_flash_bwd` / `attention_flash_bwd_causal` backward pair
+added in Sprint 9.2 (see the FlashAttention backward subsection
+below). All four forwards take either
 `(seq_q, seq_k, d_k, d_v)` or `(seq_len, d_k)` — there is no
 decode-style cross-attention kernel where `seq_q = 1, seq_k = N`;
 a decode-specific path would be a new kernel, not a shape
@@ -503,6 +577,52 @@ KAIO TC uses f16 Q/K/V; flash uses f32 Q/K/V. Within each table
 comparisons are apples-to-apples. Across the two tables, prefer
 wall-clock at matched `seq_len` as the primary axis — dtypes
 differ, so TOPS-style throughput would mislead.
+
+### FlashAttention backward (Sprint 9.2)
+
+`attention_flash_bwd` / `attention_flash_bwd_causal` — three-kernel
+backward (D-preprocess + dK/dV + dQ) consuming the logsumexp stats
+saved by the `_with_stats` forward variants. RTX 4090 (sm_89),
+release build, 5 warm-ups + 20 timed iterations per run, worst /
+median over 10 runs, `d_k = 128`:
+
+| Shape | Variant | fwd ms (w/m) | bwd ms (w/m) | bwd/fwd (w/m) | bwd+recompute/fwd (w/m) |
+|---|---|---:|---:|---:|---:|
+| `n128` | plain | 0.314 / 0.301 | 0.783 / 0.754 | 2.57 / 2.51 | 4.12 / 3.58 |
+| `n128` | causal | 0.314 / 0.297 | 0.796 / 0.761 | 2.62 / 2.54 | 3.81 / 3.62 |
+| `n512` | plain | 0.458 / 0.424 | 2.267 / 1.982 | 5.22 / 4.72 | 6.91 / 5.79 |
+| `n512` | causal | 0.441 / 0.401 | 1.526 / 1.268 | 3.46 / 3.19 | 4.83 / 4.18 |
+| `n1024` | plain | 1.120 / 1.019 | 9.760 / 7.657 | 8.74 / 7.44 | 9.01 / 8.20 |
+| `n1024` | causal | 0.686 / 0.673 | 3.506 / 3.181 | 5.20 / 4.74 | 6.43 / 5.86 |
+| `n2048` | plain | 2.846 / 2.535 | 29.840 / 26.956 | 10.80 / 10.63 | 13.01 / 11.66 |
+| `n2048` | causal | 1.609 / 1.598 | 12.857 / 11.685 | 8.04 / 7.35 | 9.54 / 8.59 |
+
+Two cost tiers, by design:
+
+- **`bwd/fwd`** — the backward kernels alone. This is what a direct
+  kaio-ops caller pays when it kept the stats buffer from
+  `attention_flash_with_stats`.
+- **`bwd+recompute/fwd`** — backward plus a `_with_stats` re-run to
+  recover the stats. This is what the `kaio-candle` autograd binding
+  pays per backward call: candle's `CustomOp3` has no fwd→bwd
+  saved-intermediate channel, so the binding recomputes. The gap
+  between the two columns is exactly one forward.
+
+The bwd/fwd ratio grows with `seq_len` (2.5× at `n128` up to ~10.6×
+median at `n2048` plain). Two structural causes, both by design.
+First, the backward recomputes scores rather than materializing
+them: the flash formulation never stores the attention matrix, so
+the dK/dV and dQ kernels each rebuild `S` and `dP` from Q/K/V and
+the saved logsumexp — two dot products per score pair where the
+forward pays one. That recomputation is the no-materialization
+tradeoff, not an inefficiency to hunt down. Second, the forward
+gains occupancy efficiency at scale that the heavier backward
+blocks cannot match. The backward is correctness-first; a tiled
+rework (FA2-style BLOCK_M > 1, sharing recomputed scores within a
+tile) is the named follow-up if training-loop throughput demands
+it. The causal
+variant runs ~2× faster than plain at large `seq` on both fwd and
+bwd, matching the halved score-matrix work.
 
 ## Norm + Activation Kernel Performance (Sprint 3 + Sprint 6.8)
 
@@ -591,14 +711,22 @@ watch; the 262K and 1M rows are dispatch-overhead-bound.
 
 ## Bench coverage today + roadmap
 
-`cargo xtask bench` covers seven benchmark harnesses as of Sprint 8.0.5:
+`cargo xtask bench` covers ten benchmark harnesses as of Sprint 9.3:
 
 - `matmul_tc_bench` — f16 tensor-core matmul (sync + async) vs cuBLAS sgemm
+- `matmul_tc_bf16_bench` — bf16 sync vs f16 sync parity gate
+  (interleaved per-iter ratios, median ±3% / worst ±15%) + cuBLAS
+  sgemm reference
+- `matmul_tc_bf16_async_bench` — bf16 async vs f16 async parity gate
+  (same protocol)
+- `matmul_tc_ldmatrix_bench` — `ldmatrix` vs `ld.shared` fragment-A
+  A/B regression gate (one-sided: median ≥ 97%, worst ≥ 85%, bit-exact
+  output pre-gate)
 - `matmul_int8_bench` — W8A8 symmetric INT8 matmul
 - `matmul_int4_bench` — W4A16 GPTQ-style INT4 matmul
 - `qkv_project_bench` — fused INT4 vs 3× `matmul_int4`; INT8 absolute TOPS
 - `attention_tc_bench` — `attention_tc` + `attention_tc_causal` (short-seq TC)
-- `attention_flash_bench` — `attention_flash` + `attention_flash_causal` (long-seq)
+- `attention_flash_bench` — `attention_flash` + `attention_flash_causal` (long-seq) + the Sprint 9.2 backward benchmark (`benchmark_attention_flash_backward`)
 - `norm_activation_bench` — rms_norm / layer_norm / softmax (reductions) +
   fused_silu_gate / gelu_exact / gelu_fast (elementwise sweep)
 
@@ -613,4 +741,6 @@ intentionally out of scope.
   requires raw FFI wrapping beyond `cudarc` 0.19's exposure.
 - Multi-block reduction variants of `rms_norm` / `layer_norm` /
   `softmax` — Ops Track item when those kernels ship.
-- bf16 TC matmul / Hopper `wgmma` — Phase 9 kernel deepening.
+- Hopper `wgmma` — future kernel-deepening work (the bf16 TC matmul
+  half of this item shipped in Sprints 9.1–9.1.4 with its own
+  harnesses, listed above).

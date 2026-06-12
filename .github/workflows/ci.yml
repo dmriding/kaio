@@ -14,7 +14,7 @@ jobs:
     name: Format + Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - run: rustup show
       - run: cargo fmt --check
@@ -27,7 +27,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - run: rustup show
       - run: cargo test --workspace
@@ -36,9 +36,31 @@ jobs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - run: rustup show
       - run: cargo doc --no-deps --workspace
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  # kaio-candle lives outside the workspace, so the jobs above never
+  # touch it. This leg proves its no-CUDA shell story on a bare runner:
+  # check + doc with default features off must succeed without a CUDA
+  # toolkit. `cargo test` is deliberately absent — dev-dependencies
+  # cannot be feature-gated in Cargo, and the GPU tests' cudarc
+  # dev-dependency probes the toolkit at build time.
+  candle-no-cuda:
+    name: kaio-candle no-CUDA shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "kaio-candle -> target"
+      - run: rustup show
+      - run: cargo check --no-default-features
+        working-directory: kaio-candle
+      - run: cargo doc --no-deps --no-default-features
+        working-directory: kaio-candle
         env:
           RUSTDOCFLAGS: "-D warnings"

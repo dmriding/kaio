@@ -8,9 +8,287 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Sprint 8.1: PyO3 scaffold
+## [0.5.0] — 2026-06-12 — Phase 9: bf16 Tensor Cores, FlashAttention Backward, ldmatrix
+
+Covers Sprints 9.1, 9.1.1–9.1.4, 9.2, and 9.3, plus the
+previously-unreleased Sprint 8.1 and 8.0.5 entries (appended at the end
+of this version's section). kaio-candle moves 0.1.1 → 0.2.0 in the same
+release.
 
 ### Added
+
+- `ldmatrix.sync.aligned` IR primitive (Sprint 9.3) —
+  `TensorCoreOp::LdMatrix` in kaio-core: `m8n8` `.b16` warp-collective
+  fragment loads, `.x2`/`.x4` widths (register count bound to the
+  width by construction via `LdMatrixDst`), optional `.trans`.
+  `min_sm() = 75` (Turing) — the first sub-Ampere tensor-core op;
+  audited against the PTX ISA plus per-variant `ptxas --verify` probes
+  at sm_75/sm_80, with module-load validation extended to reject
+  mis-typed destination/address registers
+  (`ValidationError::LdMatrixBadRegType`) and new ptxas-verify gates
+  for both emitted forms on both targets.
+  - `load_fragment_a_m16n8k16_ldmatrix` — fragment-A loader emitting
+    4 ALU + 1 `ldmatrix.x4` per stripe (vs ~9 ALU + 4 `ld.shared.b32`),
+    proven **bit-identical** to the shipped `ld.shared` loader by a
+    GPU contract gate (both A stripes, distinct-element tile data,
+    staging self-check) before any kernel integration.
+  - `matmul_tc` loader A/B measurement: interleaved per-iter ratios
+    (SC-2 methodology) put the ldmatrix path at the ±3% structural
+    noise floor at 4096³ (102.75/104.49/102.82% across three release
+    runs), flat at smaller shapes, no regression anywhere — at the A
+    tile's 32-B row stride the bank-conflict pattern is unchanged by
+    ldmatrix, so issue-count reduction alone doesn't move the
+    global-load-bound sync path. The production default stays on the
+    proven `ld.shared` loader; the ldmatrix path ships built-and-parked
+    behind `FragALoaderKind` + a hidden `matmul_tc_ldmatrix` sibling,
+    guarded by a permanent A/B regression bench
+    (`matmul_tc_ldmatrix_bench`, one-sided non-regression gates +
+    bit-exact pre-gate), ready for the XOR-swizzle follow-up that
+    makes the collective load pay.
+- FlashAttention backward (Sprint 9.2) — the Phase 9 headline.
+  Three layers in one sprint:
+  - `kaio_ops::attention_flash_with_stats` +
+    `attention_flash_causal_with_stats` — forward variants that
+    additionally save the per-row softmax logsumexp
+    (`L_i = m_i + log(l_i)`, one f32 per query row). Output is
+    numerically identical to the existing forwards (zero-diff
+    verified); the shipped `attention_flash` / `attention_flash_causal`
+    are untouched.
+  - `kaio_ops::attention_flash_bwd` + `attention_flash_bwd_causal` —
+    backward via three new PTX kernels (D-term preprocess, dK/dV, dQ),
+    rebuilding `P_ij = exp(S_ij − L_i)` from the saved logsumexp
+    instead of materializing the O(seq²) probability matrix. No
+    atomics — the dK/dV and dQ kernels swap loop nests so every output
+    row has exactly one owning block. f32, single-head self-attention,
+    `d_k ≤ 256`, same shape contract as the forward. All kernels run
+    18–22 registers/thread (ptxas -v, sm_89).
+  - `kaio_candle::attention_flash` + `attention_flash_causal` — first
+    candle bindings for the flash family, forward + backward together
+    (`CustomOp3`). f32 end-to-end, no dtype casts. Backward recovers
+    the logsumexp by re-running the stats-saving forward (candle's
+    `CustomOp3` has no fwd→bwd saved-intermediate channel; the forward
+    is deterministic so recomputed stats are bit-identical). Rejects
+    cross-attention shapes loudly (use `attention_tc` for those).
+  - Correctness: CPU f64 analytical backward oracle (self-checked
+    against f64 central finite differences before judging any GPU
+    output), `seq_len = 1` closed-form gate, full
+    `seq ∈ {32,64,128} × d_k ∈ {32,64,128}` matrix plus non-aligned
+    `(17,19)`, tile-boundary `seq = 257`, and wide-dynamic-range
+    upstream-gradient cases targeting the `dS = P·(dP − D)`
+    cancellation path. 26 new GPU tests in
+    `kaio-ops/tests/attention_flash_bwd.rs`, 19 in
+    `kaio-candle/tests/candle_attention_flash.rs`, 4 host-only oracle
+    self-checks. Tolerance `rel < 1e-2 || abs < 1e-3` vs the f64
+    oracle held everywhere.
+  - Bench: `benchmark_attention_flash_backward` in
+    `attention_flash_bench.rs`; backward section added to
+    `docs/performance.md` with the two-tier cost contract (bwd-only
+    vs bwd + stats recompute) and honest ratio scaling notes.
+- `MatmulTcBf16Op::bwd` + `MatmulTcBf16AsyncOp::bwd` (Sprint 9.1.4)
+  — backward implementations for the two bf16 candle forwards from
+  Sprint 9.1.3. Forward-reuse pattern: `dA = grad @ B^T`, `dB = A^T
+  @ grad`, both computed via the same forward kernel (no new PTX,
+  mirrors the f16 sibling pattern from Sprint 7.4d). The f32 upstream
+  gradient is downcast to bf16 before the matmul, and output gradients
+  are cast back to bf16 to satisfy candle's dtype-matching constraint.
+  After 9.1.4 the bf16 candle surface has full parity with f16:
+  forward + backward for both sync and async variants. 8 new gradient-
+  correctness GPU tests (`matmul_tc_bf16_backward_*`,
+  `matmul_tc_bf16_async_backward_*`) in
+  `kaio-candle/tests/candle_gpu_roundtrip.rs` mirroring the f16
+  coverage (3 shapes × 2 bindings + 1 weighted-loss per binding).
+  Dual-tolerance assertion (`rel < 1e-2 || abs < 1e-3`) identical to
+  f16 — bf16's 7-bit mantissa is lower precision than f16's 10-bit,
+  but the dual-tolerance "OR" structure absorbs small-magnitude
+  values via the absolute bound; bf16's 8-bit exponent gives values
+  representable at scales where f16 would overflow or underflow.
+- `kaio_candle::matmul_tc_bf16` + `kaio_candle::matmul_tc_bf16_async`
+  (Sprint 9.1.3) — bf16 forward bindings into candle for the
+  tensor-core matmul family. Bridges `kaio_ops::matmul_tc_bf16` and
+  `kaio_ops::matmul_tc_bf16_async` (from Sprints 9.1 and 9.1.1) onto
+  candle's `CustomOp2` API; mirrors the f16 `matmul_tc` /
+  `matmul_tc_async` binding shape with bf16 inputs and f32 outputs.
+  Forward-only — backward via forward-reuse arrives in Sprint 9.1.4
+  (mirror of `MatmulTcOp::bwd`). Calling `.backward()` on a graph
+  containing either op returns an explicit `Err` naming Sprint 9.1.4
+  with concrete workaround paths (`kaio_ops` direct call, downcast to
+  f16), not the generic `BackwardNotSupported` candle default. 12 new
+  GPU tests in `kaio-candle/tests/candle_gpu_roundtrip.rs` (6 bit-exact
+  shape tests + 4 rejection-path tests + 2 SC-3 negative-backward
+  tests). Bridge primitives are dtype-generic so no `bridge.rs`
+  changes were needed. Requires SM 8.0+ for bf16 mma. **kaio-candle
+  is outside the root workspace** — build via `cd kaio-candle && cargo
+  build --features cuda` (the `-p kaio-candle` flag from root fails
+  because the crate is intentionally excluded per `Cargo.toml:12`).
+- `kaio_ops::matmul_auto_tc_bf16` + `kaio_ops::tune_matmul_tc_bf16`
+  (Sprint 9.1.2) — 2-way bf16 auto-tuner cache between `matmul_tc_bf16`
+  (sync) and `matmul_tc_bf16_async` (async). Per-shape dispatch from
+  real benchmark data; mirrors the f16 `matmul_auto_tc` + `tune_matmul_tc`
+  shape from Sprint 6.5. Shares the same on-disk JSON cache file via
+  the existing `kernel`-field disambiguation, locked in by the
+  `cache_matmul_tc_and_matmul_tc_bf16_entries_coexist` in-module
+  regression test (sibling of the Sprint 6.5 f16-vs-scalar coexistence
+  test). Cache-miss fallback inherits the f16 size heuristic
+  (`max(m, n, k) >= 3072` → async; else sync), with a separate
+  `ASYNC_FALLBACK_MAX_DIM_THRESHOLD_BF16` symbol so the bf16 threshold
+  can drift independently if future calibration warrants. Requires
+  SM 8.0+ (Ampere) and `K % 16 == 0`; pre-Ampere callers are
+  redirected to `matmul_auto` (f32 scalar), not `matmul_auto_tc`,
+  which has the same SM 8.0+ requirement.
+- `kaio_ops::matmul_tc_bf16_async` (Sprint 9.1.1) — cp.async-pipelined
+  tensor-core matmul for bf16 × bf16 → f32. Async sibling of
+  `matmul_tc_bf16`; cross-product of (f16 async × bf16 sync) on the
+  matmul precision-vs-staging table. Same 64×64 block tile / 4-warp
+  32×32 quadrant / Sprint 6.7b padded Tile B / D10 fragment hoist as
+  the sync sibling, with double-buffered `cp.async.ca` A staging
+  overlapping the K-loop's memory fetch with the previous iteration's
+  mma compute. Reuses the precision-agnostic async A-tile loader from
+  `matmul_tc_async` and the dedicated bf16 mma helper from
+  `matmul_tc_bf16` (both promoted to `pub(crate)` at C0). Requires
+  SM 8.0+ (Ampere) and `K % 16 == 0`. Auto-tuner integration ships
+  in a future sub-sprint.
+- 25-test bf16-async correctness suite
+  (`kaio-ops/tests/matmul_tc_bf16_async_correctness.rs`) mirroring the
+  Sprint 9.1 D5 grid — same shape × magnitude coverage, same
+  shape-scoped reference strategy (dense f64 small/medium,
+  sampled-cell f64 large), same tolerances. Data generators and
+  assertions imported from the existing `tests/common/mod.rs`; the
+  test file owns its own per-flavor launch + runner wrappers (matches
+  the existing `matmul_tc_bf16_correctness.rs` pattern).
+- bf16-async vs f16-async bench
+  (`kaio-ops/tests/matmul_tc_bf16_async_bench.rs`) registered with
+  `cargo xtask bench`. Sprint 9.1.1 SC-2 split-bound perf-parity gate
+  at 4096³: 10 interleaved alternating-order runs, median ratio ±3%
+  AND worst ratio ±15% on the bf16_async/f16_async TFLOPS ratio. Both
+  bounds enforced; debug-build guard skips the hard assertion in
+  `cfg!(debug_assertions)`. On RTX 4090 sm_89 the gate held with
+  substantial headroom — median +0.72%, worst +1.55% — confirming
+  the kernels are structurally equivalent with only the mma operand
+  dtype tag differing.
+- `kaio_ops::matmul_tc_bf16` (Sprint 9.1) — sync tensor-core matmul for bf16 × bf16
+  → f32. Sibling of `matmul_tc` with byte-identical kernel structure
+  (64×64 block tile, 4-warp 32×32 quadrants, Sprint 6.7b
+  bank-conflict-padded Tile B, D10 fragment-loader hoist). Edge-tile
+  predication on M and N; `K % 16 == 0` is the only divisibility
+  constraint (the mma K-tile is structural). Requires SM 8.0+
+  (Ampere). Async / auto-tuner / candle bf16 variants followed as
+  sub-sprints 9.1.1–9.1.4 (all in this release) and were not gated
+  by 9.1's close.
+- New IR variant `TensorCoreOp::MmaSyncBf16` in `kaio-core` —
+  dedicated bf16 mma sibling of `MmaSyncInt8`. Emits
+  `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. Takes the
+  new `FragmentA_BF16` / `FragmentB_BF16` sibling types directly so
+  cross-precision wiring at call sites is a compile error rather
+  than a silent dtype-tag mismatch on the generic `MmaSync` variant.
+- bf16 fragment types + helpers in `kaio-core::fragment` —
+  `FragmentA_BF16`, `FragmentB_BF16`, `alloc_a_bf16`, `alloc_b_bf16`,
+  `load_fragment_a_m16n8k16_shared_row_bf16`,
+  `load_fragment_b_m16n8k16_shared_col_bf16`. `FragmentC` is reused
+  unchanged (accumulator is `.f32` regardless of input precision).
+  The shared-mem loaders share a private `*_impl` with their f16
+  siblings — offset arithmetic and `ld.shared.b32` emit are
+  bit-identical between the precisions, only the typed fragment
+  wrapper differs at the public API.
+- 25-test bf16 correctness suite (`kaio-ops/tests/matmul_tc_bf16_correctness.rs`)
+  covering the full D5 shape × magnitude grid: 32³ + 64³ + 256³ +
+  512³ × {small, medium, large, tiny_product, min_normal} magnitudes
+  + 2048³ small/large + 4096³ small + non-square 64×128×32 + odd-N
+  65×17×32. Dense f64 CPU reference at small/medium shapes;
+  sampled-cell f64 (100 cells, fixed seed via inline LCG — no new
+  dev-dep) at large shapes. Standard tolerance `rel < 1e-2 ||
+  abs < 1e-3`; tiny_product and min_normal use `rel < 1e-1` only
+  plus a nonzero-output assertion that catches the "kernel returns
+  zero on small inputs" bug class (the min_normal class uses
+  asymmetric magnitudes — A near bf16's min-normal exponent band
+  `~2e-38`, B `~1e10` — so per-element products land in normal-f32
+  range and the accumulator does not underflow, isolating the
+  FTZ-on-load failure mode on the bf16 side).
+- bf16 vs f16 bench harness (`kaio-ops/tests/matmul_tc_bf16_bench.rs`)
+  with **SC-2 perf-parity gate**: 10 interleaved alternating-order
+  runs at 4096³ with two independent bounds on the per-iter bf16/f16
+  TFLOPS ratios — median ±3% (structural-kernel gate) AND worst ±15%
+  (catastrophic-tail gate). Both bounds must hold. Hard assertion in
+  release builds, debug-build guard avoids spurious failures from
+  launch-overhead variance. Registered with `cargo xtask bench`.
+  Methodology evolved from the plan's locked "worst-of-10 ±5%" in two
+  refinements after measured noise on hardware (see
+  `docs/development/sprints/phase9/sprint_9_1.md` § "Methodology
+  evolution"); net effect is a **tighter** structural gate than the
+  original ±5% paired with explicit OS-noise tolerance on the tail
+  axis.
+- CI: no-CUDA leg for kaio-candle (`candle-no-cuda`) — `cargo check
+  --no-default-features` + `cargo doc --no-deps --no-default-features`
+  on a toolkit-free runner, enforcing the crate's empty-shell story
+  (kaio-candle sits outside the workspace, so the existing jobs never
+  built it). `cargo test` is deliberately not part of the leg: Cargo
+  cannot feature-gate dev-dependencies, and the GPU tests' cudarc
+  dev-dependency probes the CUDA toolkit at build time even with
+  default features off.
+
+### Changed
+
+- The `#[doc(hidden)]` FlashAttention backward building blocks
+  (`attention_flash_bwd_preprocess` / `_dkdv` / `_dq`) now validate
+  dimensions and buffer lengths before launch, matching every other
+  launch wrapper in kaio-ops. Previously only the public
+  `attention_flash_bwd` / `_causal` orchestrators validated; calling a
+  helper directly with a too-small buffer was a GPU out-of-bounds
+  write, and `d_k > 256` a silently truncated reduction (the backward
+  kernels cover dims with one 256-thread block per row). Five new GPU
+  rejection tests, including the `d_k = 512` preprocess case where the
+  bound is the only check that can fire.
+
+- **Breaking (kaio-core, pre-v1.0):** `FragmentA` / `FragmentB` /
+  `alloc_a` / `alloc_b` renamed to `FragmentA_F16` / `FragmentB_F16`
+  / `alloc_a_f16` / `alloc_b_f16` for naming symmetry with the new
+  `_BF16` siblings (and the existing `_M16N8K32` INT8 siblings). The
+  rename is mechanical and applies to every call site in `kaio-core`
+  + `kaio-ops`. No known external users of `kaio-core`'s fragment
+  types directly; `kaio-candle` consumes the public host APIs, not
+  the IR-level fragment types. Absorbed in the v0.5.0 minor bump per
+  the master-plan version-semantics decision.
+- **Breaking (kaio-core IR, pre-v1.0):** `PtxModule::validate` now
+  rejects `TensorCoreOp::MmaSync` constructed with
+  `a_ty: PtxType::BF16` or `b_ty: PtxType::BF16`, returning a new
+  `ValidationError::MmaSyncBf16Rejected { operand }` variant. This
+  closes a legacy hole where the generic `MmaSync` path silently
+  emitted a bf16 instruction from `FragmentA_F16` / `FragmentB_F16`
+  operands, undermining the type-safety claim made for `MmaSyncBf16`.
+  Bf16 mma emission must use `TensorCoreOp::MmaSyncBf16`; the public
+  `matmul_tc_bf16` op and every kernel in `kaio-ops` already do. No
+  known external IR consumers of the legacy route.
+
+### Notes
+
+- **Bench numbers** (RTX 4090 sm_89, release mode, SC-2 split-bound
+  gate at 4096³): bf16 sync ≈ 54–60 median TFLOPS across observed
+  runs; f16 sync ≈ 53–60 median TFLOPS in the same runs. Per-iter
+  bf16/f16 ratio: median 100.92–100.96% (delta +0.92% to +0.96% —
+  well inside the ±3% structural bound), worst 101.98–109.37% (delta
+  +1.98% to +9.37% — inside the ±15% catastrophic-tail bound). bf16
+  at 4096³ reached a per-run median of 91.8% of same-run cuBLAS sgemm
+  in the sprint-gate runs — the same regime as f16 measured in those
+  runs. cuBLAS sgemm comparison remains
+  project-local-reference, not apples-to-apples; the
+  `cublasGemmEx`-bf16 future reference is tracked in
+  `docs/development/tech_debt.md`.
+- **D4 cvt-free hot path:** a host-only assertion in the kernel
+  module's tests confirms zero `cvt.*` instructions between any
+  `ld.shared.b32` fragment load and the next `mma.sync.bf16` in the
+  K-loop body — the precision-conversion bug class D4 was written to
+  prevent. Runs in CI as part of `cargo test --workspace` (no GPU
+  required).
+- **No changes to f16 numerical behaviour.** The C0 rename touches
+  type names only; the f16 kernels (`matmul_tc`, `matmul_tc_async`)
+  emit byte-identical PTX before and after the rename.
+- `docs/performance.md` was not updated mid-phase; the bf16 parity
+  section and bench-roster refresh landed in one piece at v0.5.0
+  close (this release), alongside the Sprint 9.2 backward and Sprint
+  9.3 ldmatrix sections added when those sprints shipped.
+
+### Sprint 8.1 — PyO3 scaffold (previously unreleased, first shipped in 0.5.0)
+
+#### Added — Sprint 8.1
 
 - New standalone `kaio-py` crate — PyO3 scaffold for the Python
   bindings (Phase 8). Exposes `kaio.Device`, `kaio.Tensor` (NumPy
@@ -24,7 +302,7 @@ Updated at phase completion. Per-sprint detail lives in
 - abi3-py310 wheel target — one wheel per architecture + platform
   runs across Python 3.10 / 3.11 / 3.12+ unchanged.
 
-### Notes
+#### Notes — Sprint 8.1
 
 - No public API, runtime, or codegen changes on the existing Rust
   crates. `kaio-py` is additive — like `kaio-candle`, it lives
@@ -45,9 +323,9 @@ Updated at phase completion. Per-sprint detail lives in
   every Rust release. Rationale is documented in the Phase 8 master
   plan.
 
-## [Unreleased] — Sprint 8.0.5: Bench coverage extension
+### Sprint 8.0.5 — Bench coverage extension (previously unreleased, first shipped in 0.5.0)
 
-### Added
+#### Added — Sprint 8.0.5
 
 - `cargo xtask bench` now drives seven benchmark harnesses covering
   the shipped high-level / public kernel families plus the showcase
@@ -65,7 +343,7 @@ Updated at phase completion. Per-sprint detail lives in
   are from the sprint in which they first landed (re-runs within
   run-to-run variance).
 
-### Changed
+#### Changed — Sprint 8.0.5
 
 - `performance.md` §Bench coverage today + roadmap moved from "Sprint
   8.0.5 will extend coverage" (pending) to listing the landed seven-bench
@@ -74,7 +352,7 @@ Updated at phase completion. Per-sprint detail lives in
   each bench itself (shapes vary per kernel family) rather than a
   hardcoded matmul-sized assumption.
 
-### Notes
+#### Notes — Sprint 8.0.5
 
 - No public API, runtime, or codegen changes. Additive measurement
   coverage only; no version bump.
@@ -138,8 +416,6 @@ Updated at phase completion. Per-sprint detail lives in
 
 - Example-crate `Cargo.lock` files refreshed to the workspace 0.4.0
   versions (they had drifted behind during the v0.4.0 release).
-
-## [0.4.0] — 2026-04-18 — Phase 7: Quantization, Attention, Candle Bridge
 
 ## [0.4.0] — 2026-04-18 — Phase 7: Quantization, Attention, Candle Bridge
 
