@@ -210,8 +210,27 @@ Updated at phase completion. Per-sprint detail lives in
   evolution"); net effect is a **tighter** structural gate than the
   original ±5% paired with explicit OS-noise tolerance on the tail
   axis.
+- CI: no-CUDA leg for kaio-candle (`candle-no-cuda`) — `cargo check
+  --no-default-features` + `cargo doc --no-deps --no-default-features`
+  on a toolkit-free runner, enforcing the crate's empty-shell story
+  (kaio-candle sits outside the workspace, so the existing jobs never
+  built it). `cargo test` is deliberately not part of the leg: Cargo
+  cannot feature-gate dev-dependencies, and the GPU tests' cudarc
+  dev-dependency probes the CUDA toolkit at build time even with
+  default features off.
 
 ### Changed
+
+- The `#[doc(hidden)]` FlashAttention backward building blocks
+  (`attention_flash_bwd_preprocess` / `_dkdv` / `_dq`) now validate
+  dimensions and buffer lengths before launch, matching every other
+  launch wrapper in kaio-ops. Previously only the public
+  `attention_flash_bwd` / `_causal` orchestrators validated; calling a
+  helper directly with a too-small buffer was a GPU out-of-bounds
+  write, and `d_k > 256` a silently truncated reduction (the backward
+  kernels cover dims with one 256-thread block per row). Five new GPU
+  rejection tests, including the `d_k = 512` preprocess case where the
+  bound is the only check that can fire.
 
 - **Breaking (kaio-core, pre-v1.0):** `FragmentA` / `FragmentB` /
   `alloc_a` / `alloc_b` renamed to `FragmentA_F16` / `FragmentB_F16`
