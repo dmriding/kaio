@@ -31,12 +31,12 @@ jobs:
     name: cargo check --features cuda (candle git HEAD)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install CUDA toolkit
         # Matches the CUDA version cudarc's cuda-version-from-build-system
         # feature expects on main (aligned with KAIO workspace cuda-12080).
-        uses: Jimver/cuda-toolkit@v0.2.19
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: "12.8.0"
           method: "network"
