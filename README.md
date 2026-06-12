@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/kaio.svg)](https://crates.io/crates/kaio)
 [![Documentation](https://docs.rs/kaio/badge.svg)](https://docs.rs/kaio)
 [![Build Status](https://github.com/dmriding/kaio/actions/workflows/ci.yml/badge.svg)](https://github.com/dmriding/kaio/actions)
-[![Coverage](https://img.shields.io/badge/coverage-88.39%25-green)](#test-coverage)
+[![Coverage](https://img.shields.io/badge/coverage-94.67%25-green)](#test-coverage)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](https://github.com/dmriding/kaio)
 [![Rust](https://img.shields.io/badge/rust-1.94+-orange.svg)](https://www.rust-lang.org/)
 
@@ -38,9 +38,11 @@ CUDA C++ because their framework doesn't support them.
   signatures catch dtype mismatches at compile time, not as silent GPU
   corruption at runtime.
 - **Drops into Candle's tensor graph** via [`kaio-candle`](kaio-candle/) —
-  eight forward `CustomOp` bindings (matmul_tc, matmul_int8, matmul_int4,
-  fused QKV variants, attention) plus matmul backward, with event-based
-  stream sync that's CUDA-Graph compatible.
+  twelve forward `CustomOp` bindings (matmul_tc f16 + bf16, sync + async,
+  matmul_int8, matmul_int4, fused QKV variants, attention,
+  FlashAttention) plus backward for all four matmul TC variants and
+  FlashAttention (plain + causal), with event-based stream sync that's
+  CUDA-Graph compatible.
 
 ## The problem KAIO solves
 
@@ -310,13 +312,14 @@ fn reduce(input: *const [f32], out: *mut [f32], n: u32) {
 | 2D blocks, FMA, math builtins            | `block_size = (16,16)`, `fma`, `sqrt`, `exp`, `log`, `tanh`, `abs`, `min`, `max`. |
 | Scalar tiled matmul                      | `kaio_ops::matmul` / `matmul_auto` — 31% of cuBLAS sgemm. Any SM.          |
 | Fused attention + FlashAttention         | `kaio_ops::attention`, `attention_flash` (O(d_k) memory). Any SM.          |
+| FlashAttention backward                  | `kaio_ops::attention_flash_bwd` / `_bwd_causal` + the `_with_stats` forwards (per-row logsumexp export). f32, single-head self-attention, `d_k ≤ 256`, three-kernel design (D-term preprocess, dK/dV, dQ), no atomics. Any SM. |
 | Tensor-core matmul                       | `kaio_ops::matmul_tc` / `matmul_tc_async` / `matmul_auto_tc` — f16 → f32, SM 8.0+, **worst-of-10 at 4096³ on RTX 4090: sync 107% / async 115% of cuBLAS sgemm**. |
-| Tensor-core matmul (bf16)                | `kaio_ops::matmul_tc_bf16` / `matmul_tc_bf16_async` / `matmul_auto_tc_bf16` — bf16 × bf16 → f32, SM 8.0+, `K % 16 == 0`. Sync and cp.async-pipelined siblings of `matmul_tc` / `matmul_tc_async` using `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`, plus the 2-way auto-tuner cache (`matmul_auto_tc_bf16` + `tune_matmul_tc_bf16`) for per-shape dispatch. Perf parity with the f16 path at 4096³ on RTX 4090 sm_89 — async SC-2 median ratio +0.72% / worst +1.55% within the ±3% / ±15% split-bound gate (Phase 9 aggregate release will publish the full table). |
+| Tensor-core matmul (bf16)                | `kaio_ops::matmul_tc_bf16` / `matmul_tc_bf16_async` / `matmul_auto_tc_bf16` — bf16 × bf16 → f32, SM 8.0+, `K % 16 == 0`. Sync and cp.async-pipelined siblings of `matmul_tc` / `matmul_tc_async` using `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`, plus the 2-way auto-tuner cache (`matmul_auto_tc_bf16` + `tune_matmul_tc_bf16`) for per-shape dispatch. Perf parity with the f16 path at 4096³ on RTX 4090 sm_89 — interleaved per-iter bf16/f16 ratio gate (alternating launch order): async median +0.72% / worst +1.55% within the ±3% / ±15% bounds. Full parity record in [docs/performance.md](docs/performance.md). |
 | INT8 dequantize-matmul (W8A8)            | `kaio_ops::matmul_int8` — symmetric i8 × i8 → f32 with single-scalar scale, SM 8.0+, K%32==0. **Worst-of-10 at 4096³: 84.07 TOPS (median 92.58, best 93.38).** |
 | INT4 dequantize-matmul (W4A16, GPTQ-style) | `kaio_ops::matmul_int4` — packed signed-INT4 weights × f16 activations → f32, f16 group scales (group_size=128), DEQUANT-F16 via `mma.sync.m16n8k16`, SM 8.0+, K%128==0. **Worst-of-10 at 4096³: 52.02 TOPS (median 57.52, best 58.04).** |
 | Fused tri-output QKV projection (INT8, W8A16) | `kaio_ops::qkv_project_int8` — f16 activations × i8 weights × per-projection scalar scales → three f16 outputs (Q, K, V). Decode tier ~3× faster than three standalone matmuls; prefill performance varies by shape. SM 8.0+, K%16==0, N%2==0. |
 | Fused tri-output QKV projection (INT4, W4A16) | `kaio_ops::qkv_project_int4` — packed INT4 weights × f16 activations × f16 group scales → three f16 outputs. Decode tier ~3× faster than three standalone calls; for prefill-heavy workloads at M≥2048, three separate `matmul_int4` calls may be faster. SM 8.0+, K%128==0, group_size=128. |
-| Auto-tuner + cache                       | `tune_matmul`, `matmul_auto`, `matmul_auto_tc` with JSON cache.            |
+| Auto-tuner + cache                       | `tune_matmul`, `matmul_auto`, `matmul_auto_tc`, `matmul_auto_tc_bf16` (+ `tune_*` siblings) with JSON cache. |
 | PTX inspection                           | `KAIO_DUMP_PTX=1`, `KAIO_PTX_STATS=1`, `KAIO_PTX_ANNOTATE=1`.              |
 
 See [docs.rs/kaio](https://docs.rs/kaio) for the full API surface and
@@ -451,13 +454,13 @@ for "did it compile → launch → produce right output?"
 
 ## Test coverage
 
-**88.39% line coverage** across the 21,569-line workspace (2,504 lines
+**94.67% line coverage** across the 21,893-line workspace (1,167 lines
 uncovered, mostly host-side parser error paths, the `xtask` repo-tooling
 binary, and the unreachable-by-design host stubs for GPU builtins in
 `kaio/src/gpu_builtins.rs`). Shipped kernel crates remain well above
-the workspace average — `kaio-ops/src/matmul_int8_kernel.rs` at 97.18%,
-`matmul_tc_kernel.rs` at 97.94%, `matmul_tc_async_kernel.rs` at 99.87%,
-`attention_tc_kernel.rs` at 97.70%. Measured on RTX 4090 sm_89 via
+the workspace average — `kaio-ops/src/matmul_int8_kernel.rs` at 97.10%,
+`matmul_tc_kernel.rs` at 97.78%, `matmul_tc_async_kernel.rs` at 99.74%,
+`attention_tc_kernel.rs` at 97.60%. Measured on RTX 4090 sm_89 via
 `cargo llvm-cov` with the host test suite and the full GPU-only
 `--ignored` test suite merged:
 
@@ -474,7 +477,7 @@ the GPU-ignored tests require actual NVIDIA hardware and can't run on
 standard GitHub Actions runners. See
 [`docs/testing-strategy.md`](docs/testing-strategy.md) for the full
 testing model (host tests, GPU integration tests, `ptxas_verify`
-structural checks, and the `matmul_tc_bench` performance harness).
+structural checks, and the `cargo xtask bench` performance harnesses).
 
 ## How it works
 
@@ -535,7 +538,16 @@ for a complete end-to-end example.
 - [x] **Phase 7** — Quantized kernels (INT8/INT4, fused QKV
   projection), candle integration (`kaio-candle` bridge — 8 forward ops,
   2 backward ops, event-based stream sync).
-- [ ] **Phase 8** — PyO3 bindings (Python access to `kaio-ops`).
+- [x] **Phase 8** — PyO3 scaffold (`kaio-py`: Device/Tensor NumPy
+  round-trip + `matmul_tc` smoke kernel, abi3 wheels). Wider op
+  coverage is user-request-driven from here. Pointer-syntax RFC
+  (`*const [T]` / `*mut [T]`) shipped as the Sprint 8.0 prelude.
+- [x] **Phase 9** — Training-side deepening: bf16 tensor-core matmul
+  family (sync / async / auto-tuner / candle fwd+bwd), FlashAttention
+  backward (three-kernel design + candle autograd bindings), and the
+  `ldmatrix` IR primitive (loader built and parked behind the
+  `ld.shared` default pending an XOR-swizzle tile layout). crates.io
+  v0.5.0.
 
 See [CHANGELOG.md](CHANGELOG.md) for per-release detail and
 [docs/phases.md](docs/phases.md) for deeper phase plans.
