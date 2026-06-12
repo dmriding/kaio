@@ -36,7 +36,7 @@ mod tensor;
 ///
 /// Sprint 8.1 exposes a minimal public surface: `Device`, `Tensor`,
 /// `KaioError`, and the smoke kernel `matmul_tc`. Broader op coverage
-/// lands in Sprint 8.2.
+/// lands alongside the first user-requested op expansion.
 #[pymodule]
 fn kaio(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<device::Device>()?;

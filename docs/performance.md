@@ -299,11 +299,11 @@ GemmEx is tracked tech debt for a future sprint.
 
 ### Why small sizes underperform cuBLAS
 
-At 256–1024, TC matmul lands at 3–8% of cuBLAS. This is expected:
+At 256–1024, TC matmul lands at ~5–17% of cuBLAS. This is expected:
 the multi-warp kernel launches `(N/64) × (M/64)` blocks and below
-1024² there are too few blocks to fill the SM array (1024² = 16
-blocks; one block per SM occupies only a sliver of the 4090's 128
-SMs). cuBLAS at small sizes uses dispatch heuristics that pick
+1024² there are too few blocks to fill the SM array (1024² = 256
+blocks — only ~2 per SM, far too few to hide latency; 256² is just
+16 blocks on the 4090's 128 SMs). cuBLAS at small sizes uses dispatch heuristics that pick
 launch shapes appropriate to the workload — a single library tuned
 for the full size range. KAIO's TC matmul is a single kernel
 optimized for the large-shape regime where TC throughput matters.
@@ -354,10 +354,47 @@ worst-of-10 tables — short-burst runs without a sustained clock ramp.
 The interleaved per-iter ratios are thermal-invariant, so the verdict
 holds; the absolutes are not comparable.)
 
+### bf16 tensor-core matmul: f16 parity (Sprints 9.1–9.1.4)
+
+`matmul_tc_bf16` / `matmul_tc_bf16_async` are operand-dtype siblings
+of the f16 kernels above: same tile geometry, warp layout,
+shared-memory pipeline, and f32 accumulator — only the `mma.sync`
+operand type changes. The f16 tables above therefore carry the
+absolute-throughput story; the bf16 claim is **parity with f16**,
+measured apples-to-apples by the regression gates that ship with the
+kernels (`matmul_tc_bf16_bench`, `matmul_tc_bf16_async_bench`): 10
+interleaved alternating-order runs at 4096³, per-iteration bf16/f16
+TFLOPS ratios, median within ±3% and worst iteration within ±15%,
+asserted as a hard failure in release builds.
+
+Measured parity record (RTX 4090 sm_89, release builds):
+
+| Pair at 4096³ | median ratio | worst-iter ratio |
+|---|---:|---:|
+| bf16 sync / f16 sync (sprint gate, repeated runs) | +0.92% to +0.96% | +1.98% to +9.37% |
+| bf16 async / f16 async (sprint gate) | +0.72% | +1.55% |
+| Release verification, 2026-06-12 (5 sync runs + 1 async run) | −0.03% to +1.42% | see note |
+
+Note on worst-iteration tails: across the five release-day sync runs,
+two isolated worst iterations exceeded the ±15% band — once in each
+direction (+17.8%, −22.2%) — while the desktop was under unrelated
+load, without moving the median in any run; three consecutive
+follow-up runs in the same session held both bounds (worst −8.6% to
++8.6%). The structural median has stayed inside ±1.5% in every
+observed run since the kernels landed.
+
+Absolute reference from a single `cargo xtask bench` invocation
+(2026-06-12, median of 20 timed iterations per shape — single-run
+reference, not the worst-of-10 protocol the f16 tables use): bf16
+sync 58.31 TFLOPS at 4096³ vs f16 59.20 in the same run; bf16 async
+64.91 vs f16 async 62.28. Same-run cuBLAS sgemm reference: 58.04
+TFLOPS (sync table) / 52.89 (async table) — the apples-to-apples
+disclaimer for the f16 tables applies unchanged.
+
 ### Path to higher throughput (future work)
 
 Above the current worst-of-10 ceiling (115% async / 107% sync of
-cuBLAS sgemm at 4096² on RTX 4090), the remaining headroom — and the
+cuBLAS sgemm at 4096³ on RTX 4090), the remaining headroom — and the
 wider sync-vs-async gap at all sizes — is bounded by structural
 choices this kernel hasn't yet made:
 
@@ -378,8 +415,9 @@ choices this kernel hasn't yet made:
   swizzled A-tile layout that de-conflicts the 32-B row stride is the
   lever that makes the already-built ldmatrix loader pay; the flip
   itself is one line.
-- **Larger mma shapes** — deferred from Phase 7; tracked under Phase
-  9 kernel deepening (bf16 TC matmul shipped in Sprints 9.1–9.1.4).
+- **Larger mma shapes** — deferred from Phase 7; still-open future
+  work (the other Phase 9 kernel-deepening item, bf16 TC matmul,
+  shipped in Sprints 9.1–9.1.4).
 
 ## Quantized Matmul Performance (Sprints 7.1 + 7.2)
 
@@ -470,10 +508,14 @@ W8A16 standalone op to serve as a fair 3× baseline — `matmul_int8`
 
 ## Attention Performance (Sprints 5.2 + 6.6 + Sprint 5.4)
 
-KAIO's public attention surface is **single-head self-attention**:
-`attention_tc` / `attention_tc_causal` (f16 Q/K/V → f32 out,
-tensor-core path) and `attention_flash` / `attention_flash_causal`
-(f32 Q/K/V → f32 out, online-softmax path). All four take either
+KAIO's public attention **forward** surface is **single-head
+self-attention**: `attention_tc` / `attention_tc_causal` (f16 Q/K/V →
+f32 out, tensor-core path) and `attention_flash` /
+`attention_flash_causal` (f32 Q/K/V → f32 out, online-softmax path),
+plus the `_with_stats` flash variants and the
+`attention_flash_bwd` / `attention_flash_bwd_causal` backward pair
+added in Sprint 9.2 (see the FlashAttention backward subsection
+below). All four forwards take either
 `(seq_q, seq_k, d_k, d_v)` or `(seq_len, d_k)` — there is no
 decode-style cross-attention kernel where `seq_q = 1, seq_k = N`;
 a decode-specific path would be a new kernel, not a shape
@@ -669,9 +711,17 @@ watch; the 262K and 1M rows are dispatch-overhead-bound.
 
 ## Bench coverage today + roadmap
 
-`cargo xtask bench` covers seven benchmark harnesses as of Sprint 8.0.5:
+`cargo xtask bench` covers ten benchmark harnesses as of Sprint 9.3:
 
 - `matmul_tc_bench` — f16 tensor-core matmul (sync + async) vs cuBLAS sgemm
+- `matmul_tc_bf16_bench` — bf16 sync vs f16 sync parity gate
+  (interleaved per-iter ratios, median ±3% / worst ±15%) + cuBLAS
+  sgemm reference
+- `matmul_tc_bf16_async_bench` — bf16 async vs f16 async parity gate
+  (same protocol)
+- `matmul_tc_ldmatrix_bench` — `ldmatrix` vs `ld.shared` fragment-A
+  A/B regression gate (one-sided: median ≥ 97%, worst ≥ 85%, bit-exact
+  output pre-gate)
 - `matmul_int8_bench` — W8A8 symmetric INT8 matmul
 - `matmul_int4_bench` — W4A16 GPTQ-style INT4 matmul
 - `qkv_project_bench` — fused INT4 vs 3× `matmul_int4`; INT8 absolute TOPS
@@ -691,4 +741,6 @@ intentionally out of scope.
   requires raw FFI wrapping beyond `cudarc` 0.19's exposure.
 - Multi-block reduction variants of `rms_norm` / `layer_norm` /
   `softmax` — Ops Track item when those kernels ship.
-- bf16 TC matmul / Hopper `wgmma` — Phase 9 kernel deepening.
+- Hopper `wgmma` — future kernel-deepening work (the bf16 TC matmul
+  half of this item shipped in Sprints 9.1–9.1.4 with its own
+  harnesses, listed above).

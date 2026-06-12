@@ -1,6 +1,6 @@
-//! Sprint 7.3 D9 showcase — end-to-end quantized attention block.
+//! Sprint 7.3 showcase — end-to-end quantized attention block.
 //!
-//! Demonstrates the full Phase 7 pipeline shipping on `phase7-rest`:
+//! Demonstrates the full Phase 7 quantization pipeline:
 //! fused `qkv_project_int4` (W4A16) → three `f16` projections feeding
 //! directly into `attention_tc`, compared against a non-quantized f16
 //! baseline that uses three `matmul_tc` calls for the projection stage.

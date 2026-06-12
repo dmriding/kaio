@@ -17,7 +17,7 @@ Master plan: [phase9_master_plan.md](phase9_master_plan.md)
 | 9.1.4 | kaio-candle bf16 backward bindings (forward-reuse) | ✅ Complete (2026-05-18) | Bf16 backward shipped via the same forward-reuse pattern used by f16 (mirror of Sprint 7.4d): `dA = grad @ B^T`, `dB = A^T @ grad`, no new PTX. 8 new gradient-correctness GPU tests green (4 per binding, mirroring the f16 coverage). Dual-tolerance `rel < 1e-2 \|\| abs < 1e-3` (identical to f16) held without empirical fallback. 2 negative-backward tests from 9.1.3 deleted in same commit as the bwd impl that lifted their contracts. Closes 9.1.x as 4 sub-sprints (9.1.5 consolidated into 9.1.3 + 9.1.4 mid-phase; cross-product is complete). [sprint_9_1_4.md](sprint_9_1_4.md) |
 | 9.2 | FlashAttention backward (`attention_flash_bwd` + causal, candle bridge integration) | ✅ Complete (2026-06-12) | The v0.5.0 hard gate. `_with_stats` forwards (save row logsumexp `L = m + log(l)`; out zero-diff vs shipped fwd) + three new backward kernels (D-preprocess, dK/dV, dQ — block-per-row, loop-nest swap, no atomics, 18–22 regs/thread on sm_89) + first kaio-candle flash binding (fwd + bwd, f32 end-to-end, `CustomOp3`). CPU f64 analytical oracle with FD self-check as primary gate; seq=1 closed-form gate + full `{32,64,128}²` matrix + wide-range-dO cancellation cases green. candle bwd recomputes L (no saved-intermediate channel in CustomOp3; forward determinism verified bit-exact). bwd/fwd 2.5× at seq 128 → ~10.6× at 2048 (block-per-row property; tiled rework is the named perf follow-up). [sprint_9_2.md](sprint_9_2.md) |
 | 9.3 | `ldmatrix.sync.aligned` IR primitive + `matmul_tc` fragment-A loader rewire | ✅ Complete (2026-06-12) | `TensorCoreOp::LdMatrix` (m8n8 b16, x2/x4, ±trans; min_sm 75 — the first sub-Ampere tensor-core op, ISA-audited + ptxas-probed) with register-type validation, emission/module-validate/ptxas-verify coverage at sm_75+sm_80. New fragment-A loader (4 ALU + 1 `ldmatrix.x4` per stripe vs ~9 ALU + 4 `ld.shared`) proven bit-identical to the shipped loader by a GPU contract gate. Loader rewire **measured at the ±3% noise floor** (4096³ interleaved medians 102.75/104.49/102.82% over 3 release runs; bank-conflict pattern unchanged at 32-B stride) → default stays `ld.shared`, ldmatrix ships built-and-parked behind `FragALoaderKind` + hidden `matmul_tc_ldmatrix`, guarded by a permanent A/B bench (bit-exact pre-gate + one-sided non-regression gates, all green). XOR-swizzle is the named flip-on lever. [sprint_9_3.md](sprint_9_3.md) |
-| v0.5.0 | Phase 9 aggregate release | 📝 Planned | All Phase 9 sprints shipped (9.2 hard gate + 9.3); surface frozen pending the phase-close adversarial review + version-bump pass |
+| v0.5.0 | Phase 9 aggregate release | ✅ Complete (2026-06-12) | Workspace crates → 0.5.0, kaio-candle → 0.2.0 (kaio-py unchanged). Aggregates 9.1–9.3 plus the previously-unreleased Sprint 8.0.5 / 8.1 entries; coverage badge refreshed (94.67%); bf16 parity section added to performance.md; release review completed pre-publish |
 
 ## Branch
 
@@ -29,8 +29,8 @@ phase but do not bump versions on their own.
 ## Key References
 
 - **Master plan:** [phase9_master_plan.md](phase9_master_plan.md)
-- **Phases roadmap:** [`../../phases.md`](../../../phases.md) Phase 9
-- **Performance tracking:** [`../../performance.md`](../../../performance.md)
+- **Phases roadmap:** [`phases.md`](../../../phases.md) Phase 9
+- **Performance tracking:** [`performance.md`](../../../performance.md)
   §"Path to higher throughput" — the sync-vs-async gap that 9.3
   targets.
 - **Sprint 7.4d bwd precedent:** [`../phase7/sprint_7_4d.md`](../phase7/sprint_7_4d.md)
@@ -44,7 +44,7 @@ phase but do not bump versions on their own.
 
 | Op | Variant | Sprint | Input / output types | Notes |
 |---|---|---|---|---|
-| `matmul_tc_bf16` | sync | 9.1 | `bf16 × bf16 → f32` | SM 8.0+, K%16==0, edge-tile predication on M/N. ≈ 91.8% of cuBLAS sgemm at 4096³ on sm_89; SC-2 split-bound gate (per-iter bf16/f16 median ±3% + worst ±15%) green. |
+| `matmul_tc_bf16` | sync | 9.1 | `bf16 × bf16 → f32` | SM 8.0+, K%16==0, edge-tile predication on M/N. Median ≈ 91.8% of same-run cuBLAS sgemm at 4096³ on sm_89 in the sprint-gate runs; SC-2 split-bound gate (per-iter bf16/f16 median ±3% + worst ±15%) green. |
 | `matmul_tc_bf16_async` | async | 9.1.1 | `bf16 × bf16 → f32` | SM 8.0+, K%16==0, edge-tile predication on M/N. cp.async-pipelined A staging (double-buffered, size=16 issue); cross-product of (f16 async × bf16 sync). SC-2 split-bound gate (per-iter bf16_async/f16_async median +0.72% within ±3%, worst +1.55% within ±15%) green at 4096³ on sm_89. |
 | `matmul_auto_tc_bf16` + `tune_matmul_tc_bf16` | auto-tuned | 9.1.2 | `bf16 × bf16 → f32` | SM 8.0+, K%16==0. 2-way dispatch cache between `matmul_tc_bf16` (sync) and `matmul_tc_bf16_async` (async). Shares the f16 auto-tuner's on-disk JSON cache (`~/.cache/kaio/tune_cache.json` or `KAIO_TUNE_CACHE` override); entries disambiguated by `kernel` field. Cache-miss fallback inherits the f16 3072 threshold (separate `ASYNC_FALLBACK_MAX_DIM_THRESHOLD_BF16` symbol so it can drift independently). |
 | `attention_flash_with_stats` (+ causal) | FA fwd + saved logsumexp | 9.2 | `f32 → f32` (+ `[seq_len]` f32 stats) | Kernel copy of the shipped flash forward plus one tail store (`L = m + log(l)` per query row). Output zero-diff vs the plain forward; shipped kernels untouched. Deterministic (bit-identical stats across runs, test-locked). |

@@ -66,8 +66,8 @@ attention_flash(&device, &q, &k, &v, &mut out, seq_len, d_k)?;
 
 Single launch producing three `GpuBuffer<f16>` outputs ready for the
 attention path. Saves 2× global activation reads vs three standalone
-matmul calls. Per-block tile `64 × 16` (the D3.4 rollback that resolved
-the register-pressure trigger).
+matmul calls. Per-block tile `64 × 16` (rolled back from a larger
+tile to resolve register pressure).
 
 | Op | Weight format | Min SM | Divisibility |
 |----|---------------|--------|--------------|

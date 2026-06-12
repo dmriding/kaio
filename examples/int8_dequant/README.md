@@ -10,8 +10,9 @@ dequant_f32 = (i8_value) * scale
 ```
 
 This example demonstrates the dequantize primitive alone — it does NOT
-fuse with matmul. Full INT8 dequantize-matmul using tensor cores is the
-planned Phase 7.1 milestone.
+fuse with matmul. Full INT8 dequantize-matmul using tensor cores
+shipped in v0.3.0 as `kaio_ops::matmul_int8` — see the `int8_matmul`
+example.
 
 ## The kernel
 
@@ -83,7 +84,7 @@ explicitly flags this case as the motivating scenario.
   this pattern — just not in this example.
 - **No matmul**: this is the dequantize primitive only. The matmul
   fusion (reading dequantized weights directly into a tensor-core
-  accumulator) is Phase 7.1.
+  accumulator) shipped separately as `kaio_ops::matmul_int8`.
 - **Single-block**: `n_words <= 256` (1024 output elements). Multi-block
   is a one-line change to the thread-index formula, but the single-block
   case keeps the pattern visible.

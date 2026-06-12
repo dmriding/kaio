@@ -187,6 +187,6 @@ re-verified individually at close.
   orchestration, cross-attention backward (different mask-predicate
   shape), f16/bf16 flash variants, `attention_tc` backward.
 
-9.2 closes the v0.5.0 hard gate. Remaining before the release:
-Sprint 9.3 (`ldmatrix`, optional) and the phase-close adversarial
-review + version-bump pass.
+9.2 closed the v0.5.0 hard gate. Sprint 9.3 (`ldmatrix`) followed the
+same day; the release review + version-bump pass closed the phase as
+v0.5.0 (2026-06-12).

@@ -4,7 +4,7 @@
 //! [candle](https://github.com/huggingface/candle) and the
 //! [KAIO](https://github.com/dmriding/kaio) GPU kernel library.
 //!
-//! ## Status — v0.1.0 (initial release)
+//! ## Status — v0.2.0
 //!
 //! Bridges 12 ops across two patterns:
 //!
@@ -81,7 +81,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! kaio-candle = { version = "0.1", features = ["cuda"] }
+//! kaio-candle = { version = "0.2", features = ["cuda"] }
 //! ```
 //!
 //! The default (feature-less) build produces an empty shell — attempting
@@ -110,11 +110,10 @@
 //! The [`std::sync::Arc<kaio::prelude::KaioDevice>`] you construct and pass
 //! to `kaio-candle` wrapper functions is independent of the
 //! `candle_core::Device` you use for your tensors. Both retain the same CUDA
-//! primary context via `cuDevicePrimaryCtxRetain` (verified via scratch
-//! probe in `candle-probe/src/bin/probe_ctx.rs`); neither owns the other.
+//! primary context via `cuDevicePrimaryCtxRetain`; neither owns the other.
 //! Drop order between them is unconstrained.
 //!
-//! ## Known limitations (v0.1)
+//! ## Known limitations (v0.2)
 //!
 //! - **Non-contiguous tensors rejected.** Call `.contiguous()?` upstream.
 //! - **Non-zero storage offset rejected** (e.g. from `.narrow(...)` / `.slice(...)`).
@@ -134,8 +133,8 @@
 //! - **Bench numbers vs direct-call gap.** Each bridge call issues event-
 //!   based stream sync (two `join()` calls — `cuEventRecord` +
 //!   `cuStreamWaitEvent` per sync point). This replaced the heavier
-//!   `cuCtxSynchronize` from v0.1 but still allocates a transient
-//!   `CudaEvent` per call. KAIO's published %-of-cuBLAS numbers are
+//!   `cuCtxSynchronize` fencing used during early bridge development
+//!   but still allocates a transient `CudaEvent` per call. KAIO's published %-of-cuBLAS numbers are
 //!   measured via direct kaio-ops calls, not through the bridge.
 
 #![warn(missing_docs)]

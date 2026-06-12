@@ -1,9 +1,10 @@
 # kaio (Python)
 
 Python bindings for [KAIO](https://github.com/dmriding/kaio) — a
-Rust-native GPU kernel authoring framework. Tensor-core matmul,
-attention, and quantized kernels callable from Python on Windows +
-Linux, no CUDA toolkit install required.
+Rust-native GPU kernel authoring framework. Currently exposes the
+tensor-core matmul smoke kernel plus Device/Tensor NumPy round-trip
+on Windows + Linux, no CUDA toolkit install required; further ops
+are user-request-driven.
 
 ## Status
 
@@ -43,8 +44,8 @@ Linux, no CUDA toolkit install required.
   `cudarc`'s `dynamic-loading`)
 - SM 8.0+ (Ampere or newer) for tensor-core ops
 - Rust toolchain + [maturin](https://www.maturin.rs/) **for
-  development only** — wheels built in Sprint 8.4+ will not require
-  these on end-user machines.
+  development only** — published wheels (triggered by the first user
+  request for them) will not require these on end-user machines.
 
 ## Quick start (development)
 
@@ -110,8 +111,8 @@ except kaio.KaioError as e:
 ```
 
 Subclasses (`KaioValidationError`, `KaioDeviceError`,
-`KaioPtxError`) land in Sprint 8.2 when the op surface is wide
-enough to justify them.
+`KaioPtxError`) land when the op surface grows wide enough to
+justify them — user-request-driven, like the op coverage itself.
 
 ## Known limitations
 

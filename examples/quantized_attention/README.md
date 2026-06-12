@@ -1,7 +1,7 @@
 # quantized_attention — end-to-end Phase 7 pipeline
 
-Sprint 7.3 D9 showcase. Demonstrates the full Phase 7 quantization pipeline
-shipping on `phase7-rest`:
+Sprint 7.3 showcase. Demonstrates the full Phase 7 quantization
+pipeline (shipped in v0.4.0):
 
 ```text
 X [seq, d_model] f16
@@ -27,7 +27,7 @@ cargo run --release
 
 Three quality metrics on the final attention output vs the f16 reference:
 
-- **Cosine similarity** — primary pass/fail. Plan D9 INT4 threshold: ≥ 0.98.
+- **Cosine similarity** — primary pass/fail; threshold ≥ 0.98.
 - **Max absolute error** — worst-case row outlier.
 - **Mean relative error** — aggregate quality.
 
@@ -46,9 +46,9 @@ specific quantization recipe.
 
 ## Why INT4 (not INT8)
 
-Per the Sprint 7.3 plan D9: "INT4 is the more impressive demo; falls
-back to INT8 in the README prose if INT4 is deferred." INT4 shipped, so
-this example uses INT4. Swapping to INT8 is a ~15-line change: replace
+INT4 exercises the packing, group-scales, and dequant chain that the
+INT8 path does not, making it the more complete pipeline demo.
+Swapping to INT8 is a ~15-line change: replace
 `qkv_project_int4` with `qkv_project_int8`, drop the packing + scales
 helpers, pass a scalar per-projection scale instead of a scales tensor.
 

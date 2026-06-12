@@ -13,14 +13,18 @@
 //! - [`kaio_core`] — PTX IR types, instruction emitters, PtxWriter
 //! - [`kaio_runtime`] — CUDA device management, buffers, PTX loading, kernel launch
 //! - `kaio_macros` — `#[gpu_kernel]` proc macro (re-exported here)
-//! - `kaio_ops` — pre-built GPU operations (matmul, more planned).
+//! - `kaio_ops` — pre-built GPU operations (scalar + tensor-core matmul
+//!   in f16/bf16, quantized INT8/INT4 matmul, fused QKV projections,
+//!   attention and FlashAttention with backward, auto-tuners).
 //!   Separate crate, not re-exported from `kaio`. Add with `cargo add kaio-ops`.
 //!
 //! ## Status
 //!
-//! **Phase 4 complete.** Tiled matmul (31% of cuBLAS sgemm), `kaio-ops`
-//! crate, 2D thread blocks, FMA, PTX inspection tools. See the
-//! repository README for the full feature table and roadmap.
+//! **Phase 9 complete (v0.5.0).** Tensor-core matmul family (f16 +
+//! bf16, sync + `cp.async`), quantized INT8/INT4 ops, FlashAttention
+//! forward + backward, candle bridge (`kaio-candle`), `ldmatrix` IR
+//! primitive. See the repository README for the full feature table
+//! and roadmap.
 
 #![warn(missing_docs)]
 

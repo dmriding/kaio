@@ -164,6 +164,6 @@ real path" claim. CHANGELOG updated.
   fragment B migrate to ldmatrix, the `FragALoaderKind::LdShared` arm,
   the hidden sibling, and the A/B bench retire together.
 
-9.3 closes Phase 9's planned sprint list. Remaining before v0.5.0:
-the phase-close adversarial review over the frozen surface and the
-version-bump hygiene pass.
+9.3 closed Phase 9's planned sprint list. The release review over the
+frozen surface and the version-bump pass followed, closing the phase
+as v0.5.0 (2026-06-12).
