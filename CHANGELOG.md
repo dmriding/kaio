@@ -8,7 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Updated at phase completion. Per-sprint detail lives in
 [docs/development/sprints/](docs/development/sprints/).
 
-## [Unreleased] — Phase 9 (Sprints 9.1, 9.1.1, 9.1.2, 9.1.3, 9.1.4, 9.2, 9.3)
+## [0.5.0] — 2026-06-12 — Phase 9: bf16 Tensor Cores, FlashAttention Backward, ldmatrix
+
+Covers Sprints 9.1, 9.1.1–9.1.4, 9.2, and 9.3, plus the
+previously-unreleased Sprint 8.1 and 8.0.5 entries (appended at the end
+of this version's section). kaio-candle moves 0.1.1 → 0.2.0 in the same
+release.
 
 ### Added
 
@@ -166,8 +171,9 @@ Updated at phase completion. Per-sprint detail lives in
   bank-conflict-padded Tile B, D10 fragment-loader hoist). Edge-tile
   predication on M and N; `K % 16 == 0` is the only divisibility
   constraint (the mma K-tile is structural). Requires SM 8.0+
-  (Ampere). Async / auto-tuner / candle bf16 variants are scheduled
-  as sub-sprints 9.1.1–9.1.5 and not gated by 9.1's close.
+  (Ampere). Async / auto-tuner / candle bf16 variants followed as
+  sub-sprints 9.1.1–9.1.4 (all in this release) and were not gated
+  by 9.1's close.
 - New IR variant `TensorCoreOp::MmaSyncBf16` in `kaio-core` —
   dedicated bf16 mma sibling of `MmaSyncInt8`. Emits
   `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. Takes the
@@ -260,8 +266,9 @@ Updated at phase completion. Per-sprint detail lives in
   bf16/f16 ratio: median 100.92–100.96% (delta +0.92% to +0.96% —
   well inside the ±3% structural bound), worst 101.98–109.37% (delta
   +1.98% to +9.37% — inside the ±15% catastrophic-tail bound). bf16
-  at 4096³ is 91.8% of cuBLAS sgemm — same regime as f16 (82.3% per
-  the existing perf doc). cuBLAS sgemm comparison remains
+  at 4096³ reached a per-run median of 91.8% of same-run cuBLAS sgemm
+  in the sprint-gate runs — the same regime as f16 measured in those
+  runs. cuBLAS sgemm comparison remains
   project-local-reference, not apples-to-apples; the
   `cublasGemmEx`-bf16 future reference is tracked in
   `docs/development/tech_debt.md`.
@@ -274,12 +281,14 @@ Updated at phase completion. Per-sprint detail lives in
 - **No changes to f16 numerical behaviour.** The C0 rename touches
   type names only; the f16 kernels (`matmul_tc`, `matmul_tc_async`)
   emit byte-identical PTX before and after the rename.
-- `docs/performance.md` is not updated mid-phase per the master plan
-  — perf table bumps land in one piece at v0.5.0 close.
+- `docs/performance.md` was not updated mid-phase; the bf16 parity
+  section and bench-roster refresh landed in one piece at v0.5.0
+  close (this release), alongside the Sprint 9.2 backward and Sprint
+  9.3 ldmatrix sections added when those sprints shipped.
 
-## [Unreleased] — Sprint 8.1: PyO3 scaffold
+### Sprint 8.1 — PyO3 scaffold (previously unreleased, first shipped in 0.5.0)
 
-### Added
+#### Added — Sprint 8.1
 
 - New standalone `kaio-py` crate — PyO3 scaffold for the Python
   bindings (Phase 8). Exposes `kaio.Device`, `kaio.Tensor` (NumPy
@@ -293,7 +302,7 @@ Updated at phase completion. Per-sprint detail lives in
 - abi3-py310 wheel target — one wheel per architecture + platform
   runs across Python 3.10 / 3.11 / 3.12+ unchanged.
 
-### Notes
+#### Notes — Sprint 8.1
 
 - No public API, runtime, or codegen changes on the existing Rust
   crates. `kaio-py` is additive — like `kaio-candle`, it lives
@@ -314,9 +323,9 @@ Updated at phase completion. Per-sprint detail lives in
   every Rust release. Rationale is documented in the Phase 8 master
   plan.
 
-## [Unreleased] — Sprint 8.0.5: Bench coverage extension
+### Sprint 8.0.5 — Bench coverage extension (previously unreleased, first shipped in 0.5.0)
 
-### Added
+#### Added — Sprint 8.0.5
 
 - `cargo xtask bench` now drives seven benchmark harnesses covering
   the shipped high-level / public kernel families plus the showcase
@@ -334,7 +343,7 @@ Updated at phase completion. Per-sprint detail lives in
   are from the sprint in which they first landed (re-runs within
   run-to-run variance).
 
-### Changed
+#### Changed — Sprint 8.0.5
 
 - `performance.md` §Bench coverage today + roadmap moved from "Sprint
   8.0.5 will extend coverage" (pending) to listing the landed seven-bench
@@ -343,7 +352,7 @@ Updated at phase completion. Per-sprint detail lives in
   each bench itself (shapes vary per kernel family) rather than a
   hardcoded matmul-sized assumption.
 
-### Notes
+#### Notes — Sprint 8.0.5
 
 - No public API, runtime, or codegen changes. Additive measurement
   coverage only; no version bump.
@@ -407,8 +416,6 @@ Updated at phase completion. Per-sprint detail lives in
 
 - Example-crate `Cargo.lock` files refreshed to the workspace 0.4.0
   versions (they had drifted behind during the v0.4.0 release).
-
-## [0.4.0] — 2026-04-18 — Phase 7: Quantization, Attention, Candle Bridge
 
 ## [0.4.0] — 2026-04-18 — Phase 7: Quantization, Attention, Candle Bridge
 
