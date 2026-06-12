@@ -49,6 +49,12 @@ half = "2"
 # cudarc handle for the raw-call bit-exact cross-check side of the test.
 # Matches kaio-candle's dynamic-linking feature set so the feature graph stays
 # uniform between main build and dev build.
+#
+# Unconditional by necessity: Cargo does not support optional
+# dev-dependencies, so `cargo test` requires the CUDA toolkit even with
+# --no-default-features (cuda-version-from-build-system probes nvcc at
+# build time). The no-CUDA story is `cargo check` / `cargo doc` only —
+# see the comment above `mod bridge` in src/lib.rs.
 cudarc = { version = "0.19.4", default-features = false, features = ["driver", "std", "dynamic-linking", "cuda-version-from-build-system", "f16"] }
 # Terse `anyhow::Result<()>` across candle / cudarc / kaio error types in tests.
 anyhow = "1"

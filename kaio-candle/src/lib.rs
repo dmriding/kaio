@@ -145,8 +145,13 @@
 // get a clear "function not found" when they try to call into the bridge
 // (e.g. `kaio_candle::matmul_tc(...)`), rather than a lib-level
 // `compile_error!` that breaks `cargo check` / `cargo doc` on no-CUDA CI
-// legs. The no-default build is exercised in CI — it must succeed on a
-// no-CUDA-toolkit host.
+// legs. The supported no-CUDA commands are `cargo check
+// --no-default-features` and `cargo doc --no-deps --no-default-features`,
+// exercised by the CI `candle-no-cuda` leg — they must succeed on a
+// no-CUDA-toolkit host. `cargo test` is NOT in that set: Cargo cannot
+// feature-gate dev-dependencies, so the GPU tests' unconditional cudarc
+// dev-dependency probes the CUDA toolkit at build time even with default
+// features off.
 #[cfg(feature = "cuda")]
 mod bridge;
 
