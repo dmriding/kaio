@@ -110,11 +110,15 @@ pressure cut against the D10 orthogonality requirement, so 6.7b
 shipped without it and the LDG.128 variant stays as a future-sprint
 anchor.
 
-A dedicated sync-path-optimisation sprint (or Phase 7 work on
-`ldmatrix.sync.aligned`) can pick this up cleanly by designing the
-b32-to-b16 split primitive properly first, then wiring LDG.128 into
-`emit_mw_load_tile_b_16x64` as a per-block-setp-gated fast path
-(interior blocks with `N % 8 == 0`).
+A dedicated sync-path-optimisation sprint can pick this up cleanly by
+designing the b32-to-b16 split primitive properly first, then wiring
+LDG.128 into `emit_mw_load_tile_b_16x64` as a per-block-setp-gated
+fast path (interior blocks with `N % 8 == 0`). (`ldmatrix.sync.aligned`
+itself shipped as an IR primitive in Sprint 9.3 — measured at the
+noise floor on the fragment-A path and parked pending an XOR-swizzle
+tile layout; see `docs/performance.md`. The natural future sprint
+combines the swizzle, the ldmatrix default flip, and this LDG.128
+item, since all three attack the same sync-path bound.)
 
 **Added:** Sprint 6.7b | **Sprint:** TBD (post-0.2.0)
 
